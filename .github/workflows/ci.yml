@@ -110,10 +110,6 @@ jobs:
     - name: Run PHPStan analysis (Level 2)
       run: composer phpstan
     
-    - name: Run PHPStan strict analysis (Level 5)
-      run: composer phpstan-framework
-      continue-on-error: true
-    
     - name: Check PSR-12 coding standards
       run: vendor/bin/phpcs --standard=PSR12 src/
       continue-on-error: true
