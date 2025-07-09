@@ -1,5 +1,5 @@
 {
-    "name": "yetisearch/yetisearch",
+    "name": "rhukster/yetisearch",
     "description": "A powerful, pure-PHP search engine library with advanced features",
     "type": "library",
     "license": "MIT",
@@ -10,14 +10,14 @@
         }
     ],
     "require": {
-        "php": "^7.4|^8.0",
+        "php": "^7.4|^8.0|^8.1|^8.2|^8.3|^8.4",
         "ext-json": "*",
         "ext-mbstring": "*",
         "ext-pdo": "*",
         "ext-sqlite3": "*",
-        "psr/log": "^1.1|^2.0|^3.0",
-        "wamania/php-stemmer": "^3.0",
-        "voku/portable-utf8": "^6.0"
+        "psr/log": "^1.1",
+        "voku/portable-utf8": "^6.0",
+        "wamania/php-stemmer": "^3.0"
     },
     "require-dev": {
         "fakerphp/faker": "^1.19",
