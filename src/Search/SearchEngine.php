@@ -69,10 +69,11 @@ class SearchEngine implements SearchEngineInterface
             $storageQuery = $this->buildStorageQuery($processedQuery);
             
             // If deduplicating, we need to get ALL results first
+            $originalLimit = $storageQuery['limit'];
+            $originalOffset = $storageQuery['offset'];
+            
             if ($options['unique_by_route'] ?? false) {
                 // Temporarily override limit to get all results
-                $originalLimit = $storageQuery['limit'];
-                $originalOffset = $storageQuery['offset'];
                 $storageQuery['limit'] = $this->config['max_results'];
                 $storageQuery['offset'] = 0;
             }

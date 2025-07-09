@@ -15,4 +15,6 @@ interface AnalyzerInterface
     public function normalize(string $text): string;
     
     public function extractKeywords(string $text, int $limit = 10): array;
+    
+    public function getStopWords(string $language): array;
 }

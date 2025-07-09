@@ -1,0 +1,12 @@
+parameters:
+    level: 2
+    paths:
+        - src
+    excludePaths:
+        - src/Contracts/*
+    reportUnmatchedIgnoredErrors: false
+    ignoreErrors:
+        -
+            identifier: missingType.iterableValue
+        -
+            identifier: missingType.generics
