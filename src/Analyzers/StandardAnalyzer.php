@@ -31,6 +31,7 @@ class StandardAnalyzer implements AnalyzerInterface
     {
         $language = $language ?? $this->detectLanguage($text);
         
+        $originalText = $text;
         $text = $this->normalize($text);
         $tokens = $this->tokenize($text);
         $tokens = $this->removeStopWords($tokens, $language);
@@ -43,7 +44,11 @@ class StandardAnalyzer implements AnalyzerInterface
             }
         }
         
-        return $analyzed;
+        return [
+            'tokens' => $analyzed,
+            'original' => $originalText,
+            'language' => $language
+        ];
     }
     
     public function tokenize(string $text): array
@@ -239,7 +244,7 @@ class StandardAnalyzer implements AnalyzerInterface
         ];
     }
     
-    private function getStopWords(string $language): array
+    public function getStopWords(string $language): array
     {
         return $this->stopWords[$language] ?? $this->stopWords['english'];
     }

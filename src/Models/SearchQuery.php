@@ -19,9 +19,28 @@ class SearchQuery
     private array $facets = [];
     private array $aggregations = [];
     
-    public function __construct(string $query)
+    public function __construct(string $query, array $options = [])
     {
         $this->query = $query;
+        
+        if (isset($options['limit'])) {
+            $this->limit = $options['limit'];
+        }
+        if (isset($options['offset'])) {
+            $this->offset = $options['offset'];
+        }
+        if (isset($options['language'])) {
+            $this->language = $options['language'];
+        }
+        if (isset($options['fuzzy'])) {
+            $this->fuzzy = $options['fuzzy'];
+        }
+        if (isset($options['fields'])) {
+            $this->fields = $options['fields'];
+        }
+        if (isset($options['highlight'])) {
+            $this->highlight = $options['highlight'];
+        }
     }
     
     public function getQuery(): string
