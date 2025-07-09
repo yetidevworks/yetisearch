@@ -27,7 +27,7 @@ class StandardAnalyzer implements AnalyzerInterface
         $this->loadStopWords();
     }
     
-    public function analyze(string $text, string $language = null): array
+    public function analyze(string $text, ?string $language = null): array
     {
         $language = $language ?? $this->detectLanguage($text);
         
@@ -80,7 +80,7 @@ class StandardAnalyzer implements AnalyzerInterface
         return array_values($tokens);
     }
     
-    public function stem(string $word, string $language = null): string
+    public function stem(string $word, ?string $language = null): string
     {
         $language = $language ?? 'english';
         
@@ -95,7 +95,7 @@ class StandardAnalyzer implements AnalyzerInterface
         return $this->stemmers[$language]->stem($word);
     }
     
-    public function removeStopWords(array $tokens, string $language = null): array
+    public function removeStopWords(array $tokens, ?string $language = null): array
     {
         $language = $language ?? 'english';
         $stopWords = $this->getStopWords($language);
