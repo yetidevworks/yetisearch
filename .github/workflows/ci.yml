@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        php-version: ['7.4', '8.0', '8.1', '8.2', '8.3']
+        exclude:
+          # Skip some combinations to save CI time
+          - os: windows-latest
+            php-version: '7.4'
+          - os: windows-latest
+            php-version: '8.0'
+          - os: macos-latest
+            php-version: '7.4'
+          - os: macos-latest
+            php-version: '8.0'
+    
+    name: PHP ${{ matrix.php-version }} on ${{ matrix.os }}
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: ${{ matrix.php-version }}
+        extensions: mbstring, intl, pdo_sqlite, sqlite3, fileinfo
+        coverage: xdebug
+        tools: composer:v2
+    
+    - name: Validate composer.json and composer.lock
+      run: composer validate --strict
+    
+    - name: Get Composer Cache Directory
+      id: composer-cache
+      shell: bash
+      run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+    
+    - name: Cache Composer dependencies
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.composer-cache.outputs.dir }}
+        key: ${{ runner.os }}-php${{ matrix.php-version }}-composer-${{ hashFiles('**/composer.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-php${{ matrix.php-version }}-composer-
+    
+    - name: Install dependencies
+      run: composer install --prefer-dist --no-progress --no-interaction
+    
+    - name: Create test database directory
+      run: mkdir -p tests/fixtures
+    
+    - name: Run test suite
+      run: composer test
+    
+    - name: Generate test coverage report
+      if: matrix.os == 'ubuntu-latest' && matrix.php-version == '8.3'
+      run: |
+        XDEBUG_MODE=coverage vendor/bin/phpunit --coverage-clover coverage.xml
+    
+    - name: Upload coverage to Codecov
+      if: matrix.os == 'ubuntu-latest' && matrix.php-version == '8.3'
+      uses: codecov/codecov-action@v4
+      with:
+        files: ./coverage.xml
+        fail_ci_if_error: false
+        verbose: true
+
+  code-quality:
+    runs-on: ubuntu-latest
+    
+    name: Code Quality
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: '8.3'
+        extensions: mbstring, intl, pdo_sqlite, sqlite3
+        tools: composer:v2, phpstan, psalm
+    
+    - name: Get Composer Cache Directory
+      id: composer-cache
+      run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+    
+    - name: Cache Composer dependencies
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.composer-cache.outputs.dir }}
+        key: ${{ runner.os }}-composer-quality-${{ hashFiles('**/composer.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-composer-quality-
+    
+    - name: Install dependencies
+      run: composer install --prefer-dist --no-progress --no-interaction
+    
+    - name: Run PHPStan analysis (Level 2)
+      run: composer phpstan
+    
+    - name: Run PHPStan strict analysis (Level 5)
+      run: composer phpstan-framework
+      continue-on-error: true
+    
+    - name: Check PSR-12 coding standards
+      run: vendor/bin/phpcs --standard=PSR12 src/
+      continue-on-error: true

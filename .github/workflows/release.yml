@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: '8.3'
+        extensions: mbstring, intl, pdo_sqlite, sqlite3
+        tools: composer:v2
+    
+    - name: Validate composer.json
+      run: composer validate --strict
+    
+    - name: Install dependencies
+      run: composer install --prefer-dist --no-progress --no-interaction --no-dev --optimize-autoloader
+    
+    - name: Run tests
+      run: |
+        composer install --prefer-dist --no-progress --no-interaction
+        composer test
+    
+    - name: Create release archive
+      run: |
+        # Remove development files
+        rm -rf tests/ phpunit.xml.dist .github/ .gitignore
+        
+        # Create archive
+        RELEASE_NAME="yetisearch-${GITHUB_REF#refs/tags/}"
+        tar -czf "${RELEASE_NAME}.tar.gz" --exclude-vcs .
+        zip -r "${RELEASE_NAME}.zip" . -x "*.git*"
+    
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: YetiSearch ${{ github.ref }}
+        body: |
+          YetiSearch Library Release ${{ github.ref }}
+          
+          ## Installation
+          
+          ```bash
+          composer require yetisearch/yetisearch
+          ```
+          
+          ## What's Changed
+          Please see [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
+        draft: false
+        prerelease: false
+    
+    - name: Upload Release Assets
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./yetisearch-${{ github.ref_name }}.tar.gz
+        asset_name: yetisearch-${{ github.ref_name }}.tar.gz
+        asset_content_type: application/gzip
