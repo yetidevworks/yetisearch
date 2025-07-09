@@ -1,0 +1,48 @@
+{
+    "name": "yetisearch/yetisearch",
+    "description": "A powerful, pure-PHP search engine library with advanced features",
+    "type": "library",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "YetiSearch Team",
+            "email": "info@yetisearch.dev"
+        }
+    ],
+    "require": {
+        "php": "^7.4|^8.0",
+        "ext-json": "*",
+        "ext-mbstring": "*",
+        "ext-pdo": "*",
+        "ext-sqlite3": "*",
+        "psr/log": "^1.1|^2.0|^3.0",
+        "symfony/console": "^5.0|^6.0",
+        "wamania/php-stemmer": "^3.0",
+        "voku/portable-utf8": "^6.0"
+    },
+    "require-dev": {
+        "fakerphp/faker": "^1.24",
+        "phpstan/phpstan": "^1.0",
+        "phpunit/phpunit": "^9.5",
+        "squizlabs/php_codesniffer": "^3.6"
+    },
+    "autoload": {
+        "psr-4": {
+            "YetiSearch\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "YetiSearch\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test": "phpunit",
+        "phpstan": "phpstan analyse src --level 7",
+        "cs": "phpcs --standard=PSR12 src/",
+        "cs-fix": "phpcbf --standard=PSR12 src/"
+    },
+    "config": {
+        "sort-packages": true
+    }
+}
