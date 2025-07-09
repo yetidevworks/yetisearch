@@ -217,6 +217,14 @@ class SearchEngine implements SearchEngineInterface
         $processedResults = [];
         $minScore = $this->config['min_score'];
         
+        // Find the maximum score for normalization
+        $maxScore = 0.0;
+        foreach ($results as $result) {
+            if ($result['score'] > $maxScore) {
+                $maxScore = $result['score'];
+            }
+        }
+        
         foreach ($results as $result) {
             if ($result['score'] < $minScore) {
                 continue;
@@ -231,9 +239,12 @@ class SearchEngine implements SearchEngineInterface
                 );
             }
             
+            // Normalize score to 0-100 range
+            $normalizedScore = $maxScore > 0 ? round(($result['score'] / $maxScore) * 100, 1) : 0;
+            
             $processedResult = new SearchResult([
                 'id' => $result['id'],
-                'score' => $result['score'],
+                'score' => $normalizedScore,
                 'document' => $this->filterResultFields($result['document']),
                 'highlights' => $highlights,
                 'metadata' => $result['metadata'] ?? []

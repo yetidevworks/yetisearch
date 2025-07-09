@@ -16,7 +16,6 @@
         "ext-pdo": "*",
         "ext-sqlite3": "*",
         "psr/log": "^1.1|^2.0|^3.0",
-        "symfony/console": "^5.0|^6.0",
         "wamania/php-stemmer": "^3.0",
         "voku/portable-utf8": "^6.0"
     },
