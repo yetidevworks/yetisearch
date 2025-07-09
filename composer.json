@@ -37,6 +37,12 @@
     },
     "scripts": {
         "test": "phpunit",
+        "test:verbose": "phpunit --testdox --colors=always",
+        "test:pretty": "phpunit -c phpunit-readable.xml",
+        "test:coverage": "XDEBUG_MODE=coverage phpunit --coverage-text --colors=always",
+        "test:coverage-html": "XDEBUG_MODE=coverage phpunit --coverage-html build/coverage",
+        "test:filter": "phpunit --testdox --colors=always --filter",
+        "test:watch": "phpunit-watcher watch",
         "phpstan": "phpstan analyse src --level 7",
         "cs": "phpcs --standard=PSR12 src/",
         "cs-fix": "phpcbf --standard=PSR12 src/"
