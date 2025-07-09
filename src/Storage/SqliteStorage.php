@@ -16,6 +16,16 @@ class SqliteStorage implements StorageInterface
         $this->config = $config;
         $dbPath = $config['path'] ?? ':memory:';
         
+        // Create directory if it doesn't exist and path is not :memory:
+        if ($dbPath !== ':memory:') {
+            $dir = dirname($dbPath);
+            if (!is_dir($dir)) {
+                if (!mkdir($dir, 0755, true)) {
+                    throw new StorageException("Failed to create directory: {$dir}");
+                }
+            }
+        }
+        
         try {
             $this->connection = new \PDO("sqlite:{$dbPath}", null, null, [
                 \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
