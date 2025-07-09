@@ -42,7 +42,7 @@ class YetiSearch
                 'chunk_overlap' => 100
             ],
             'search' => [
-                'min_score' => 0.1,
+                'min_score' => 0.0,
                 'highlight_tag' => '<mark>',
                 'highlight_tag_close' => '</mark>',
                 'snippet_length' => 150,
@@ -210,6 +210,36 @@ class YetiSearch
         $results = $searchEngine->search($searchQuery);
         
         return $results->toArray();
+    }
+    
+    public function count(string $indexName, string $query, array $options = []): int
+    {
+        $searchEngine = $this->getSearchEngine($indexName);
+        if (!$searchEngine) {
+            return 0;
+        }
+        
+        $searchQuery = new SearchQuery($query);
+        
+        if (isset($options['filters'])) {
+            foreach ($options['filters'] as $filter) {
+                $searchQuery->filter(
+                    $filter['field'],
+                    $filter['value'],
+                    $filter['operator'] ?? '='
+                );
+            }
+        }
+        
+        if (isset($options['language'])) {
+            $searchQuery->language($options['language']);
+        }
+        
+        if (isset($options['fields'])) {
+            $searchQuery->inFields($options['fields']);
+        }
+        
+        return $searchEngine->count($searchQuery);
     }
     
     public function searchMultiple(array $indexNames, string $query, array $options = []): array

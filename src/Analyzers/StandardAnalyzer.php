@@ -105,7 +105,15 @@ class StandardAnalyzer implements AnalyzerInterface
         $text = UTF8::normalize_whitespace($text);
         $text = UTF8::remove_invisible_characters($text);
         
-        $text = str_replace(['"', '"', ''', ''', '…'], ['"', '"', "'", "'", '...'], $text);
+        // Replace smart quotes and ellipsis
+        $replacements = [
+            "\u{201C}" => '"',  // Left double quotation mark
+            "\u{201D}" => '"',  // Right double quotation mark
+            "\u{2018}" => "'",  // Left single quotation mark
+            "\u{2019}" => "'",  // Right single quotation mark
+            "\u{2026}" => '...' // Horizontal ellipsis
+        ];
+        $text = str_replace(array_keys($replacements), array_values($replacements), $text);
         
         $text = preg_replace('/\s+/', ' ', $text);
         
