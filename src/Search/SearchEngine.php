@@ -239,7 +239,7 @@ class SearchEngine implements SearchEngineInterface
         return $storageQuery;
     }
     
-    private function processResults(array $results, SearchQuery $query, string $originalQuery = null): array
+    private function processResults(array $results, SearchQuery $query, ?string $originalQuery = null): array
     {
         $processedResults = [];
         $minScore = $this->config['min_score'];
