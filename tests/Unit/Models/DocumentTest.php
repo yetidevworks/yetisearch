@@ -82,8 +82,9 @@ class DocumentTest extends TestCase
         $document = new Document(
             'doc-array',
             ['title' => 'To Array Test', 'content' => 'Test serialization'],
-            ['version' => 1.0, 'published' => true],
             'es',
+            ['version' => 1.0, 'published' => true],
+            null,
             'blog'
         );
         
