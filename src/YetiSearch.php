@@ -207,7 +207,12 @@ class YetiSearch
             }
         }
         
-        $results = $searchEngine->search($searchQuery);
+        // Pass original options to search engine for processing
+        $engineOptions = [
+            'unique_by_route' => $options['unique_by_route'] ?? false
+        ];
+        
+        $results = $searchEngine->search($searchQuery, $engineOptions);
         
         return $results->toArray();
     }

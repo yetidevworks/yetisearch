@@ -42,14 +42,14 @@ class SearchEngine implements SearchEngineInterface
             'enable_synonyms' => true,
             'enable_suggestions' => true,
             'cache_ttl' => 300,
-            'result_fields' => ['title', 'content', 'excerpt', 'url', 'author', 'tags'],
+            'result_fields' => ['title', 'content', 'excerpt', 'url', 'author', 'tags', 'route'],
             'facet_min_count' => 1
         ], $config);
         
         $this->logger = $logger ?? new NullLogger();
     }
     
-    public function search(SearchQuery $query): SearchResults
+    public function search(SearchQuery $query, array $options = []): SearchResults
     {
         $startTime = microtime(true);
         $cacheKey = $this->getCacheKey($query);
@@ -62,13 +62,39 @@ class SearchEngine implements SearchEngineInterface
         try {
             $this->logger->debug('Executing search', ['query' => $query->toArray()]);
             
+            // Store original query for highlighting
+            $originalQuery = $query->getQuery();
+            
             $processedQuery = $this->processQuery($query);
             $storageQuery = $this->buildStorageQuery($processedQuery);
+            
+            // If deduplicating, we need to get ALL results first
+            if ($options['unique_by_route'] ?? false) {
+                // Temporarily override limit to get all results
+                $originalLimit = $storageQuery['limit'];
+                $originalOffset = $storageQuery['offset'];
+                $storageQuery['limit'] = $this->config['max_results'];
+                $storageQuery['offset'] = 0;
+            }
             
             $results = $this->storage->search($this->indexName, $storageQuery);
             $totalCount = $this->storage->count($this->indexName, $storageQuery);
             
-            $searchResults = $this->processResults($results, $processedQuery);
+            // Pass original query for highlighting
+            $searchResults = $this->processResults($results, $processedQuery, $originalQuery);
+            
+            // Apply unique_by_route if requested
+            if ($options['unique_by_route'] ?? false) {
+                $this->logger->debug('Applying deduplication', ['unique_by_route' => true]);
+                $searchResults = $this->deduplicateByRoute($searchResults);
+                // Update total count after deduplication
+                $totalCount = count($searchResults);
+                
+                // Now apply the original limit/offset to the deduplicated results
+                $searchResults = array_slice($searchResults, $originalOffset, $originalLimit);
+            } else {
+                $this->logger->debug('Skipping deduplication', ['unique_by_route' => false]);
+            }
             
             $facets = [];
             if (!empty($query->getFacets())) {
@@ -212,7 +238,7 @@ class SearchEngine implements SearchEngineInterface
         return $storageQuery;
     }
     
-    private function processResults(array $results, SearchQuery $query): array
+    private function processResults(array $results, SearchQuery $query, string $originalQuery = null): array
     {
         $processedResults = [];
         $minScore = $this->config['min_score'];
@@ -234,7 +260,7 @@ class SearchEngine implements SearchEngineInterface
             if ($query->shouldHighlight()) {
                 $highlights = $this->generateHighlights(
                     $result['document'],
-                    $query->getQuery(),
+                    $originalQuery ?? $query->getQuery(),
                     $query->getHighlightLength()
                 );
             }
@@ -242,10 +268,24 @@ class SearchEngine implements SearchEngineInterface
             // Normalize score to 0-100 range
             $normalizedScore = $maxScore > 0 ? round(($result['score'] / $maxScore) * 100, 1) : 0;
             
+            $filteredDocument = $this->filterResultFields($result['document']);
+            
+            // Log first result to see structure
+            static $logged = false;
+            if (!$logged) {
+                $this->logger->debug('Result document fields', [
+                    'raw_fields' => array_keys($result['document']),
+                    'filtered_fields' => array_keys($filteredDocument),
+                    'has_route' => isset($filteredDocument['route']),
+                    'route_value' => $filteredDocument['route'] ?? 'NOT SET'
+                ]);
+                $logged = true;
+            }
+            
             $processedResult = new SearchResult([
                 'id' => $result['id'],
                 'score' => $normalizedScore,
-                'document' => $this->filterResultFields($result['document']),
+                'document' => $filteredDocument,
                 'highlights' => $highlights,
                 'metadata' => $result['metadata'] ?? []
             ]);
@@ -253,13 +293,19 @@ class SearchEngine implements SearchEngineInterface
             $processedResults[] = $processedResult;
         }
         
+        // Sort by score descending
+        usort($processedResults, function($a, $b) {
+            return $b->getScore() <=> $a->getScore();
+        });
+        
         return $processedResults;
     }
     
     private function generateHighlights(array $document, string $query, int $length): array
     {
         $highlights = [];
-        $queryTokens = $this->analyzer->tokenize($query);
+        // Use raw query terms for highlighting
+        $queryTokens = array_filter(explode(' ', strtolower($query)));
         
         foreach ($document as $field => $value) {
             if (!is_string($value) || empty($value)) {
@@ -286,6 +332,7 @@ class SearchEngine implements SearchEngineInterface
         $textLength = strlen($text);
         
         foreach ($terms as $term) {
+            // Try exact match first
             $pos = stripos($lowerText, $term);
             if ($pos !== false) {
                 $score = 1 / ($pos + 1);
@@ -294,9 +341,21 @@ class SearchEngine implements SearchEngineInterface
                     $bestPosition = $pos;
                 }
             }
+            
+            // Also try plural form
+            $pluralPos = stripos($lowerText, $term . 's');
+            if ($pluralPos !== false) {
+                $score = 1 / ($pluralPos + 1);
+                if ($score > $bestScore) {
+                    $bestScore = $score;
+                    $bestPosition = $pluralPos;
+                }
+            }
         }
         
-        $start = max(0, $bestPosition - ($length / 2));
+        // Adjust start to show more context before the match
+        $contextBefore = min(50, $length / 3); // Show some context before match
+        $start = max(0, $bestPosition - $contextBefore);
         $end = min($textLength, $start + $length);
         
         if ($start > 0) {
@@ -325,12 +384,54 @@ class SearchEngine implements SearchEngineInterface
         $highlighted = $text;
         
         foreach ($terms as $term) {
-            $pattern = '/\b(' . preg_quote($term, '/') . ')\b/i';
+            // Match the term and common variations (plural with 's')
+            $pattern = '/\b(' . preg_quote($term, '/') . 's?)\b/i';
             $replacement = $this->config['highlight_tag'] . '$1' . $this->config['highlight_tag_close'];
             $highlighted = preg_replace($pattern, $replacement, $highlighted);
         }
         
         return $highlighted;
+    }
+    
+    private function deduplicateByRoute(array $results): array
+    {
+        $routeMap = [];
+        $deduplicated = [];
+        
+        $this->logger->debug('Deduplicating results', ['total' => count($results)]);
+        
+        foreach ($results as $result) {
+            $route = $result->get('route', '');
+            
+            // Skip if no route
+            if (empty($route)) {
+                $deduplicated[] = $result;
+                continue;
+            }
+            
+            // Keep only the highest scoring result for each route
+            if (!isset($routeMap[$route]) || $result->getScore() > $routeMap[$route]->getScore()) {
+                $routeMap[$route] = $result;
+            }
+        }
+        
+        // Add all unique results
+        foreach ($routeMap as $result) {
+            $deduplicated[] = $result;
+        }
+        
+        // Sort by score descending
+        usort($deduplicated, function($a, $b) {
+            return $b->getScore() <=> $a->getScore();
+        });
+        
+        $this->logger->debug('Deduplication complete', [
+            'unique_routes' => count($routeMap),
+            'results_without_route' => count($deduplicated) - count($routeMap),
+            'final_count' => count($deduplicated)
+        ]);
+        
+        return $deduplicated;
     }
     
     private function filterResultFields(array $document): array
