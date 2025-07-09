@@ -40,7 +40,8 @@ class Indexer implements IndexerInterface
                 'tags' => ['boost' => 2.5, 'store' => true],
                 'category' => ['boost' => 2.0, 'store' => true],
                 'author' => ['boost' => 1.5, 'store' => true],
-                'url' => ['boost' => 1.0, 'store' => true, 'index' => false]
+                'url' => ['boost' => 1.0, 'store' => true, 'index' => false],
+                'route' => ['boost' => 1.0, 'store' => true, 'index' => false]
             ],
             'chunk_size' => 1000,
             'chunk_overlap' => 100
@@ -272,7 +273,8 @@ class Indexer implements IndexerInterface
                     'content' => array_merge($processedContent, ['content' => $chunk]),
                     'metadata' => array_merge($metadata, [
                         'chunk_index' => $index,
-                        'is_chunk' => true
+                        'is_chunk' => true,
+                        'parent_route' => $processedContent['route'] ?? ''
                     ]),
                     'language' => $language,
                     'type' => $document->getType(),
