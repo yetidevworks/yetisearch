@@ -242,6 +242,17 @@ class SqliteStorage implements StorageInterface
         // Check if we have a search query
         $hasSearchQuery = !empty(trim($searchQuery));
         
+        // Detect if we need PHP-based sorting (FTS5 + distance sorting)
+        $needsPhpSort = false;
+        $hasSpatialData = !empty($spatial['select']) && strpos($spatial['select'], 'distance') !== false;
+        
+        if ($hasSearchQuery && $hasSpatialData) {
+            // Check if sorting by distance
+            if (isset($geoFilters['distance_sort']) || isset($sort['distance'])) {
+                $needsPhpSort = true;
+            }
+        }
+        
         if ($hasSearchQuery) {
             // Full text search with optional spatial filters
             $sql = "
@@ -325,32 +336,42 @@ class SqliteStorage implements StorageInterface
             }
         }
         
-        // Handle distance sorting from geo filters
-        if (isset($geoFilters['distance_sort']) && !empty($spatial['select'])) {
-            $dir = strtoupper($geoFilters['distance_sort']['direction']) === 'DESC' ? 'DESC' : 'ASC';
-            // Note: SQLite has issues with ORDER BY on calculated columns when using FTS5
-            // The ordering may not work correctly for text searches with distance sorting
-            $sql .= " ORDER BY distance {$dir}";
-        } elseif (empty($sort)) {
+        // Handle sorting
+        if ($needsPhpSort) {
+            // For PHP sorting, we need to fetch more results to ensure accurate pagination
+            // Fetch up to 1000 results or 10x the requested limit, whichever is smaller
+            $fetchLimit = min(1000, max($limit * 10, 100));
+            
+            // Apply basic ordering by rank to get most relevant results first
             $sql .= " ORDER BY rank DESC";
+            $sql .= " LIMIT ?";
+            $params[] = $fetchLimit;
         } else {
-            $orderClauses = [];
-            foreach ($sort as $field => $direction) {
-                $dir = strtoupper($direction) === 'DESC' ? 'DESC' : 'ASC';
-                if ($field === '_score') {
-                    $orderClauses[] = "rank {$dir}";
-                } elseif ($field === 'distance' && !empty($spatial['select'])) {
-                    $orderClauses[] = "distance {$dir}";
-                } else {
-                    $orderClauses[] = "d.{$field} {$dir}";
+            // Normal SQL sorting
+            if (isset($geoFilters['distance_sort']) && !empty($spatial['select'])) {
+                $dir = strtoupper($geoFilters['distance_sort']['direction']) === 'DESC' ? 'DESC' : 'ASC';
+                $sql .= " ORDER BY distance {$dir}";
+            } elseif (empty($sort)) {
+                $sql .= " ORDER BY rank DESC";
+            } else {
+                $orderClauses = [];
+                foreach ($sort as $field => $direction) {
+                    $dir = strtoupper($direction) === 'DESC' ? 'DESC' : 'ASC';
+                    if ($field === '_score') {
+                        $orderClauses[] = "rank {$dir}";
+                    } elseif ($field === 'distance' && !empty($spatial['select'])) {
+                        $orderClauses[] = "distance {$dir}";
+                    } else {
+                        $orderClauses[] = "d.{$field} {$dir}";
+                    }
                 }
+                $sql .= " ORDER BY " . implode(', ', $orderClauses);
             }
-            $sql .= " ORDER BY " . implode(', ', $orderClauses);
+            
+            $sql .= " LIMIT ? OFFSET ?";
+            $params[] = $limit;
+            $params[] = $offset;
         }
-        
-        $sql .= " LIMIT ? OFFSET ?";
-        $params[] = $limit;
-        $params[] = $offset;
         
         try {
             $stmt = $this->connection->prepare($sql);
@@ -388,6 +409,34 @@ class SqliteStorage implements StorageInterface
                 }
                 
                 $results[] = $result;
+            }
+            
+            // Apply PHP sorting if needed
+            if ($needsPhpSort) {
+                // Determine sort field and direction
+                $sortField = 'distance';
+                $sortDir = 'ASC';
+                
+                if (isset($geoFilters['distance_sort'])) {
+                    $sortDir = strtoupper($geoFilters['distance_sort']['direction']) === 'DESC' ? 'DESC' : 'ASC';
+                } elseif (isset($sort['distance'])) {
+                    $sortDir = strtoupper($sort['distance']) === 'DESC' ? 'DESC' : 'ASC';
+                }
+                
+                // Sort results by distance
+                usort($results, function($a, $b) use ($sortDir) {
+                    $distA = $a['distance'] ?? PHP_FLOAT_MAX;
+                    $distB = $b['distance'] ?? PHP_FLOAT_MAX;
+                    
+                    if ($sortDir === 'ASC') {
+                        return $distA <=> $distB;
+                    } else {
+                        return $distB <=> $distA;
+                    }
+                });
+                
+                // Apply pagination after sorting
+                $results = array_slice($results, $offset, $limit);
             }
             
             return $results;
@@ -869,9 +918,13 @@ class SqliteStorage implements StorageInterface
             if (is_array($from)) {
                 $lat = $from['lat'];
                 $lng = $from['lng'];
-            } else {
+            } elseif ($from instanceof GeoPoint) {
                 $lat = $from->getLatitude();
                 $lng = $from->getLongitude();
+            } else {
+                // Handle other object types that might have lat/lng properties
+                $lat = $from->lat ?? $from->getLatitude();
+                $lng = $from->lng ?? $from->getLongitude();
             }
             $spatialJoin = " LEFT JOIN {$index}_id_map m ON m.string_id = d.id " .
                            "LEFT JOIN {$index}_spatial s ON s.id = m.numeric_id";

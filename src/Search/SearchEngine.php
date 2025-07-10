@@ -332,10 +332,8 @@ class SearchEngine implements SearchEngineInterface
             $processedResults[] = $processedResult;
         }
         
-        // Sort by score descending
-        usort($processedResults, function($a, $b) {
-            return $b->getScore() <=> $a->getScore();
-        });
+        // Don't re-sort results - they come from storage in the correct order
+        // This preserves distance-based sorting or any other sorting applied by the storage layer
         
         return $processedResults;
     }
