@@ -2,6 +2,9 @@
 
 namespace YetiSearch\Models;
 
+use YetiSearch\Geo\GeoPoint;
+use YetiSearch\Geo\GeoBounds;
+
 class SearchQuery
 {
     private string $query;
@@ -18,6 +21,7 @@ class SearchQuery
     private int $highlightLength = 150;
     private array $facets = [];
     private array $aggregations = [];
+    private array $geoFilters = [];
     
     public function __construct(string $query, array $options = [])
     {
@@ -194,6 +198,48 @@ class SearchQuery
         return $this->aggregations;
     }
     
+    public function near(GeoPoint $point, float $radiusInMeters): self
+    {
+        $this->geoFilters['near'] = [
+            'point' => $point,
+            'radius' => $radiusInMeters
+        ];
+        return $this;
+    }
+    
+    public function within(GeoBounds $bounds): self
+    {
+        $this->geoFilters['within'] = [
+            'bounds' => $bounds
+        ];
+        return $this;
+    }
+    
+    public function withinBounds(float $north, float $south, float $east, float $west): self
+    {
+        $bounds = new GeoBounds($north, $south, $east, $west);
+        return $this->within($bounds);
+    }
+    
+    public function sortByDistance(GeoPoint $from, string $direction = 'asc'): self
+    {
+        $this->geoFilters['distance_sort'] = [
+            'from' => $from,
+            'direction' => strtolower($direction)
+        ];
+        return $this;
+    }
+    
+    public function getGeoFilters(): array
+    {
+        return $this->geoFilters;
+    }
+    
+    public function hasGeoFilters(): bool
+    {
+        return !empty($this->geoFilters);
+    }
+    
     public function toArray(): array
     {
         return [
@@ -210,7 +256,8 @@ class SearchQuery
             'highlight' => $this->highlight,
             'highlightLength' => $this->highlightLength,
             'facets' => $this->facets,
-            'aggregations' => $this->aggregations
+            'aggregations' => $this->aggregations,
+            'geoFilters' => $this->geoFilters
         ];
     }
 }

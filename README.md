@@ -22,6 +22,8 @@ A powerful, pure-PHP search engine library with advanced full-text search capabi
 - [Advanced Features](#advanced-features)
   - [Document Chunking](#document-chunking)
   - [Multi-language Support](#multi-language-support)
+  - [Custom Stop Words](#custom-stop-words)
+  - [Geo-Spatial Search](#geo-spatial-search)
   - [Search Result Deduplication](#search-result-deduplication)
   - [Highlighting](#highlighting)
   - [Fuzzy Search](#fuzzy-search)
@@ -45,6 +47,7 @@ A powerful, pure-PHP search engine library with advanced full-text search capabi
 - 🎨 **Search highlighting** with customizable tags
 - 🔤 **Fuzzy matching** for typo-tolerant searches
 - 📈 **Faceted search** and aggregations support
+- 📍 **Geo-spatial search** with R-tree indexing for location-based queries
 - 🚀 **Zero dependencies** except PHP extensions and small utility packages
 - 💾 **Persistent storage** with automatic database management
 - 🔐 **Production-ready** with comprehensive test coverage
@@ -451,6 +454,97 @@ $analyzer->setStopWordsDisabled(true);
 
 Custom stop words are applied in addition to the default language-specific stop words. They are case-insensitive and apply across all languages.
 
+### Geo-Spatial Search
+
+YetiSearch supports location-based searching using SQLite's R-tree spatial indexing:
+
+```php
+use YetiSearch\Geo\GeoPoint;
+use YetiSearch\Geo\GeoBounds;
+
+// Index documents with location data
+$indexer->index([
+    'id' => 'coffee-shop-1',
+    'title' => 'Blue Bottle Coffee',
+    'content' => 'Specialty coffee roaster and cafe',
+    'geo' => [
+        'lat' => 37.7825,
+        'lng' => -122.4099
+    ]
+]);
+
+// Search within radius of a point
+$searchQuery = new SearchQuery('coffee');
+$searchQuery->near(new GeoPoint(37.7749, -122.4194), 5000); // 5km radius
+$results = $searchEngine->search($searchQuery);
+
+// Search within bounding box
+$searchQuery = new SearchQuery('restaurant');
+$searchQuery->withinBounds(37.8, 37.7, -122.3, -122.5);
+// Or with a GeoBounds object:
+$bounds = new GeoBounds(37.8, 37.7, -122.3, -122.5);
+$searchQuery->within($bounds);
+
+// Sort results by distance
+$searchQuery = new SearchQuery('food');
+$searchQuery->sortByDistance(new GeoPoint(37.7749, -122.4194), 'asc');
+
+// Combine text search with geo filters
+$searchQuery = new SearchQuery('italian restaurant')
+    ->near(new GeoPoint(37.7749, -122.4194), 3000)
+    ->filter('price_range', '$$')
+    ->limit(10);
+
+// Results include distance when geo queries are used
+foreach ($results->getResults() as $result) {
+    echo $result->get('title') . ' - ';
+    if ($result->hasDistance()) {
+        echo GeoUtils::formatDistance($result->getDistance()) . ' away';
+    }
+    echo PHP_EOL;
+}
+```
+
+**Geo Utilities:**
+
+```php
+use YetiSearch\Geo\GeoUtils;
+
+// Distance calculations
+$distance = GeoUtils::distance($point1, $point2); // meters
+$distance = GeoUtils::distanceBetween($lat1, $lng1, $lat2, $lng2);
+
+// Unit conversions
+$meters = GeoUtils::kmToMeters(5);
+$meters = GeoUtils::milesToMeters(3.1);
+
+// Format distance for display
+echo GeoUtils::formatDistance(1500); // "1.5 km"
+echo GeoUtils::formatDistance(1500, 'imperial'); // "0.9 mi"
+
+// Parse various coordinate formats
+$point = GeoUtils::parsePoint(['lat' => 37.7749, 'lng' => -122.4194]);
+$point = GeoUtils::parsePoint([37.7749, -122.4194]);
+$point = GeoUtils::parsePoint('37.7749,-122.4194');
+```
+
+**Indexing with Bounds:**
+
+```php
+// Index areas/regions with bounding boxes
+$indexer->index([
+    'id' => 'downtown-sf',
+    'title' => 'Downtown San Francisco',
+    'content' => 'Financial district and shopping area',
+    'geo_bounds' => [
+        'north' => 37.8,
+        'south' => 37.77,
+        'east' => -122.39,
+        'west' => -122.42
+    ]
+]);
+```
+
 ### Search Result Deduplication
 
 By default, YetiSearch deduplicates results to show only the best matching chunk per document:
@@ -718,7 +812,6 @@ The following features are ideas for future releases:
 ### Search Enhancements
 - **Query DSL** - Advanced query language for complex search expressions
 - **Search Templates** - Save and reuse common search patterns
-- **Geo-spatial Search** - Support for location-based searching
 - **More Like This** - Find similar documents based on content similarity
 - **Search Analytics** - Built-in analytics for search queries and results
 - **Full Content Result** - Option to return full document content in search results
