@@ -362,6 +362,9 @@ class Indexer implements IndexerInterface
     {
         if (!$this->storage->indexExists($this->indexName)) {
             $this->storage->createIndex($this->indexName, $this->config);
+        } else {
+            // Ensure all required tables exist, including spatial table
+            $this->storage->ensureSpatialTableExists($this->indexName);
         }
     }
 }

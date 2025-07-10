@@ -863,4 +863,31 @@ class SqliteStorage implements StorageInterface
             ) * 1000
         ";
     }
+    
+    public function ensureSpatialTableExists(string $name): void
+    {
+        $this->ensureConnected();
+        
+        try {
+            // Check if spatial table exists
+            $stmt = $this->connection->prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
+            );
+            $stmt->execute(["{$name}_spatial"]);
+            
+            if ($stmt->fetch() === false) {
+                // Create R-tree spatial index if it doesn't exist
+                $spatialSql = "
+                    CREATE VIRTUAL TABLE IF NOT EXISTS {$name}_spatial USING rtree(
+                        id,              -- Document ID (integer required by R-tree)
+                        minLat, maxLat,  -- Latitude bounds
+                        minLng, maxLng   -- Longitude bounds
+                    )
+                ";
+                $this->connection->exec($spatialSql);
+            }
+        } catch (\PDOException $e) {
+            throw new StorageException("Failed to ensure spatial table exists for '{$name}': " . $e->getMessage());
+        }
+    }
 }

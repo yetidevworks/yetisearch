@@ -33,4 +33,6 @@ interface StorageInterface
     public function listIndices(): array;
     
     public function searchMultiple(array $indices, array $query): array;
+    
+    public function ensureSpatialTableExists(string $name): void;
 }
