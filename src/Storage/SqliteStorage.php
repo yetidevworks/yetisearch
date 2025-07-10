@@ -110,6 +110,16 @@ class SqliteStorage implements StorageInterface
             ";
             $this->connection->exec($spatialSql);
             
+            // Create ID mapping table
+            $mappingSql = "
+                CREATE TABLE IF NOT EXISTS {$name}_id_map (
+                    string_id TEXT PRIMARY KEY,
+                    numeric_id INTEGER
+                )
+            ";
+            $this->connection->exec($mappingSql);
+            $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_id_map_numeric ON {$name}_id_map(numeric_id)");
+            
         } catch (\PDOException $e) {
             throw new StorageException("Failed to create index '{$name}': " . $e->getMessage());
         }
@@ -124,6 +134,7 @@ class SqliteStorage implements StorageInterface
             $this->connection->exec("DROP TABLE IF EXISTS {$name}_fts");
             $this->connection->exec("DROP TABLE IF EXISTS {$name}_terms");
             $this->connection->exec("DROP TABLE IF EXISTS {$name}_spatial");
+            $this->connection->exec("DROP TABLE IF EXISTS {$name}_id_map");
         } catch (\PDOException $e) {
             throw new StorageException("Failed to drop index '{$name}': " . $e->getMessage());
         }
@@ -196,6 +207,7 @@ class SqliteStorage implements StorageInterface
             $this->connection->prepare("DELETE FROM {$index} WHERE id = ?")->execute([$id]);
             $this->connection->prepare("DELETE FROM {$index}_fts WHERE id = ?")->execute([$id]);
             $this->connection->prepare("DELETE FROM {$index}_terms WHERE document_id = ?")->execute([$id]);
+            $this->connection->prepare("DELETE FROM {$index}_id_map WHERE string_id = ?")->execute([$id]);
             
             // Delete from spatial index (use hash of string ID for R-tree integer ID)
             $spatialId = $this->getNumericId($id);
@@ -223,6 +235,7 @@ class SqliteStorage implements StorageInterface
         // Build spatial query components
         $spatial = $this->buildSpatialQuery($index, $geoFilters);
         
+        
         // Check if we have a search query
         $hasSearchQuery = !empty(trim($searchQuery));
         
@@ -249,6 +262,7 @@ class SqliteStorage implements StorageInterface
             ";
             $params = $spatial['params'];
         }
+        
         
         if ($language) {
             $sql .= " AND d.language = ?";
@@ -309,8 +323,10 @@ class SqliteStorage implements StorageInterface
         }
         
         // Handle distance sorting from geo filters
-        if (isset($geoFilters['distance_sort'])) {
+        if (isset($geoFilters['distance_sort']) && !empty($spatial['select'])) {
             $dir = strtoupper($geoFilters['distance_sort']['direction']) === 'DESC' ? 'DESC' : 'ASC';
+            // Note: There's a known issue with SQLite where ORDER BY doesn't work correctly
+            // when combining FTS5 MATCH with complex JOINs and calculated columns
             $sql .= " ORDER BY distance {$dir}";
         } elseif (empty($sort)) {
             $sql .= " ORDER BY rank DESC";
@@ -329,11 +345,13 @@ class SqliteStorage implements StorageInterface
             $sql .= " ORDER BY " . implode(', ', $orderClauses);
         }
         
+        
         $sql .= " LIMIT ? OFFSET ?";
         $params[] = $limit;
         $params[] = $offset;
         
         try {
+            
             $stmt = $this->connection->prepare($sql);
             $stmt->execute($params);
             
@@ -771,6 +789,7 @@ class SqliteStorage implements StorageInterface
             return;
         }
         
+        
         $minLat = $maxLat = $minLng = $maxLng = null;
         
         // Handle point data
@@ -796,6 +815,15 @@ class SqliteStorage implements StorageInterface
         
         // Insert into spatial index if we have valid coordinates
         if ($minLat !== null && $maxLat !== null && $minLng !== null && $maxLng !== null) {
+            
+            // Store the ID mapping
+            $mapStmt = $this->connection->prepare("
+                INSERT OR REPLACE INTO {$index}_id_map (string_id, numeric_id)
+                VALUES (?, ?)
+            ");
+            $mapStmt->execute([$id, $spatialId]);
+            
+            // Insert spatial data
             $spatialStmt = $this->connection->prepare("
                 INSERT INTO {$index}_spatial (id, minLat, maxLat, minLng, maxLng)
                 VALUES (?, ?, ?, ?, ?)
@@ -829,7 +857,8 @@ class SqliteStorage implements StorageInterface
                 $lat = $from->getLatitude();
                 $lng = $from->getLongitude();
             }
-            $spatialJoin = " LEFT JOIN {$index}_spatial s ON s.id = " . $this->getNumericIdExpression('d.id');
+            $spatialJoin = " LEFT JOIN {$index}_id_map m ON m.string_id = d.id
+                           LEFT JOIN {$index}_spatial s ON s.id = m.numeric_id";
             $distanceSelect = ", " . $this->getDistanceExpression($lat, $lng) . " as distance";
         }
         
@@ -841,7 +870,8 @@ class SqliteStorage implements StorageInterface
             // Calculate bounding box for initial R-tree filtering
             $bounds = $point->getBoundingBox($radius);
             
-            $spatialJoin = " INNER JOIN {$index}_spatial s ON s.id = " . $this->getNumericIdExpression('d.id');
+            $spatialJoin = " INNER JOIN {$index}_id_map m ON m.string_id = d.id
+                           INNER JOIN {$index}_spatial s ON s.id = m.numeric_id";
             
             // R-tree bounding box filter
             $spatialSql = " AND s.minLat <= ? AND s.maxLat >= ? AND s.minLng <= ? AND s.maxLng >= ?";
@@ -861,7 +891,8 @@ class SqliteStorage implements StorageInterface
             $boundsData = $geoFilters['within']['bounds'];
             $bounds = is_array($boundsData) ? GeoBounds::fromArray($boundsData) : $boundsData;
             
-            $spatialJoin = " INNER JOIN {$index}_spatial s ON s.id = " . $this->getNumericIdExpression('d.id');
+            $spatialJoin = " INNER JOIN {$index}_id_map m ON m.string_id = d.id
+                           INNER JOIN {$index}_spatial s ON s.id = m.numeric_id";
             
             // R-tree intersection query
             $spatialSql = " AND s.minLat <= ? AND s.maxLat >= ? AND s.minLng <= ? AND s.maxLng >= ?";
@@ -883,16 +914,15 @@ class SqliteStorage implements StorageInterface
     
     private function getNumericIdExpression(string $field): string
     {
-        // Use a simpler hash function for SQLite
-        // Creates a stable numeric hash from the string ID
-        return "ABS(
-            (
-                (CAST(unicode(substr({$field}, 1, 1)) AS INTEGER) * 16777619) +
-                (CAST(unicode(substr({$field}, 2, 1)) AS INTEGER) * 16777619) +
-                (CAST(unicode(substr({$field}, 3, 1)) AS INTEGER) * 16777619) +
-                (CAST(unicode(substr({$field}, 4, 1)) AS INTEGER) * 16777619)
-            ) % 2147483647
-        )";
+        // For SQLite, we need a different approach since we can't reliably compute CRC32 in SQL
+        // We'll use a simple hash based on the first few characters
+        // This is less ideal but works for the join
+        return "CAST(
+            (unicode(substr({$field}, 1, 1)) * 1000000 + 
+             unicode(substr({$field}, 2, 1)) * 10000 + 
+             unicode(substr({$field}, 3, 1)) * 100 + 
+             unicode(substr({$field}, 4, 1)))
+        AS INTEGER)";
     }
     
     private function getDistanceExpression(float $lat, float $lng): string
@@ -932,6 +962,19 @@ class SqliteStorage implements StorageInterface
                     )
                 ";
                 $this->connection->exec($spatialSql);
+            }
+            
+            // Also ensure ID mapping table exists
+            $stmt->execute(["{$name}_id_map"]);
+            if ($stmt->fetch() === false) {
+                $mappingSql = "
+                    CREATE TABLE IF NOT EXISTS {$name}_id_map (
+                        string_id TEXT PRIMARY KEY,
+                        numeric_id INTEGER
+                    )
+                ";
+                $this->connection->exec($mappingSql);
+                $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_id_map_numeric ON {$name}_id_map(numeric_id)");
             }
         } catch (\PDOException $e) {
             throw new StorageException("Failed to ensure spatial table exists for '{$name}': " . $e->getMessage());

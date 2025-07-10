@@ -281,11 +281,20 @@ class Indexer implements IndexerInterface
                     'timestamp' => $document->getTimestamp()
                 ];
                 
+                // Include geo data in chunks
+                $docArray = $document->toArray();
+                if (isset($docArray['geo'])) {
+                    $chunkDoc['geo'] = $docArray['geo'];
+                }
+                if (isset($docArray['geo_bounds'])) {
+                    $chunkDoc['geo_bounds'] = $docArray['geo_bounds'];
+                }
+                
                 $this->storage->insert($this->indexName, $chunkDoc);
             }
         }
         
-        return [
+        $data = [
             'id' => $document->getId(),
             'content' => $processedContent,
             'metadata' => $metadata,
@@ -294,6 +303,17 @@ class Indexer implements IndexerInterface
             'timestamp' => $document->getTimestamp(),
             'indexed_at' => time()
         ];
+        
+        // Include geo data if present
+        $docArray = $document->toArray();
+        if (isset($docArray['geo'])) {
+            $data['geo'] = $docArray['geo'];
+        }
+        if (isset($docArray['geo_bounds'])) {
+            $data['geo_bounds'] = $docArray['geo_bounds'];
+        }
+        
+        return $data;
     }
     
     private function shouldChunkContent(array $content): bool
