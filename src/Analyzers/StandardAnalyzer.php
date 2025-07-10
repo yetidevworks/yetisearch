@@ -9,6 +9,7 @@ use voku\helper\UTF8;
 class StandardAnalyzer implements AnalyzerInterface
 {
     private array $stopWords = [];
+    private array $customStopWords = [];
     private array $stemmers = [];
     private array $config;
     
@@ -21,10 +22,13 @@ class StandardAnalyzer implements AnalyzerInterface
             'lowercase' => true,
             'strip_html' => true,
             'strip_punctuation' => true,
-            'expand_contractions' => true
+            'expand_contractions' => true,
+            'custom_stop_words' => [],
+            'disable_stop_words' => false
         ], $config);
         
         $this->loadStopWords();
+        $this->setCustomStopWords($this->config['custom_stop_words']);
     }
     
     public function analyze(string $text, ?string $language = null): array
@@ -97,6 +101,10 @@ class StandardAnalyzer implements AnalyzerInterface
     
     public function removeStopWords(array $tokens, ?string $language = null): array
     {
+        if ($this->config['disable_stop_words']) {
+            return $tokens;
+        }
+        
         $language = $language ?? 'english';
         $stopWords = $this->getStopWords($language);
         
@@ -246,7 +254,14 @@ class StandardAnalyzer implements AnalyzerInterface
     
     public function getStopWords(string $language): array
     {
-        return $this->stopWords[$language] ?? $this->stopWords['english'];
+        $defaultStopWords = $this->stopWords[$language] ?? $this->stopWords['english'];
+        
+        // Merge default stop words with custom stop words
+        if (!empty($this->customStopWords)) {
+            return array_unique(array_merge($defaultStopWords, $this->customStopWords));
+        }
+        
+        return $defaultStopWords;
     }
     
     private function expandContractions(string $text): string
@@ -287,5 +302,43 @@ class StandardAnalyzer implements AnalyzerInterface
         }
         
         return $score;
+    }
+    
+    public function setCustomStopWords(array $stopWords): void
+    {
+        $this->customStopWords = array_map(function ($word) {
+            return UTF8::strtolower(trim($word));
+        }, $stopWords);
+    }
+    
+    public function addCustomStopWord(string $word): void
+    {
+        $word = UTF8::strtolower(trim($word));
+        if (!in_array($word, $this->customStopWords)) {
+            $this->customStopWords[] = $word;
+        }
+    }
+    
+    public function removeCustomStopWord(string $word): void
+    {
+        $word = UTF8::strtolower(trim($word));
+        $this->customStopWords = array_values(array_filter($this->customStopWords, function ($stopWord) use ($word) {
+            return $stopWord !== $word;
+        }));
+    }
+    
+    public function getCustomStopWords(): array
+    {
+        return $this->customStopWords;
+    }
+    
+    public function isStopWordsDisabled(): bool
+    {
+        return $this->config['disable_stop_words'];
+    }
+    
+    public function setStopWordsDisabled(bool $disabled): void
+    {
+        $this->config['disable_stop_words'] = $disabled;
     }
 }

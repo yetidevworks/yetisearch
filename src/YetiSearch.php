@@ -33,7 +33,9 @@ class YetiSearch
                 'lowercase' => true,
                 'strip_html' => true,
                 'strip_punctuation' => true,
-                'expand_contractions' => true
+                'expand_contractions' => true,
+                'custom_stop_words' => [],
+                'disable_stop_words' => false
             ],
             'indexer' => [
                 'batch_size' => 100,
@@ -387,6 +389,11 @@ class YetiSearch
         }
         
         return $this->analyzer;
+    }
+    
+    public function getAnalyzerInstance(): StandardAnalyzer
+    {
+        return $this->getAnalyzer();
     }
     
     public function __destruct()

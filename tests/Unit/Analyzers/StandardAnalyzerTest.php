@@ -74,8 +74,16 @@ class StandardAnalyzerTest extends TestCase
         $this->assertContains('test', $result['tokens']);
         $this->assertContains('analyz', $result['tokens']); // 'analyzer' gets stemmed to 'analyz'
         
-        // Stop words removal control not implemented yet
-        // Currently always removes stop words
+        // Test with stop words removal disabled
+        $analyzer = new StandardAnalyzer(['disable_stop_words' => true]);
+        $result = $analyzer->analyze("This is a test of the analyzer");
+        $this->assertContains('this', $result['tokens']);
+        $this->assertContains('is', $result['tokens']);
+        // 'a' is filtered out due to min_word_length (default 2)
+        $this->assertContains('the', $result['tokens']);
+        $this->assertContains('of', $result['tokens']);
+        $this->assertContains('test', $result['tokens']);
+        $this->assertContains('analyz', $result['tokens']);
     }
     
     public function testAnalyzeWithStemming(): void
@@ -191,7 +199,7 @@ class StandardAnalyzerTest extends TestCase
     
     public function testCustomStopWords(): void
     {
-        // Custom stop words feature not implemented yet
+        // Test custom stop words via constructor
         $customStopWords = ['custom', 'stop', 'words'];
         $analyzer = new StandardAnalyzer([
             'custom_stop_words' => $customStopWords
@@ -199,11 +207,16 @@ class StandardAnalyzerTest extends TestCase
         
         $result = $analyzer->analyze("This has custom stop words in text");
         
-        // Currently custom stop words are not implemented, so these words remain
-        $this->assertContains('custom', $result['tokens']);
-        $this->assertContains('stop', $result['tokens']);
-        $this->assertContains('word', $result['tokens']); // 'words' gets stemmed to 'word'
+        // Custom stop words should be removed
+        $this->assertNotContains('custom', $result['tokens']);
+        $this->assertNotContains('stop', $result['tokens']);
+        $this->assertNotContains('word', $result['tokens']); // Both 'words' and 'word' should be removed
         $this->assertContains('text', $result['tokens']);
+        
+        // Default stop words should still be removed
+        $this->assertNotContains('this', $result['tokens']);
+        $this->assertNotContains('has', $result['tokens']);
+        $this->assertNotContains('in', $result['tokens']);
     }
     
     public function testCaseSensitivity(): void
@@ -233,5 +246,198 @@ class StandardAnalyzerTest extends TestCase
         // Should complete within reasonable time (< 1 second)
         $this->assertLessThan(1.0, $duration);
         $this->assertCount(1000, $result['tokens']);
+    }
+    
+    public function testSetCustomStopWords(): void
+    {
+        $analyzer = new StandardAnalyzer();
+        
+        // Set custom stop words after initialization
+        $analyzer->setCustomStopWords(['foo', 'bar', 'baz']);
+        
+        $result = $analyzer->analyze("This is foo and bar with some baz content");
+        
+        // Custom stop words should be removed
+        $this->assertNotContains('foo', $result['tokens']);
+        $this->assertNotContains('bar', $result['tokens']);
+        $this->assertNotContains('baz', $result['tokens']);
+        $this->assertContains('content', $result['tokens']);
+    }
+    
+    public function testAddCustomStopWord(): void
+    {
+        $analyzer = new StandardAnalyzer();
+        
+        // Add individual stop words
+        $analyzer->addCustomStopWord('rocket');
+        $analyzer->addCustomStopWord('engine');
+        
+        $result = $analyzer->analyze("The rocket has a powerful engine for propulsion");
+        
+        // Added stop words should be removed
+        $this->assertNotContains('rocket', $result['tokens']);
+        $this->assertNotContains('engin', $result['tokens']); // 'engine' gets stemmed
+        $this->assertContains('power', $result['tokens']); // 'powerful' gets stemmed
+        $this->assertContains('propuls', $result['tokens']); // 'propulsion' gets stemmed
+    }
+    
+    public function testRemoveCustomStopWord(): void
+    {
+        $analyzer = new StandardAnalyzer([
+            'custom_stop_words' => ['alpha', 'beta', 'gamma']
+        ]);
+        
+        // Remove one custom stop word
+        $analyzer->removeCustomStopWord('beta');
+        
+        $result = $analyzer->analyze("Testing alpha beta gamma values");
+        
+        // 'beta' should now appear in tokens
+        $this->assertNotContains('alpha', $result['tokens']);
+        $this->assertContains('beta', $result['tokens']);
+        $this->assertNotContains('gamma', $result['tokens']);
+        $this->assertContains('valu', $result['tokens']); // 'values' gets stemmed
+    }
+    
+    public function testGetCustomStopWords(): void
+    {
+        $customWords = ['one', 'two', 'three'];
+        $analyzer = new StandardAnalyzer([
+            'custom_stop_words' => $customWords
+        ]);
+        
+        $retrievedWords = $analyzer->getCustomStopWords();
+        
+        $this->assertEquals($customWords, $retrievedWords);
+        
+        // Test that words are normalized to lowercase
+        $analyzer->setCustomStopWords(['Upper', 'CASE', 'Words']);
+        $retrievedWords = $analyzer->getCustomStopWords();
+        
+        $this->assertEquals(['upper', 'case', 'words'], $retrievedWords);
+    }
+    
+    public function testDisableStopWords(): void
+    {
+        $analyzer = new StandardAnalyzer([
+            'disable_stop_words' => true
+        ]);
+        
+        $result = $analyzer->analyze("The quick brown fox jumps over the lazy dog");
+        
+        // All words should be present (except stemming still applies)
+        $this->assertContains('the', $result['tokens']);
+        $this->assertContains('quick', $result['tokens']);
+        $this->assertContains('brown', $result['tokens']);
+        $this->assertContains('fox', $result['tokens']);
+        $this->assertContains('jump', $result['tokens']); // 'jumps' gets stemmed
+        $this->assertContains('over', $result['tokens']);
+        $this->assertContains('lazi', $result['tokens']); // 'lazy' gets stemmed
+        $this->assertContains('dog', $result['tokens']);
+    }
+    
+    public function testSetStopWordsDisabled(): void
+    {
+        $analyzer = new StandardAnalyzer();
+        
+        // Initially stop words are removed
+        $result = $analyzer->analyze("The test is complete");
+        $this->assertNotContains('the', $result['tokens']);
+        $this->assertNotContains('is', $result['tokens']);
+        
+        // Disable stop words
+        $analyzer->setStopWordsDisabled(true);
+        $result = $analyzer->analyze("The test is complete");
+        $this->assertContains('the', $result['tokens']);
+        $this->assertContains('is', $result['tokens']);
+        
+        // Re-enable stop words
+        $analyzer->setStopWordsDisabled(false);
+        $result = $analyzer->analyze("The test is complete");
+        $this->assertNotContains('the', $result['tokens']);
+        $this->assertNotContains('is', $result['tokens']);
+    }
+    
+    public function testIsStopWordsDisabled(): void
+    {
+        $analyzer1 = new StandardAnalyzer();
+        $this->assertFalse($analyzer1->isStopWordsDisabled());
+        
+        $analyzer2 = new StandardAnalyzer(['disable_stop_words' => true]);
+        $this->assertTrue($analyzer2->isStopWordsDisabled());
+        
+        $analyzer1->setStopWordsDisabled(true);
+        $this->assertTrue($analyzer1->isStopWordsDisabled());
+    }
+    
+    public function testCustomStopWordsWithMultipleLanguages(): void
+    {
+        $analyzer = new StandardAnalyzer([
+            'custom_stop_words' => ['rocket', 'fusée', 'rakete']
+        ]);
+        
+        // Test English
+        $result = $analyzer->analyze("The rocket launches into space", 'english');
+        $this->assertNotContains('rocket', $result['tokens']);
+        $this->assertContains('launch', $result['tokens']);
+        
+        // Test French
+        $result = $analyzer->analyze("La fusée décolle dans l'espace", 'french');
+        $this->assertNotContains('fusée', $result['tokens']);
+        $this->assertContains('décoll', $result['tokens']); // stemmed
+        
+        // Test German
+        $result = $analyzer->analyze("Die Rakete startet in den Weltraum", 'german');
+        $this->assertNotContains('raket', $result['tokens']); // 'rakete' gets stemmed
+        $this->assertContains('startet', $result['tokens']); // 'startet' is the stemmed form in German
+    }
+    
+    public function testCustomStopWordsAreCaseInsensitive(): void
+    {
+        $analyzer = new StandardAnalyzer([
+            'custom_stop_words' => ['Rocket', 'ENGINE', 'Space']
+        ]);
+        
+        $result = $analyzer->analyze("The ROCKET has an engine for space travel");
+        
+        // All variations should be removed regardless of case
+        $this->assertNotContains('rocket', $result['tokens']);
+        $this->assertNotContains('ROCKET', $result['tokens']);
+        $this->assertNotContains('engin', $result['tokens']); // 'engine' gets stemmed
+        $this->assertNotContains('space', $result['tokens']);
+        $this->assertContains('travel', $result['tokens']);
+    }
+    
+    public function testCustomStopWordsWithDuplicates(): void
+    {
+        $analyzer = new StandardAnalyzer();
+        
+        // Add duplicates
+        $analyzer->addCustomStopWord('test');
+        $analyzer->addCustomStopWord('test');
+        $analyzer->addCustomStopWord('TEST');
+        
+        $customWords = $analyzer->getCustomStopWords();
+        
+        // Should only contain one instance
+        $this->assertCount(1, $customWords);
+        $this->assertEquals(['test'], $customWords);
+    }
+    
+    public function testCustomStopWordsWithWhitespace(): void
+    {
+        $analyzer = new StandardAnalyzer([
+            'custom_stop_words' => ['  trimmed  ', "\ttabbed\t", "\nnewline\n"]
+        ]);
+        
+        $customWords = $analyzer->getCustomStopWords();
+        
+        // Words should be trimmed
+        $this->assertEquals(['trimmed', 'tabbed', 'newline'], $customWords);
+        
+        $result = $analyzer->analyze("This is trimmed and tabbed with newline text");
+        $this->assertNotContains('trimmed', $result['tokens']);
+        $this->assertNotContains('tabbed', $result['tokens']);
+        $this->assertNotContains('newline', $result['tokens']);
     }
 }
