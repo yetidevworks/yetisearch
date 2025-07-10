@@ -13,6 +13,7 @@ class SqliteStorage implements StorageInterface
     private ?\PDO $connection = null;
     private array $config = [];
     private array $preparedStatements = [];
+    private ?bool $rtreeSupport = null;
     
     public function connect(array $config): void
     {
@@ -100,25 +101,27 @@ class SqliteStorage implements StorageInterface
             $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_terms_term ON {$name}_terms(term)");
             $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_terms_doc ON {$name}_terms(document_id)");
             
-            // Create R-tree spatial index
-            $spatialSql = "
-                CREATE VIRTUAL TABLE IF NOT EXISTS {$name}_spatial USING rtree(
-                    id,              -- Document ID (integer required by R-tree)
-                    minLat, maxLat,  -- Latitude bounds
-                    minLng, maxLng   -- Longitude bounds
-                )
-            ";
-            $this->connection->exec($spatialSql);
-            
-            // Create ID mapping table
-            $mappingSql = "
-                CREATE TABLE IF NOT EXISTS {$name}_id_map (
-                    string_id TEXT PRIMARY KEY,
-                    numeric_id INTEGER
-                )
-            ";
-            $this->connection->exec($mappingSql);
-            $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_id_map_numeric ON {$name}_id_map(numeric_id)");
+            // Create R-tree spatial index if available
+            if ($this->hasRTreeSupport()) {
+                $spatialSql = "
+                    CREATE VIRTUAL TABLE IF NOT EXISTS {$name}_spatial USING rtree(
+                        id,              -- Document ID (integer required by R-tree)
+                        minLat, maxLat,  -- Latitude bounds
+                        minLng, maxLng   -- Longitude bounds
+                    )
+                ";
+                $this->connection->exec($spatialSql);
+                
+                // Create ID mapping table
+                $mappingSql = "
+                    CREATE TABLE IF NOT EXISTS {$name}_id_map (
+                        string_id TEXT PRIMARY KEY,
+                        numeric_id INTEGER
+                    )
+                ";
+                $this->connection->exec($mappingSql);
+                $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_id_map_numeric ON {$name}_id_map(numeric_id)");
+            }
             
         } catch (\PDOException $e) {
             throw new StorageException("Failed to create index '{$name}': " . $e->getMessage());
@@ -774,6 +777,11 @@ class SqliteStorage implements StorageInterface
     
     private function indexSpatialData(string $index, string $id, array $document): void
     {
+        // Skip if R-tree support is not available
+        if (!$this->hasRTreeSupport()) {
+            return;
+        }
+        
         // R-tree requires integer IDs, so we create a numeric hash of the string ID
         $spatialId = $this->getNumericId($id);
         
@@ -843,6 +851,16 @@ class SqliteStorage implements StorageInterface
         $spatialParams = [];
         $spatialJoin = '';
         $distanceSelect = '';
+        
+        // Return empty spatial query if R-tree is not supported
+        if (!$this->hasRTreeSupport()) {
+            return [
+                'join' => '',
+                'where' => '',
+                'params' => [],
+                'select' => ''
+            ];
+        }
         
         // Check if we need distance calculation for sorting
         $needsDistance = isset($geoFilters['distance_sort']) && !isset($geoFilters['near']);
@@ -956,6 +974,11 @@ class SqliteStorage implements StorageInterface
     {
         $this->ensureConnected();
         
+        // Skip if R-tree support is not available
+        if (!$this->hasRTreeSupport()) {
+            return;
+        }
+        
         try {
             // Check if spatial table exists
             $stmt = $this->connection->prepare(
@@ -990,5 +1013,26 @@ class SqliteStorage implements StorageInterface
         } catch (\PDOException $e) {
             throw new StorageException("Failed to ensure spatial table exists for '{$name}': " . $e->getMessage());
         }
+    }
+    
+    private function hasRTreeSupport(): bool
+    {
+        if ($this->rtreeSupport !== null) {
+            return $this->rtreeSupport;
+        }
+        
+        // Ensure we have a connection
+        $this->ensureConnected();
+        
+        try {
+            // Try to create a temporary R-tree table to test support
+            $this->connection->exec("CREATE VIRTUAL TABLE IF NOT EXISTS test_rtree_support USING rtree(id, minX, maxX)");
+            $this->connection->exec("DROP TABLE IF EXISTS test_rtree_support");
+            $this->rtreeSupport = true;
+        } catch (\PDOException $e) {
+            $this->rtreeSupport = false;
+        }
+        
+        return $this->rtreeSupport;
     }
 }

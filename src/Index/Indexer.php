@@ -282,12 +282,14 @@ class Indexer implements IndexerInterface
                 ];
                 
                 // Include geo data in chunks
-                $docArray = $document->toArray();
-                if (isset($docArray['geo'])) {
-                    $chunkDoc['geo'] = $docArray['geo'];
-                }
-                if (isset($docArray['geo_bounds'])) {
-                    $chunkDoc['geo_bounds'] = $docArray['geo_bounds'];
+                if ($document instanceof \YetiSearch\Models\Document) {
+                    $docArray = $document->toArray();
+                    if (isset($docArray['geo'])) {
+                        $chunkDoc['geo'] = $docArray['geo'];
+                    }
+                    if (isset($docArray['geo_bounds'])) {
+                        $chunkDoc['geo_bounds'] = $docArray['geo_bounds'];
+                    }
                 }
                 
                 $this->storage->insert($this->indexName, $chunkDoc);
@@ -305,12 +307,14 @@ class Indexer implements IndexerInterface
         ];
         
         // Include geo data if present
-        $docArray = $document->toArray();
-        if (isset($docArray['geo'])) {
-            $data['geo'] = $docArray['geo'];
-        }
-        if (isset($docArray['geo_bounds'])) {
-            $data['geo_bounds'] = $docArray['geo_bounds'];
+        if ($document instanceof \YetiSearch\Models\Document) {
+            $docArray = $document->toArray();
+            if (isset($docArray['geo'])) {
+                $data['geo'] = $docArray['geo'];
+            }
+            if (isset($docArray['geo_bounds'])) {
+                $data['geo_bounds'] = $docArray['geo_bounds'];
+            }
         }
         
         return $data;
