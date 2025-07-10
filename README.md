@@ -29,6 +29,7 @@ A powerful, pure-PHP search engine library with advanced full-text search capabi
 - [Architecture](#architecture)
 - [Testing](#testing)
 - [API Reference](#api-reference)
+- [Future Features](#future-features)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -319,9 +320,8 @@ $config = [
         'strip_html' => true,           // Remove HTML tags
         'strip_punctuation' => true,    // Remove punctuation
         'expand_contractions' => true,  // Expand contractions (e.g., don't -> do not)
-        'stop_words' => [               // Additional stop words
-            'english' => ['additional', 'custom', 'stopwords']
-        ]
+        'custom_stop_words' => ['example', 'custom'], // Additional stop words to exclude
+        'disable_stop_words' => false   // Set to true to disable all stop word filtering
     ],
     'indexer' => [
         'batch_size' => 100,            // Documents per batch
@@ -421,6 +421,35 @@ Supported languages:
 - Swedish
 - Norwegian
 - Danish
+
+### Custom Stop Words
+
+You can add custom stop words to exclude specific terms from being indexed:
+
+```php
+// Configure custom stop words during initialization
+$search = new YetiSearch([
+    'analyzer' => [
+        'custom_stop_words' => ['lorem', 'ipsum', 'dolor']
+    ]
+]);
+
+// Or add them dynamically
+$analyzer = $search->getAnalyzerInstance();
+$analyzer->addCustomStopWord('example');
+$analyzer->addCustomStopWord('test');
+
+// Remove a custom stop word
+$analyzer->removeCustomStopWord('test');
+
+// Get all custom stop words
+$customWords = $analyzer->getCustomStopWords();
+
+// Disable all stop word filtering (not recommended)
+$analyzer->setStopWordsDisabled(true);
+```
+
+Custom stop words are applied in addition to the default language-specific stop words. They are case-insensitive and apply across all languages.
 
 ### Search Result Deduplication
 
@@ -668,6 +697,43 @@ $query->limit($limit)
       ->boost('title', 2.0)
       ->highlight(true);
 ```
+
+## Future Feature Ideas
+
+The following features are ideas for future releases:
+
+### Index Management Enhancements
+- **Index Aliases** - Create aliases for indexes to simplify management and allow seamless index switching
+- **Index Templates** - Define templates for consistent index configuration across similar content types
+- **Automatic Index Routing** - Route documents to appropriate indexes based on document properties
+- **Real-time Index Synchronization** - Synchronize data between multiple indexes in real-time
+- **Index Versioning and Migrations** - Support for index schema evolution with migration tools
+
+### Language and Analysis
+- **Automatic Language Detection** - Detect document language automatically instead of defaulting to English
+- **Custom Analyzer Plugins** - Allow custom text analysis plugins for specialized content
+- **Phonetic Matching** - Support for soundex/metaphone matching for name searches
+- **Synonym Support** - Configure synonyms for enhanced search matching
+
+### Search Enhancements
+- **Query DSL** - Advanced query language for complex search expressions
+- **Search Templates** - Save and reuse common search patterns
+- **Geo-spatial Search** - Support for location-based searching
+- **More Like This** - Find similar documents based on content similarity
+- **Search Analytics** - Built-in analytics for search queries and results
+- **Full Content Result** - Option to return full document content in search results
+
+### Performance and Scalability
+- **Distributed Search** - Support for searching across multiple YetiSearch instances
+- **Index Sharding** - Split large indexes across multiple shards
+- **Query Caching Improvements** - More sophisticated caching strategies
+- **Bulk Operations API** - Optimized bulk indexing and updates
+
+### Integration Features
+- **Webhook Support** - Notify external systems of index changes
+- **Import/Export Tools** - Tools for data migration between different search systems
+- **REST API** - HTTP API for remote access to YetiSearch functionality
+- **GraphQL Support** - GraphQL endpoint for flexible data querying
 
 ## Contributing
 
