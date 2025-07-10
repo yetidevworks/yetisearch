@@ -26,6 +26,10 @@ class GeoSearchTest extends TestCase
                     'category' => ['boost' => 2.0, 'store' => true],
                     'address' => ['boost' => 1.0, 'store' => true]
                 ]
+            ],
+            'analyzer' => [
+                'remove_stop_words' => false,  // Disable stop words removal
+                'disable_stop_words' => true
             ]
         ]);
         
@@ -37,7 +41,7 @@ class GeoSearchTest extends TestCase
                 'id' => 'pdx-coffee-1',
                 'content' => [
                     'title' => 'Stumptown Coffee Roasters',
-                    'body' => 'Portland original coffee roaster',
+                    'body' => 'Portland original coffee roaster serving specialty coffee',
                     'category' => 'Coffee Shop',
                     'address' => '128 SW 3rd Ave, Portland, OR'
                 ],
@@ -98,6 +102,8 @@ class GeoSearchTest extends TestCase
         $query = new SearchQuery('coffee');
         
         $searchEngine = $this->search->getSearchEngine($this->indexName);
+        
+        // Search for coffee
         $results = $searchEngine->search($query);
         
         // Should find all 4 coffee shops
