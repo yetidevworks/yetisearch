@@ -176,10 +176,6 @@ class GeoSearchTest extends TestCase
     {
         $this->requiresGeoSupport();
         
-        // Note: There's a known issue with SQLite where ORDER BY distance doesn't work correctly
-        // when combining FTS5 MATCH with calculated columns, even when using CTEs or subqueries.
-        // This appears to be a fundamental limitation in SQLite's query planner.
-        
         $centerPoint = new GeoPoint(45.5152, -122.6784); // Downtown Portland
         
         // Test 1: Without text query - distance sorting works correctly
@@ -203,7 +199,7 @@ class GeoSearchTest extends TestCase
         $this->assertEquals($sortedDistances1, $distances1, 
             "Distances should be in ascending order for non-FTS queries");
         
-        // Test 2: With text query - all results have valid distances but ordering may not work
+        // Test 2: With text query - PHP sorting should fix the ORDER BY issue
         $query2 = new SearchQuery('coffee');
         $query2->sortByDistance($centerPoint, 'asc');
         
@@ -213,13 +209,42 @@ class GeoSearchTest extends TestCase
         $this->assertCount(4, $results2->getResults());
         
         // Verify all results have valid distances
-        foreach ($results2->getResults() as $result) {
+        $distances2 = [];
+        foreach ($results2->getResults() as $idx => $result) {
             $this->assertTrue($result->hasDistance());
             $this->assertGreaterThan(0, $result->getDistance());
+            $distances2[] = $result->getDistance();
         }
         
-        // TODO: SQLite limitation - ORDER BY with FTS5 doesn't work reliably
-        // Consider post-processing sort in PHP for critical use cases
+        // With PHP sorting, distances should now be in correct order
+        $sortedDistances2 = $distances2;
+        sort($sortedDistances2, SORT_NUMERIC);
+        $this->assertEquals($sortedDistances2, $distances2, 
+            "Distances should be in ascending order with PHP sorting for FTS queries");
+        
+        // Verify the actual order matches expected locations
+        $titles = [];
+        foreach ($results2->getResults() as $result) {
+            $titles[] = $result->getDocument()['title'];
+        }
+        
+        // Expected order from closest to farthest from downtown Portland
+        // Stumptown and Blue Star are in Portland (closest)
+        // Victrola is in Seattle and Revolver is in Vancouver (much farther)
+        $portlandShops = ['Stumptown Coffee Roasters', 'Blue Star Donuts'];
+        $distantShops = ['Victrola Coffee Roasters', 'Revolver Coffee'];
+        
+        // First two should be Portland shops (much closer)
+        $this->assertContains($titles[0], $portlandShops, 
+            "First result should be a Portland coffee shop");
+        $this->assertContains($titles[1], $portlandShops, 
+            "Second result should be a Portland coffee shop");
+        
+        // Last two should be Seattle/Vancouver shops (much farther)
+        $this->assertContains($titles[2], $distantShops, 
+            "Third result should be Seattle or Vancouver shop");
+        $this->assertContains($titles[3], $distantShops, 
+            "Fourth result should be Seattle or Vancouver shop");
     }
     
     public function testCombineTextAndGeoSearch(): void
@@ -311,6 +336,44 @@ class GeoSearchTest extends TestCase
         
         $this->assertCount(1, $results->getResults());
         $this->assertEquals('Portland Metro Area', $results->getResults()[0]->get('title'));
+    }
+    
+    public function testSortByDistanceWithPagination(): void
+    {
+        $this->requiresGeoSupport();
+        
+        $centerPoint = new GeoPoint(45.5152, -122.6784); // Downtown Portland
+        
+        // Test pagination with FTS + distance sorting (uses PHP sorting)
+        $query = new SearchQuery('coffee');
+        $query->sortByDistance($centerPoint, 'asc')
+              ->limit(2)
+              ->offset(0);
+        
+        $searchEngine = $this->search->getSearchEngine($this->indexName);
+        $results1 = $searchEngine->search($query);
+        
+        // Should get first 2 coffee shops by distance
+        $this->assertCount(2, $results1->getResults());
+        
+        // Get next page
+        $query->offset(2);
+        $results2 = $searchEngine->search($query);
+        
+        // Should get remaining 2 coffee shops
+        $this->assertCount(2, $results2->getResults());
+        
+        // Verify no duplicate results between pages
+        $page1Ids = array_map(fn($r) => $r->getId(), $results1->getResults());
+        $page2Ids = array_map(fn($r) => $r->getId(), $results2->getResults());
+        $this->assertEmpty(array_intersect($page1Ids, $page2Ids), 
+            "No results should appear on both pages");
+        
+        // Verify distance ordering across pages
+        $page1MaxDistance = max(array_map(fn($r) => $r->getDistance(), $results1->getResults()));
+        $page2MinDistance = min(array_map(fn($r) => $r->getDistance(), $results2->getResults()));
+        $this->assertLessThanOrEqual($page2MinDistance, $page1MaxDistance,
+            "All page 1 distances should be <= all page 2 distances");
     }
     
 }
