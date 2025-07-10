@@ -9,6 +9,7 @@ class SearchResult
     private array $document;
     private array $highlights = [];
     private array $metadata = [];
+    private ?float $distance = null;
     
     public function __construct(array $data)
     {
@@ -17,6 +18,7 @@ class SearchResult
         $this->document = $data['document'] ?? [];
         $this->highlights = $data['highlights'] ?? [];
         $this->metadata = $data['metadata'] ?? [];
+        $this->distance = isset($data['distance']) ? (float)$data['distance'] : null;
     }
     
     public function getId(): string
@@ -59,15 +61,31 @@ class SearchResult
         return $this->metadata[$key] ?? $default;
     }
     
+    public function getDistance(): ?float
+    {
+        return $this->distance;
+    }
+    
+    public function hasDistance(): bool
+    {
+        return $this->distance !== null;
+    }
+    
     public function toArray(): array
     {
-        return [
+        $data = [
             'id' => $this->id,
             'score' => $this->score,
             'document' => $this->document,
             'highlights' => $this->highlights,
             'metadata' => $this->metadata
         ];
+        
+        if ($this->distance !== null) {
+            $data['distance'] = $this->distance;
+        }
+        
+        return $data;
     }
     
     public function toJson(int $options = 0): string

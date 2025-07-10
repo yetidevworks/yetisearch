@@ -3,6 +3,8 @@
 namespace YetiSearch\Models;
 
 use YetiSearch\Contracts\IndexableInterface;
+use YetiSearch\Geo\GeoPoint;
+use YetiSearch\Geo\GeoBounds;
 
 class Document implements IndexableInterface
 {
@@ -12,6 +14,8 @@ class Document implements IndexableInterface
     private array $metadata;
     private int $timestamp;
     private string $type;
+    private ?GeoPoint $geoPoint = null;
+    private ?GeoBounds $geoBounds = null;
     
     public function __construct(
         string $id,
@@ -89,9 +93,34 @@ class Document implements IndexableInterface
         $this->type = $type;
     }
     
+    public function getGeoPoint(): ?GeoPoint
+    {
+        return $this->geoPoint;
+    }
+    
+    public function setGeoPoint(?GeoPoint $geoPoint): void
+    {
+        $this->geoPoint = $geoPoint;
+    }
+    
+    public function getGeoBounds(): ?GeoBounds
+    {
+        return $this->geoBounds;
+    }
+    
+    public function setGeoBounds(?GeoBounds $geoBounds): void
+    {
+        $this->geoBounds = $geoBounds;
+    }
+    
+    public function hasGeoData(): bool
+    {
+        return $this->geoPoint !== null || $this->geoBounds !== null;
+    }
+    
     public function toArray(): array
     {
-        return [
+        $data = [
             'id' => $this->id,
             'content' => $this->content,
             'language' => $this->language,
@@ -99,11 +128,21 @@ class Document implements IndexableInterface
             'timestamp' => $this->timestamp,
             'type' => $this->type
         ];
+        
+        if ($this->geoPoint) {
+            $data['geo'] = $this->geoPoint->toArray();
+        }
+        
+        if ($this->geoBounds) {
+            $data['geo_bounds'] = $this->geoBounds->toArray();
+        }
+        
+        return $data;
     }
     
     public static function fromArray(array $data): self
     {
-        return new self(
+        $document = new self(
             $data['id'] ?? uniqid(),
             $data['content'] ?? [],
             $data['language'] ?? null,
@@ -111,5 +150,16 @@ class Document implements IndexableInterface
             $data['timestamp'] ?? null,
             $data['type'] ?? 'default'
         );
+        
+        // Handle geo data
+        if (isset($data['geo'])) {
+            $document->setGeoPoint(GeoPoint::fromArray($data['geo']));
+        }
+        
+        if (isset($data['geo_bounds'])) {
+            $document->setGeoBounds(GeoBounds::fromArray($data['geo_bounds']));
+        }
+        
+        return $document;
     }
 }

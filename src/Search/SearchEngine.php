@@ -236,6 +236,26 @@ class SearchEngine implements SearchEngineInterface
             $storageQuery['fields'] = $query->getFields();
         }
         
+        // Add geo filters if present
+        if ($query->hasGeoFilters()) {
+            $geoFilters = $query->getGeoFilters();
+            
+            // Convert GeoPoint and GeoBounds objects to arrays for storage layer
+            if (isset($geoFilters['near'])) {
+                $geoFilters['near']['point'] = $geoFilters['near']['point']->toArray();
+            }
+            
+            if (isset($geoFilters['within'])) {
+                $geoFilters['within']['bounds'] = $geoFilters['within']['bounds']->toArray();
+            }
+            
+            if (isset($geoFilters['distance_sort'])) {
+                $geoFilters['distance_sort']['from'] = $geoFilters['distance_sort']['from']->toArray();
+            }
+            
+            $storageQuery['geoFilters'] = $geoFilters;
+        }
+        
         return $storageQuery;
     }
     
@@ -283,13 +303,20 @@ class SearchEngine implements SearchEngineInterface
                 $logged = true;
             }
             
-            $processedResult = new SearchResult([
+            $resultData = [
                 'id' => $result['id'],
                 'score' => $normalizedScore,
                 'document' => $filteredDocument,
                 'highlights' => $highlights,
                 'metadata' => $result['metadata'] ?? []
-            ]);
+            ];
+            
+            // Add distance if present
+            if (isset($result['distance'])) {
+                $resultData['distance'] = $result['distance'];
+            }
+            
+            $processedResult = new SearchResult($resultData);
             
             $processedResults[] = $processedResult;
         }

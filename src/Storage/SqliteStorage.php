@@ -4,6 +4,9 @@ namespace YetiSearch\Storage;
 
 use YetiSearch\Contracts\StorageInterface;
 use YetiSearch\Exceptions\StorageException;
+use YetiSearch\Models\Document;
+use YetiSearch\Geo\GeoPoint;
+use YetiSearch\Geo\GeoBounds;
 
 class SqliteStorage implements StorageInterface
 {
@@ -97,6 +100,16 @@ class SqliteStorage implements StorageInterface
             $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_terms_term ON {$name}_terms(term)");
             $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_terms_doc ON {$name}_terms(document_id)");
             
+            // Create R-tree spatial index
+            $spatialSql = "
+                CREATE VIRTUAL TABLE IF NOT EXISTS {$name}_spatial USING rtree(
+                    id,              -- Document ID (integer required by R-tree)
+                    minLat, maxLat,  -- Latitude bounds
+                    minLng, maxLng   -- Longitude bounds
+                )
+            ";
+            $this->connection->exec($spatialSql);
+            
         } catch (\PDOException $e) {
             throw new StorageException("Failed to create index '{$name}': " . $e->getMessage());
         }
@@ -110,6 +123,7 @@ class SqliteStorage implements StorageInterface
             $this->connection->exec("DROP TABLE IF EXISTS {$name}");
             $this->connection->exec("DROP TABLE IF EXISTS {$name}_fts");
             $this->connection->exec("DROP TABLE IF EXISTS {$name}_terms");
+            $this->connection->exec("DROP TABLE IF EXISTS {$name}_spatial");
         } catch (\PDOException $e) {
             throw new StorageException("Failed to drop index '{$name}': " . $e->getMessage());
         }
@@ -156,6 +170,9 @@ class SqliteStorage implements StorageInterface
             
             $this->indexTerms($index, $id, $document['content']);
             
+            // Handle spatial indexing
+            $this->indexSpatialData($index, $id, $document);
+            
             $this->connection->commit();
         } catch (\PDOException $e) {
             $this->connection->rollBack();
@@ -180,6 +197,10 @@ class SqliteStorage implements StorageInterface
             $this->connection->prepare("DELETE FROM {$index}_fts WHERE id = ?")->execute([$id]);
             $this->connection->prepare("DELETE FROM {$index}_terms WHERE document_id = ?")->execute([$id]);
             
+            // Delete from spatial index (use hash of string ID for R-tree integer ID)
+            $spatialId = $this->getNumericId($id);
+            $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?")->execute([$spatialId]);
+            
             $this->connection->commit();
         } catch (\PDOException $e) {
             $this->connection->rollBack();
@@ -197,17 +218,21 @@ class SqliteStorage implements StorageInterface
         $offset = $query['offset'] ?? 0;
         $sort = $query['sort'] ?? [];
         $language = $query['language'] ?? null;
+        $geoFilters = $query['geoFilters'] ?? [];
+        
+        // Build spatial query components
+        $spatial = $this->buildSpatialQuery($index, $geoFilters);
         
         $sql = "
             SELECT 
                 d.*,
-                bm25({$index}_fts) as rank
+                bm25({$index}_fts) as rank" . $spatial['select'] . "
             FROM {$index} d
-            INNER JOIN {$index}_fts f ON d.id = f.id
-            WHERE {$index}_fts MATCH ?
+            INNER JOIN {$index}_fts f ON d.id = f.id" . $spatial['join'] . "
+            WHERE {$index}_fts MATCH ?" . $spatial['where'] . "
         ";
         
-        $params = [$searchQuery];
+        $params = array_merge([$searchQuery], $spatial['params']);
         
         if ($language) {
             $sql .= " AND d.language = ?";
@@ -267,7 +292,11 @@ class SqliteStorage implements StorageInterface
             }
         }
         
-        if (empty($sort)) {
+        // Handle distance sorting from geo filters
+        if (isset($geoFilters['distance_sort'])) {
+            $dir = strtoupper($geoFilters['distance_sort']['direction']) === 'DESC' ? 'DESC' : 'ASC';
+            $sql .= " ORDER BY distance {$dir}";
+        } elseif (empty($sort)) {
             $sql .= " ORDER BY rank DESC";
         } else {
             $orderClauses = [];
@@ -275,6 +304,8 @@ class SqliteStorage implements StorageInterface
                 $dir = strtoupper($direction) === 'DESC' ? 'DESC' : 'ASC';
                 if ($field === '_score') {
                     $orderClauses[] = "rank {$dir}";
+                } elseif ($field === 'distance' && !empty($spatial['select'])) {
+                    $orderClauses[] = "distance {$dir}";
                 } else {
                     $orderClauses[] = "d.{$field} {$dir}";
                 }
@@ -291,8 +322,15 @@ class SqliteStorage implements StorageInterface
             $stmt->execute($params);
             
             $results = [];
+            $radiusFilter = null;
+            
+            // Check if we need to do radius post-filtering
+            if (isset($geoFilters['near'])) {
+                $radiusFilter = $geoFilters['near']['radius'];
+            }
+            
             while ($row = $stmt->fetch()) {
-                $results[] = [
+                $result = [
                     'id' => $row['id'],
                     'score' => abs($row['rank']),
                     'document' => json_decode($row['content'], true),
@@ -301,6 +339,20 @@ class SqliteStorage implements StorageInterface
                     'type' => $row['type'],
                     'timestamp' => $row['timestamp']
                 ];
+                
+                // Add distance if available
+                if (isset($row['distance'])) {
+                    $distance = (float)$row['distance'];
+                    
+                    // Skip results outside radius for 'near' queries
+                    if ($radiusFilter !== null && $distance > $radiusFilter) {
+                        continue;
+                    }
+                    
+                    $result['distance'] = $distance;
+                }
+                
+                $results[] = $result;
             }
             
             return $results;
@@ -670,5 +722,145 @@ class SqliteStorage implements StorageInterface
         }
         
         return $positions;
+    }
+    
+    private function indexSpatialData(string $index, string $id, array $document): void
+    {
+        // R-tree requires integer IDs, so we create a numeric hash of the string ID
+        $spatialId = $this->getNumericId($id);
+        
+        // First, delete any existing spatial data
+        $deleteStmt = $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?");
+        $deleteStmt->execute([$spatialId]);
+        
+        // Check for geo data
+        $hasGeo = isset($document['geo']) || isset($document['geo_bounds']);
+        if (!$hasGeo) {
+            return;
+        }
+        
+        $minLat = $maxLat = $minLng = $maxLng = null;
+        
+        // Handle point data
+        if (isset($document['geo']) && is_array($document['geo'])) {
+            $geo = $document['geo'];
+            if (isset($geo['lat']) && isset($geo['lng'])) {
+                $minLat = $maxLat = (float)$geo['lat'];
+                $minLng = $maxLng = (float)$geo['lng'];
+            }
+        }
+        
+        // Handle bounds data (overrides point if both present)
+        if (isset($document['geo_bounds']) && is_array($document['geo_bounds'])) {
+            $bounds = $document['geo_bounds'];
+            if (isset($bounds['north']) && isset($bounds['south']) && 
+                isset($bounds['east']) && isset($bounds['west'])) {
+                $minLat = (float)$bounds['south'];
+                $maxLat = (float)$bounds['north'];
+                $minLng = (float)$bounds['west'];
+                $maxLng = (float)$bounds['east'];
+            }
+        }
+        
+        // Insert into spatial index if we have valid coordinates
+        if ($minLat !== null && $maxLat !== null && $minLng !== null && $maxLng !== null) {
+            $spatialStmt = $this->connection->prepare("
+                INSERT INTO {$index}_spatial (id, minLat, maxLat, minLng, maxLng)
+                VALUES (?, ?, ?, ?, ?)
+            ");
+            $spatialStmt->execute([$spatialId, $minLat, $maxLat, $minLng, $maxLng]);
+        }
+    }
+    
+    private function getNumericId(string $id): int
+    {
+        // Create a stable numeric ID from string ID using CRC32
+        // We use abs() to ensure positive integer for R-tree
+        return abs(crc32($id));
+    }
+    
+    private function buildSpatialQuery(string $index, array $geoFilters): array
+    {
+        $spatialSql = '';
+        $spatialParams = [];
+        $spatialJoin = '';
+        $distanceSelect = '';
+        
+        if (isset($geoFilters['near'])) {
+            $near = $geoFilters['near'];
+            $point = is_array($near['point']) ? new GeoPoint($near['point']['lat'], $near['point']['lng']) : $near['point'];
+            $radius = $near['radius'];
+            
+            // Calculate bounding box for initial R-tree filtering
+            $bounds = $point->getBoundingBox($radius);
+            
+            $spatialJoin = " INNER JOIN {$index}_spatial s ON s.id = " . $this->getNumericIdExpression('d.id');
+            
+            // R-tree bounding box filter
+            $spatialSql = " AND s.minLat <= ? AND s.maxLat >= ? AND s.minLng <= ? AND s.maxLng >= ?";
+            $spatialParams = [
+                $bounds->getNorth(),
+                $bounds->getSouth(),
+                $bounds->getEast(),
+                $bounds->getWest()
+            ];
+            
+            // Add distance calculation for post-filtering and sorting
+            $lat = $point->getLatitude();
+            $lng = $point->getLongitude();
+            $distanceSelect = ", " . $this->getDistanceExpression($lat, $lng) . " as distance";
+        }
+        elseif (isset($geoFilters['within'])) {
+            $boundsData = $geoFilters['within']['bounds'];
+            $bounds = is_array($boundsData) ? GeoBounds::fromArray($boundsData) : $boundsData;
+            
+            $spatialJoin = " INNER JOIN {$index}_spatial s ON s.id = " . $this->getNumericIdExpression('d.id');
+            
+            // R-tree intersection query
+            $spatialSql = " AND s.minLat <= ? AND s.maxLat >= ? AND s.minLng <= ? AND s.maxLng >= ?";
+            $spatialParams = [
+                $bounds->getNorth(),
+                $bounds->getSouth(), 
+                $bounds->getEast(),
+                $bounds->getWest()
+            ];
+        }
+        
+        return [
+            'join' => $spatialJoin,
+            'where' => $spatialSql,
+            'params' => $spatialParams,
+            'select' => $distanceSelect
+        ];
+    }
+    
+    private function getNumericIdExpression(string $field): string
+    {
+        // Use CRC32 equivalent in SQLite
+        // This creates a stable numeric hash from the string ID
+        return "ABS(
+            (
+                (CAST(unicode(substr({$field}, 1, 1)) AS INTEGER) * 16777619) ^
+                (CAST(unicode(substr({$field}, 2, 1)) AS INTEGER) * 16777619) ^
+                (CAST(unicode(substr({$field}, 3, 1)) AS INTEGER) * 16777619) ^
+                (CAST(unicode(substr({$field}, 4, 1)) AS INTEGER) * 16777619)
+            ) % 2147483647
+        )";
+    }
+    
+    private function getDistanceExpression(float $lat, float $lng): string
+    {
+        // Simplified distance calculation for SQLite
+        // Using degrees directly with approximate conversion
+        $degToKm = 111.12; // Approximate km per degree at equator
+        
+        // Simple Euclidean distance with latitude correction
+        // This is less accurate than Haversine but sufficient for sorting/filtering
+        return "
+            SQRT(
+                POWER(({$lat} - (s.minLat + s.maxLat) / 2) * {$degToKm}, 2) +
+                POWER(({$lng} - (s.minLng + s.maxLng) / 2) * {$degToKm} * COS((s.minLat + s.maxLat) / 2 * 0.0174533), 2)
+            ) * 1000
+        ";
     }
 }
