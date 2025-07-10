@@ -10,7 +10,7 @@ use YetiSearch\Models\SearchQuery;
 
 class GeoSearchTest extends TestCase
 {
-    private YetiSearch $search;
+    protected ?YetiSearch $search = null;
     private string $indexName = 'geo_test';
     
     protected function setUp(): void
@@ -18,57 +18,90 @@ class GeoSearchTest extends TestCase
         parent::setUp();
         
         $this->search = new YetiSearch([
-            'storage' => ['path' => ':memory:']
+            'storage' => ['path' => ':memory:'],
+            'indexer' => [
+                'fields' => [
+                    'title' => ['boost' => 3.0, 'store' => true],
+                    'body' => ['boost' => 1.0, 'store' => true],
+                    'category' => ['boost' => 2.0, 'store' => true],
+                    'address' => ['boost' => 1.0, 'store' => true]
+                ]
+            ]
         ]);
         
-        $indexer = $this->search->createIndex($this->indexName);
+        $this->search->createIndex($this->indexName);
         
         // Index test locations
         $locations = [
             [
                 'id' => 'pdx-coffee-1',
-                'title' => 'Stumptown Coffee Roasters',
-                'content' => 'Portland original coffee roaster',
-                'category' => 'Coffee Shop',
-                'address' => '128 SW 3rd Ave, Portland, OR',
+                'content' => [
+                    'title' => 'Stumptown Coffee Roasters',
+                    'body' => 'Portland original coffee roaster',
+                    'category' => 'Coffee Shop',
+                    'address' => '128 SW 3rd Ave, Portland, OR'
+                ],
                 'geo' => ['lat' => 45.5152, 'lng' => -122.6734]
             ],
             [
                 'id' => 'pdx-coffee-2',
-                'title' => 'Blue Star Donuts',
-                'content' => 'Gourmet donuts and coffee',
-                'category' => 'Coffee Shop',
-                'address' => '1237 SW Washington St, Portland, OR',
+                'content' => [
+                    'title' => 'Blue Star Donuts',
+                    'body' => 'Gourmet donuts and coffee',
+                    'category' => 'Coffee Shop',
+                    'address' => '1237 SW Washington St, Portland, OR'
+                ],
                 'geo' => ['lat' => 45.5220, 'lng' => -122.6845]
             ],
             [
                 'id' => 'pdx-restaurant-1',
-                'title' => 'Pok Pok',
-                'content' => 'Thai street food restaurant',
-                'category' => 'Restaurant',
-                'address' => '3226 SE Division St, Portland, OR',
+                'content' => [
+                    'title' => 'Pok Pok',
+                    'body' => 'Thai street food restaurant',
+                    'category' => 'Restaurant',
+                    'address' => '3226 SE Division St, Portland, OR'
+                ],
                 'geo' => ['lat' => 45.5047, 'lng' => -122.6318]
             ],
             [
                 'id' => 'seattle-coffee-1',
-                'title' => 'Victrola Coffee Roasters',
-                'content' => 'Seattle coffee roaster since 2000',
-                'category' => 'Coffee Shop',
-                'address' => '310 E Pike St, Seattle, WA',
+                'content' => [
+                    'title' => 'Victrola Coffee Roasters',
+                    'body' => 'Seattle coffee roaster since 2000',
+                    'category' => 'Coffee Shop',
+                    'address' => '310 E Pike St, Seattle, WA'
+                ],
                 'geo' => ['lat' => 47.6145, 'lng' => -122.3278]
             ],
             [
                 'id' => 'vancouver-coffee-1',
-                'title' => 'Revolver Coffee',
-                'content' => 'Vancouver specialty coffee',
-                'category' => 'Coffee Shop',
-                'address' => '325 Cambie St, Vancouver, BC',
+                'content' => [
+                    'title' => 'Revolver Coffee',
+                    'body' => 'Vancouver specialty coffee',
+                    'category' => 'Coffee Shop',
+                    'address' => '325 Cambie St, Vancouver, BC'
+                ],
                 'geo' => ['lat' => 49.2835, 'lng' => -123.1089]
             ]
         ];
         
-        $indexer->indexBatch($locations);
+        $this->search->indexBatch($this->indexName, $locations);
+        
+        // Ensure indexing is complete
+        $indexer = $this->search->getIndexer($this->indexName);
         $indexer->flush();
+    }
+    
+    public function testBasicSearchWithoutGeo(): void
+    {
+        // First test basic search without geo filters
+        $query = new SearchQuery('coffee');
+        
+        $searchEngine = $this->search->getSearchEngine($this->indexName);
+        $results = $searchEngine->search($query);
+        
+        // Should find all 4 coffee shops
+        $this->assertCount(4, $results->getResults());
     }
     
     public function testSearchNearPoint(): void
@@ -88,7 +121,7 @@ class GeoSearchTest extends TestCase
             $this->assertLessThanOrEqual(5000, $result->getDistance());
             
             // Should only find Portland coffee shops
-            $this->assertStringContainsString('Portland', $result->get('address'));
+            $this->assertStringContainsString('Portland', $result->get('content')['address']);
         }
     }
     
@@ -104,7 +137,7 @@ class GeoSearchTest extends TestCase
         $this->assertCount(2, $results->getResults());
         
         foreach ($results->getResults() as $result) {
-            $this->assertStringContainsString('Portland', $result->get('address'));
+            $this->assertStringContainsString('Portland', $result->get('content')['address']);
         }
     }
     
@@ -131,7 +164,7 @@ class GeoSearchTest extends TestCase
         $this->assertEquals($sortedDistances, $distances);
         
         // First result should be Stumptown (closest to center)
-        $this->assertEquals('Stumptown Coffee Roasters', $results->getResults()[0]->get('title'));
+        $this->assertEquals('Stumptown Coffee Roasters', $results->getResults()[0]->get('content')['title']);
     }
     
     public function testCombineTextAndGeoSearch(): void
@@ -144,7 +177,7 @@ class GeoSearchTest extends TestCase
         $results = $searchEngine->search($query);
         
         $this->assertCount(1, $results->getResults());
-        $this->assertEquals('Pok Pok', $results->getResults()[0]->get('title'));
+        $this->assertEquals('Pok Pok', $results->getResults()[0]->get('content')['title']);
     }
     
     public function testEmptyGeoResults(): void
@@ -184,19 +217,19 @@ class GeoSearchTest extends TestCase
         $this->assertCount(2, $results->getResults());
         
         foreach ($results->getResults() as $result) {
-            $this->assertEquals('Coffee Shop', $result->get('category'));
+            $this->assertEquals('Coffee Shop', $result->get('content')['category']);
         }
     }
     
     public function testIndexDocumentWithBounds(): void
     {
-        $indexer = $this->search->getIndexer($this->indexName);
-        
         // Index a document with bounds instead of point
-        $indexer->index([
+        $this->search->index($this->indexName, [
             'id' => 'portland-metro',
-            'title' => 'Portland Metro Area',
-            'content' => 'Greater Portland metropolitan area',
+            'content' => [
+                'title' => 'Portland Metro Area',
+                'body' => 'Greater Portland metropolitan area'
+            ],
             'geo_bounds' => [
                 'north' => 45.65,
                 'south' => 45.40,
@@ -204,7 +237,6 @@ class GeoSearchTest extends TestCase
                 'west' => -122.85
             ]
         ]);
-        $indexer->flush();
         
         // Search within those bounds
         $query = new SearchQuery('metro');
@@ -214,6 +246,6 @@ class GeoSearchTest extends TestCase
         $results = $searchEngine->search($query);
         
         $this->assertCount(1, $results->getResults());
-        $this->assertEquals('Portland Metro Area', $results->getResults()[0]->get('title'));
+        $this->assertEquals('Portland Metro Area', $results->getResults()[0]->get('content')['title']);
     }
 }

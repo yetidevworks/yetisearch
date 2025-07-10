@@ -786,6 +786,21 @@ class SqliteStorage implements StorageInterface
         $spatialJoin = '';
         $distanceSelect = '';
         
+        // Check if we need distance calculation for sorting
+        $needsDistance = isset($geoFilters['distance_sort']) && !isset($geoFilters['near']);
+        if ($needsDistance && isset($geoFilters['distance_sort']['from'])) {
+            $from = $geoFilters['distance_sort']['from'];
+            if (is_array($from)) {
+                $lat = $from['lat'];
+                $lng = $from['lng'];
+            } else {
+                $lat = $from->getLatitude();
+                $lng = $from->getLongitude();
+            }
+            $spatialJoin = " LEFT JOIN {$index}_spatial s ON s.id = " . $this->getNumericIdExpression('d.id');
+            $distanceSelect = ", " . $this->getDistanceExpression($lat, $lng) . " as distance";
+        }
+        
         if (isset($geoFilters['near'])) {
             $near = $geoFilters['near'];
             $point = is_array($near['point']) ? new GeoPoint($near['point']['lat'], $near['point']['lng']) : $near['point'];
@@ -836,13 +851,13 @@ class SqliteStorage implements StorageInterface
     
     private function getNumericIdExpression(string $field): string
     {
-        // Use CRC32 equivalent in SQLite
-        // This creates a stable numeric hash from the string ID
+        // Use a simpler hash function for SQLite
+        // Creates a stable numeric hash from the string ID
         return "ABS(
             (
-                (CAST(unicode(substr({$field}, 1, 1)) AS INTEGER) * 16777619) ^
-                (CAST(unicode(substr({$field}, 2, 1)) AS INTEGER) * 16777619) ^
-                (CAST(unicode(substr({$field}, 3, 1)) AS INTEGER) * 16777619) ^
+                (CAST(unicode(substr({$field}, 1, 1)) AS INTEGER) * 16777619) +
+                (CAST(unicode(substr({$field}, 2, 1)) AS INTEGER) * 16777619) +
+                (CAST(unicode(substr({$field}, 3, 1)) AS INTEGER) * 16777619) +
                 (CAST(unicode(substr({$field}, 4, 1)) AS INTEGER) * 16777619)
             ) % 2147483647
         )";
