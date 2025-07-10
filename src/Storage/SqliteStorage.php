@@ -80,7 +80,7 @@ class SqliteStorage implements StorageInterface
                 CREATE VIRTUAL TABLE IF NOT EXISTS {$name}_fts USING fts5(
                     id UNINDEXED,
                     content,
-                    tokenize = 'porter unicode61'
+                    tokenize = 'unicode61'
                 )
             ";
             $this->connection->exec($sql);
@@ -223,16 +223,32 @@ class SqliteStorage implements StorageInterface
         // Build spatial query components
         $spatial = $this->buildSpatialQuery($index, $geoFilters);
         
-        $sql = "
-            SELECT 
-                d.*,
-                bm25({$index}_fts) as rank" . $spatial['select'] . "
-            FROM {$index} d
-            INNER JOIN {$index}_fts f ON d.id = f.id" . $spatial['join'] . "
-            WHERE {$index}_fts MATCH ?" . $spatial['where'] . "
-        ";
+        // Check if we have a search query
+        $hasSearchQuery = !empty(trim($searchQuery));
         
-        $params = array_merge([$searchQuery], $spatial['params']);
+        if ($hasSearchQuery) {
+            // Full text search with optional spatial filters
+            $sql = "
+                SELECT 
+                    d.*,
+                    bm25({$index}_fts) as rank" . $spatial['select'] . "
+                FROM {$index} d
+                INNER JOIN {$index}_fts f ON d.id = f.id" . $spatial['join'] . "
+                WHERE {$index}_fts MATCH ?" . $spatial['where'] . "
+            ";
+            $params = array_merge([$searchQuery], $spatial['params']);
+        } else {
+            // No text search, only filters and/or spatial search
+            $sql = "
+                SELECT 
+                    d.*,
+                    0 as rank" . $spatial['select'] . "
+                FROM {$index} d" . 
+                (!empty($spatial['join']) ? $spatial['join'] : "") . "
+                WHERE 1=1" . $spatial['where'] . "
+            ";
+            $params = $spatial['params'];
+        }
         
         if ($language) {
             $sql .= " AND d.language = ?";
@@ -368,15 +384,31 @@ class SqliteStorage implements StorageInterface
         $searchQuery = $query['query'] ?? '';
         $filters = $query['filters'] ?? [];
         $language = $query['language'] ?? null;
+        $geoFilters = $query['geoFilters'] ?? [];
         
-        $sql = "
-            SELECT COUNT(*) as total
-            FROM {$index} d
-            INNER JOIN {$index}_fts f ON d.id = f.id
-            WHERE {$index}_fts MATCH ?
-        ";
+        // Build spatial query components
+        $spatial = $this->buildSpatialQuery($index, $geoFilters);
         
-        $params = [$searchQuery];
+        // Check if we have a search query
+        $hasSearchQuery = !empty(trim($searchQuery));
+        
+        if ($hasSearchQuery) {
+            $sql = "
+                SELECT COUNT(*) as total
+                FROM {$index} d
+                INNER JOIN {$index}_fts f ON d.id = f.id" . $spatial['join'] . "
+                WHERE {$index}_fts MATCH ?" . $spatial['where'] . "
+            ";
+            $params = array_merge([$searchQuery], $spatial['params']);
+        } else {
+            $sql = "
+                SELECT COUNT(*) as total
+                FROM {$index} d" . 
+                (!empty($spatial['join']) ? $spatial['join'] : "") . "
+                WHERE 1=1" . $spatial['where'] . "
+            ";
+            $params = $spatial['params'];
+        }
         
         if ($language) {
             $sql .= " AND d.language = ?";

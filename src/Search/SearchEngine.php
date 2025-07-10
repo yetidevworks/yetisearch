@@ -200,11 +200,11 @@ class SearchEngine implements SearchEngineInterface
         
         $processedTokens = [];
         foreach ($tokens as $token) {
-            $stemmed = $this->analyzer->stem($token, $query->getLanguage());
-            $processedTokens[] = $stemmed;
+            // For now, don't stem since FTS is not using porter
+            $processedTokens[] = $token;
             
             if ($query->isFuzzy() && $this->config['enable_fuzzy']) {
-                $fuzzyTokens = $this->generateFuzzyVariations($stemmed);
+                $fuzzyTokens = $this->generateFuzzyVariations($token);
                 $processedTokens = array_merge($processedTokens, $fuzzyTokens);
             }
         }
@@ -213,7 +213,18 @@ class SearchEngine implements SearchEngineInterface
             $processedTokens = $this->expandSynonyms($processedTokens);
         }
         
-        $processedQuery = implode(' OR ', array_unique($processedTokens));
+        // For SQLite FTS5, we need to properly format the query
+        $uniqueTokens = array_unique($processedTokens);
+        if (count($uniqueTokens) > 1) {
+            $processedQuery = implode(' OR ', $uniqueTokens);
+        } else {
+            $processedQuery = implode(' ', $uniqueTokens);
+        }
+        
+        // Debug: Log the processed query
+        if ($this->logger) {
+            $this->logger->debug('Processed query', ['original' => $queryText, 'processed' => $processedQuery]);
+        }
         
         $newQuery = clone $query;
         $newQuery->setQuery($processedQuery);
