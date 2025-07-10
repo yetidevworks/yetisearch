@@ -147,16 +147,12 @@ class GeoSearchTest extends TestCase
     public function testSortByDistance(): void
     {
         // Note: There's a known issue with SQLite where ORDER BY distance doesn't work correctly
-        // when combining FTS5 MATCH with complex JOIN queries and calculated columns.
-        // This appears to be a SQLite query optimizer issue.
-        
-        // For now, we'll test two scenarios:
-        // 1. Without text query (works correctly)
-        // 2. With text query (has ordering issues)
+        // when combining FTS5 MATCH with calculated columns, even when using CTEs or subqueries.
+        // This appears to be a fundamental limitation in SQLite's query planner.
         
         $centerPoint = new GeoPoint(45.5152, -122.6784); // Downtown Portland
         
-        // Test 1: Sort by distance without text query
+        // Test 1: Without text query - distance sorting works correctly
         $query1 = new SearchQuery('');
         $query1->sortByDistance($centerPoint, 'asc');
         
@@ -165,7 +161,7 @@ class GeoSearchTest extends TestCase
         
         $this->assertCount(5, $results1->getResults()); // All 5 locations
         
-        // Verify distances are sorted for empty query
+        // Verify distances are sorted correctly for non-FTS query
         $distances1 = [];
         foreach ($results1->getResults() as $result) {
             $this->assertTrue($result->hasDistance());
@@ -175,9 +171,9 @@ class GeoSearchTest extends TestCase
         $sortedDistances1 = $distances1;
         sort($sortedDistances1, SORT_NUMERIC);
         $this->assertEquals($sortedDistances1, $distances1, 
-            "Distances should be in ascending order for empty query");
+            "Distances should be in ascending order for non-FTS queries");
         
-        // Test 2: With text query (known issue)
+        // Test 2: With text query - all results have valid distances but ordering may not work
         $query2 = new SearchQuery('coffee');
         $query2->sortByDistance($centerPoint, 'asc');
         
@@ -186,15 +182,14 @@ class GeoSearchTest extends TestCase
         // Verify we got all 4 coffee shops
         $this->assertCount(4, $results2->getResults());
         
-        // Just verify all results have distances (ordering may not be correct)
+        // Verify all results have valid distances
         foreach ($results2->getResults() as $result) {
             $this->assertTrue($result->hasDistance());
             $this->assertGreaterThan(0, $result->getDistance());
         }
         
-        // TODO: Fix ORDER BY with FTS5 queries
-        // Currently, SQLite's query optimizer doesn't properly handle ORDER BY
-        // when combining FTS5 MATCH with LEFT JOINs and calculated distance columns
+        // TODO: SQLite limitation - ORDER BY with FTS5 doesn't work reliably
+        // Consider post-processing sort in PHP for critical use cases
     }
     
     public function testCombineTextAndGeoSearch(): void

@@ -325,8 +325,8 @@ class SqliteStorage implements StorageInterface
         // Handle distance sorting from geo filters
         if (isset($geoFilters['distance_sort']) && !empty($spatial['select'])) {
             $dir = strtoupper($geoFilters['distance_sort']['direction']) === 'DESC' ? 'DESC' : 'ASC';
-            // Note: There's a known issue with SQLite where ORDER BY doesn't work correctly
-            // when combining FTS5 MATCH with complex JOINs and calculated columns
+            // Note: SQLite has issues with ORDER BY on calculated columns when using FTS5
+            // The ordering may not work correctly for text searches with distance sorting
             $sql .= " ORDER BY distance {$dir}";
         } elseif (empty($sort)) {
             $sql .= " ORDER BY rank DESC";
@@ -345,13 +345,11 @@ class SqliteStorage implements StorageInterface
             $sql .= " ORDER BY " . implode(', ', $orderClauses);
         }
         
-        
         $sql .= " LIMIT ? OFFSET ?";
         $params[] = $limit;
         $params[] = $offset;
         
         try {
-            
             $stmt = $this->connection->prepare($sql);
             $stmt->execute($params);
             
@@ -857,8 +855,8 @@ class SqliteStorage implements StorageInterface
                 $lat = $from->getLatitude();
                 $lng = $from->getLongitude();
             }
-            $spatialJoin = " LEFT JOIN {$index}_id_map m ON m.string_id = d.id
-                           LEFT JOIN {$index}_spatial s ON s.id = m.numeric_id";
+            $spatialJoin = " LEFT JOIN {$index}_id_map m ON m.string_id = d.id " .
+                           "LEFT JOIN {$index}_spatial s ON s.id = m.numeric_id";
             $distanceSelect = ", " . $this->getDistanceExpression($lat, $lng) . " as distance";
         }
         
@@ -870,8 +868,8 @@ class SqliteStorage implements StorageInterface
             // Calculate bounding box for initial R-tree filtering
             $bounds = $point->getBoundingBox($radius);
             
-            $spatialJoin = " INNER JOIN {$index}_id_map m ON m.string_id = d.id
-                           INNER JOIN {$index}_spatial s ON s.id = m.numeric_id";
+            $spatialJoin = " INNER JOIN {$index}_id_map m ON m.string_id = d.id " .
+                           "INNER JOIN {$index}_spatial s ON s.id = m.numeric_id";
             
             // R-tree bounding box filter
             $spatialSql = " AND s.minLat <= ? AND s.maxLat >= ? AND s.minLng <= ? AND s.maxLng >= ?";
@@ -891,8 +889,8 @@ class SqliteStorage implements StorageInterface
             $boundsData = $geoFilters['within']['bounds'];
             $bounds = is_array($boundsData) ? GeoBounds::fromArray($boundsData) : $boundsData;
             
-            $spatialJoin = " INNER JOIN {$index}_id_map m ON m.string_id = d.id
-                           INNER JOIN {$index}_spatial s ON s.id = m.numeric_id";
+            $spatialJoin = " INNER JOIN {$index}_id_map m ON m.string_id = d.id " .
+                           "INNER JOIN {$index}_spatial s ON s.id = m.numeric_id";
             
             // R-tree intersection query
             $spatialSql = " AND s.minLat <= ? AND s.maxLat >= ? AND s.minLng <= ? AND s.maxLng >= ?";
@@ -925,18 +923,31 @@ class SqliteStorage implements StorageInterface
         AS INTEGER)";
     }
     
-    private function getDistanceExpression(float $lat, float $lng): string
+    private function getDistanceExpression(float $lat, float $lng, bool $useTablePrefix = true): string
     {
         // Simplified distance calculation for SQLite
         // Using degrees directly with approximate conversion
         $degToKm = 111.12; // Approximate km per degree at equator
         
+        // Column references
+        if ($useTablePrefix) {
+            $minLat = "s.minLat";
+            $maxLat = "s.maxLat";
+            $minLng = "s.minLng";
+            $maxLng = "s.maxLng";
+        } else {
+            $minLat = "minLat";
+            $maxLat = "maxLat";
+            $minLng = "minLng";
+            $maxLng = "maxLng";
+        }
+        
         // Simple Euclidean distance with latitude correction
         // This is less accurate than Haversine but sufficient for sorting/filtering
         return "
             SQRT(
-                POWER(({$lat} - (s.minLat + s.maxLat) / 2) * {$degToKm}, 2) +
-                POWER(({$lng} - (s.minLng + s.maxLng) / 2) * {$degToKm} * COS((s.minLat + s.maxLat) / 2 * 0.0174533), 2)
+                POWER(({$lat} - ({$minLat} + {$maxLat}) / 2) * {$degToKm}, 2) +
+                POWER(({$lng} - ({$minLng} + {$maxLng}) / 2) * {$degToKm} * COS(({$minLat} + {$maxLat}) / 2 * 0.0174533), 2)
             ) * 1000
         ";
     }
