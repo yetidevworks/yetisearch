@@ -4,7 +4,6 @@ namespace YetiSearch\Storage;
 
 use YetiSearch\Contracts\StorageInterface;
 use YetiSearch\Exceptions\StorageException;
-use YetiSearch\Models\Document;
 use YetiSearch\Geo\GeoPoint;
 use YetiSearch\Geo\GeoBounds;
 

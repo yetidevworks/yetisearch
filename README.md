@@ -88,10 +88,12 @@ $indexer = $search->createIndex('pages');
 // Index a document
 $indexer->index([
     'id' => 'doc1',
-    'title' => 'Introduction to YetiSearch',
-    'content' => 'YetiSearch is a powerful search engine library for PHP applications...',
-    'url' => 'https://example.com/intro',
-    'tags' => 'search php library'
+    'content' => [
+        'title' => 'Introduction to YetiSearch',
+        'body' => 'YetiSearch is a powerful search engine library for PHP applications...',
+        'url' => 'https://example.com/intro',
+        'tags' => 'search php library'
+    ]
 ]);
 
 // Search for documents
@@ -110,7 +112,6 @@ foreach ($results['results'] as $result) {
 
 ```php
 use YetiSearch\YetiSearch;
-use YetiSearch\Models\Document;
 
 $search = new YetiSearch([
     'storage' => ['path' => './search.db']
@@ -119,15 +120,19 @@ $search = new YetiSearch([
 $indexer = $search->createIndex('articles');
 
 // Index a single document
-$document = Document::fromArray([
+$document = [
     'id' => 'article-1',
-    'title' => 'Getting Started with PHP',
-    'content' => 'PHP is a popular general-purpose scripting language...',
-    'author' => 'John Doe',
-    'category' => 'Programming',
-    'tags' => 'php programming tutorial',
-    'date' => time()
-]);
+    'content' => [
+        'title' => 'Getting Started with PHP',
+        'body' => 'PHP is a popular general-purpose scripting language...',
+        'author' => 'John Doe',
+        'category' => 'Programming',
+        'tags' => 'php programming tutorial'
+    ],
+    'metadata' => [
+        'date' => time()
+    ]
+];
 
 $indexer->index($document);
 
@@ -135,19 +140,23 @@ $indexer->index($document);
 $documents = [
     [
         'id' => 'article-2',
-        'title' => 'Advanced PHP Techniques',
-        'content' => 'Let\'s explore advanced PHP programming techniques...',
-        'author' => 'Jane Smith',
-        'category' => 'Programming',
-        'tags' => 'php advanced tips'
+        'content' => [
+            'title' => 'Advanced PHP Techniques',
+            'body' => 'Let\'s explore advanced PHP programming techniques...',
+            'author' => 'Jane Smith',
+            'category' => 'Programming',
+            'tags' => 'php advanced tips'
+        ]
     ],
     [
         'id' => 'article-3',
-        'title' => 'PHP Performance Optimization',
-        'content' => 'Optimizing PHP applications for better performance...',
-        'author' => 'Bob Johnson',
-        'category' => 'Performance',
-        'tags' => 'php performance optimization'
+        'content' => [
+            'title' => 'PHP Performance Optimization',
+            'body' => 'Optimizing PHP applications for better performance...',
+            'author' => 'Bob Johnson',
+            'category' => 'Performance',
+            'tags' => 'php performance optimization'
+        ]
     ]
 ];
 
@@ -177,11 +186,13 @@ $indexer = $search->createIndex('products', [
 // Index products with metadata
 $product = [
     'id' => 'prod-123',
-    'name' => 'Professional PHP Development Book',
-    'description' => 'A comprehensive guide to professional PHP development...',
-    'brand' => 'TechBooks Publishing',
-    'sku' => 'TB-PHP-001',
-    'price' => 49.99,
+    'content' => [
+        'name' => 'Professional PHP Development Book',
+        'description' => 'A comprehensive guide to professional PHP development...',
+        'brand' => 'TechBooks Publishing',
+        'sku' => 'TB-PHP-001',
+        'price' => 49.99
+    ],
     'metadata' => [
         'in_stock' => true,
         'rating' => 4.5,
@@ -277,11 +288,13 @@ foreach ($results['facets']['category'] as $facet) {
 // Update a document
 $indexer->update([
     'id' => 'article-1',
-    'title' => 'Getting Started with PHP 8',  // Updated title
-    'content' => 'PHP 8 introduces many new features...',
-    'author' => 'John Doe',
-    'category' => 'Programming',
-    'tags' => 'php php8 programming tutorial'
+    'content' => [
+        'title' => 'Getting Started with PHP 8',  // Updated title
+        'body' => 'PHP 8 introduces many new features...',
+        'author' => 'John Doe',
+        'category' => 'Programming',
+        'tags' => 'php php8 programming tutorial'
+    ]
 ]);
 
 // Delete a document
@@ -465,8 +478,10 @@ use YetiSearch\Geo\GeoBounds;
 // Index documents with location data
 $indexer->index([
     'id' => 'coffee-shop-1',
-    'title' => 'Blue Bottle Coffee',
-    'content' => 'Specialty coffee roaster and cafe',
+    'content' => [
+        'title' => 'Blue Bottle Coffee',
+        'body' => 'Specialty coffee roaster and cafe'
+    ],
     'geo' => [
         'lat' => 37.7825,
         'lng' => -122.4099
@@ -534,8 +549,10 @@ $point = GeoUtils::parsePoint('37.7749,-122.4194');
 // Index areas/regions with bounding boxes
 $indexer->index([
     'id' => 'downtown-sf',
-    'title' => 'Downtown San Francisco',
-    'content' => 'Financial district and shopping area',
+    'content' => [
+        'title' => 'Downtown San Francisco',
+        'body' => 'Financial district and shopping area'
+    ],
     'geo_bounds' => [
         'north' => 37.8,
         'south' => 37.77,
@@ -701,10 +718,6 @@ composer test:filter StandardAnalyzer
 
 # Run specific test method
 composer test:filter testAnalyzeBasicText
-
-# Using Make commands
-make test-verbose
-make test-filter TEST=DocumentTest
 ```
 
 ### Advanced Testing
@@ -715,10 +728,6 @@ vendor/bin/phpunit --testsuite=Unit
 
 # Run with custom configuration
 vendor/bin/phpunit -c phpunit-readable.xml
-
-# Use the enhanced test runner
-php test-runner.php
-php test-runner.php --filter=SearchEngine
 ```
 
 ### Static Analysis
@@ -761,18 +770,38 @@ $search->optimize(string $indexName);
 $search->getStats(string $indexName);
 ```
 
-### Document Model
+### Document Structure
+
+Documents are represented as associative arrays with the following structure:
 
 ```php
-// Create document
-$doc = new Document($id, $content, $language, $metadata, $timestamp, $type);
-$doc = Document::fromArray($array);
-
-// Document methods
-$array = $doc->toArray();
-$json = $doc->toJson();
-$doc->setMetadata($key, $value);
-$value = $doc->getMetadata($key);
+$document = [
+    'id' => 'unique-id',          // Required: unique identifier
+    'content' => [                // Required: content fields to index
+        'title' => 'Document Title',
+        'body' => 'Main content...',
+        'author' => 'John Doe',
+        // ... any other fields
+    ],
+    'metadata' => [               // Optional: non-indexed metadata
+        'created_at' => time(),
+        'status' => 'published',
+        // ... any other metadata
+    ],
+    'language' => 'en',           // Optional: language code
+    'type' => 'article',          // Optional: document type
+    'timestamp' => time(),        // Optional: defaults to current time
+    'geo' => [                    // Optional: geographic point
+        'lat' => 37.7749,
+        'lng' => -122.4194
+    ],
+    'geo_bounds' => [             // Optional: geographic bounds
+        'north' => 37.8,
+        'south' => 37.7,
+        'east' => -122.3,
+        'west' => -122.5
+    ]
+];
 ```
 
 ### SearchQuery Model

@@ -3,7 +3,6 @@
 namespace YetiSearch\Index;
 
 use YetiSearch\Contracts\IndexerInterface;
-use YetiSearch\Contracts\IndexableInterface;
 use YetiSearch\Contracts\StorageInterface;
 use YetiSearch\Contracts\AnalyzerInterface;
 use YetiSearch\Exceptions\IndexException;
@@ -53,9 +52,10 @@ class Indexer implements IndexerInterface
         $this->ensureIndexExists();
     }
     
-    public function index(IndexableInterface $document): void
+    public function index(array $document): void
     {
-        $this->logger->debug('Indexing document', ['id' => $document->getId()]);
+        $id = $document['id'] ?? uniqid();
+        $this->logger->debug('Indexing document', ['id' => $id]);
         
         try {
             $processedDocument = $this->processDocument($document);
@@ -70,10 +70,10 @@ class Indexer implements IndexerInterface
                 }
             }
             
-            $this->logger->info('Document indexed successfully', ['id' => $document->getId()]);
+            $this->logger->info('Document indexed successfully', ['id' => $id]);
         } catch (\Exception $e) {
             $this->logger->error('Failed to index document', [
-                'id' => $document->getId(),
+                'id' => $id,
                 'error' => $e->getMessage()
             ]);
             throw new IndexException("Failed to index document: " . $e->getMessage(), 0, $e);
@@ -88,16 +88,18 @@ class Indexer implements IndexerInterface
         $errors = [];
         
         foreach ($documents as $document) {
-            if (!$document instanceof IndexableInterface) {
-                $errors[] = 'Invalid document type';
+            if (!is_array($document)) {
+                $errors[] = 'Invalid document type - must be array';
                 continue;
             }
+            
+            $id = $document['id'] ?? uniqid();
             
             try {
                 $processed[] = $this->processDocument($document);
             } catch (\Exception $e) {
                 $errors[] = [
-                    'id' => $document->getId(),
+                    'id' => $id,
                     'error' => $e->getMessage()
                 ];
             }
@@ -122,18 +124,19 @@ class Indexer implements IndexerInterface
         ]);
     }
     
-    public function update(IndexableInterface $document): void
+    public function update(array $document): void
     {
-        $this->logger->debug('Updating document', ['id' => $document->getId()]);
+        $id = $document['id'] ?? throw new IndexException('Document must have an id for update');
+        $this->logger->debug('Updating document', ['id' => $id]);
         
         try {
             $processedDocument = $this->processDocument($document);
-            $this->storage->update($this->indexName, $document->getId(), $processedDocument);
+            $this->storage->update($this->indexName, $id, $processedDocument);
             
-            $this->logger->info('Document updated successfully', ['id' => $document->getId()]);
+            $this->logger->info('Document updated successfully', ['id' => $id]);
         } catch (\Exception $e) {
             $this->logger->error('Failed to update document', [
-                'id' => $document->getId(),
+                'id' => $id,
                 'error' => $e->getMessage()
             ]);
             throw new IndexException("Failed to update document: " . $e->getMessage(), 0, $e);
@@ -228,11 +231,14 @@ class Indexer implements IndexerInterface
         $this->batchQueue = [];
     }
     
-    private function processDocument(IndexableInterface $document): array
+    private function processDocument(array $document): array
     {
-        $content = $document->getContent();
-        $metadata = $document->getMetadata();
-        $language = $document->getLanguage();
+        $content = $document['content'] ?? [];
+        $metadata = $document['metadata'] ?? [];
+        $language = $document['language'] ?? null;
+        $id = $document['id'] ?? uniqid();
+        $type = $document['type'] ?? 'default';
+        $timestamp = $document['timestamp'] ?? time();
         
         $processedContent = [];
         $searchableText = [];
@@ -266,10 +272,10 @@ class Indexer implements IndexerInterface
             $metadata['chunked'] = true;
             
             foreach ($chunks as $index => $chunk) {
-                $chunkId = $document->getId() . '#chunk' . $index;
+                $chunkId = $id . '#chunk' . $index;
                 $chunkDoc = [
                     'id' => $chunkId,
-                    'parent_id' => $document->getId(),
+                    'parent_id' => $id,
                     'content' => array_merge($processedContent, ['content' => $chunk]),
                     'metadata' => array_merge($metadata, [
                         'chunk_index' => $index,
@@ -277,19 +283,16 @@ class Indexer implements IndexerInterface
                         'parent_route' => $processedContent['route'] ?? ''
                     ]),
                     'language' => $language,
-                    'type' => $document->getType(),
-                    'timestamp' => $document->getTimestamp()
+                    'type' => $type,
+                    'timestamp' => $timestamp
                 ];
                 
                 // Include geo data in chunks
-                if ($document instanceof \YetiSearch\Models\Document) {
-                    $docArray = $document->toArray();
-                    if (isset($docArray['geo'])) {
-                        $chunkDoc['geo'] = $docArray['geo'];
-                    }
-                    if (isset($docArray['geo_bounds'])) {
-                        $chunkDoc['geo_bounds'] = $docArray['geo_bounds'];
-                    }
+                if (isset($document['geo'])) {
+                    $chunkDoc['geo'] = $document['geo'];
+                }
+                if (isset($document['geo_bounds'])) {
+                    $chunkDoc['geo_bounds'] = $document['geo_bounds'];
                 }
                 
                 $this->storage->insert($this->indexName, $chunkDoc);
@@ -297,24 +300,21 @@ class Indexer implements IndexerInterface
         }
         
         $data = [
-            'id' => $document->getId(),
+            'id' => $id,
             'content' => $processedContent,
             'metadata' => $metadata,
             'language' => $language,
-            'type' => $document->getType(),
-            'timestamp' => $document->getTimestamp(),
+            'type' => $type,
+            'timestamp' => $timestamp,
             'indexed_at' => time()
         ];
         
         // Include geo data if present
-        if ($document instanceof \YetiSearch\Models\Document) {
-            $docArray = $document->toArray();
-            if (isset($docArray['geo'])) {
-                $data['geo'] = $docArray['geo'];
-            }
-            if (isset($docArray['geo_bounds'])) {
-                $data['geo_bounds'] = $docArray['geo_bounds'];
-            }
+        if (isset($document['geo'])) {
+            $data['geo'] = $document['geo'];
+        }
+        if (isset($document['geo_bounds'])) {
+            $data['geo_bounds'] = $document['geo_bounds'];
         }
         
         return $data;
