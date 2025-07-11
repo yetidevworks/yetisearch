@@ -126,7 +126,10 @@ class Indexer implements IndexerInterface
     
     public function update(array $document): void
     {
-        $id = $document['id'] ?? throw new IndexException('Document must have an id for update');
+        if (!isset($document['id'])) {
+            throw new IndexException('Document must have an id for update');
+        }
+        $id = $document['id'];
         $this->logger->debug('Updating document', ['id' => $id]);
         
         try {
