@@ -76,7 +76,7 @@ class SearchEngineTest extends TestCase
         
         $this->storage->expects($this->once())
             ->method('search')
-            ->with('test_index', $this->anything(), $this->anything())
+            ->with('test_index', $this->anything())
             ->willReturn($storageResults);
         
         $results = $this->searchEngine->search($query);
@@ -98,7 +98,7 @@ class SearchEngineTest extends TestCase
         
         $this->storage->expects($this->once())
             ->method('count')
-            ->with('test_index', $this->anything(), $this->anything())
+            ->with('test_index', $this->anything())
             ->willReturn(42);
         
         $count = $this->searchEngine->count($query);
