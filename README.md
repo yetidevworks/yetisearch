@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/yetidevworks/yetisearch/workflows/CI/badge.svg)](https://github.com/yetidevworks/yetisearch/actions)
 [![PHP Version](https://img.shields.io/packagist/php-v/yetidevworks/yetisearch)](https://packagist.org/packages/yetidevworks/yetisearch)
-[![License](https://img.shields.io/github/license/yetidevworks/yetisearch)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Latest Stable Version](https://img.shields.io/packagist/v/yetidevworks/yetisearch)](https://packagist.org/packages/yetidevworks/yetisearch)
 
 A powerful, pure-PHP search engine library with advanced full-text search capabilities, designed for modern PHP applications.
