@@ -70,8 +70,13 @@ class SearchEngineTest extends TestCase
         ];
         
         $this->analyzer->expects($this->once())
-            ->method('analyze')
+            ->method('tokenize')
             ->with('test query')
+            ->willReturn(['test', 'query']);
+        
+        $this->analyzer->expects($this->once())
+            ->method('removeStopWords')
+            ->with(['test', 'query'], null)
             ->willReturn(['test', 'query']);
         
         $this->storage->expects($this->once())
@@ -83,8 +88,9 @@ class SearchEngineTest extends TestCase
         
         $this->assertInstanceOf(SearchResults::class, $results);
         $this->assertCount(2, $results);
-        $this->assertEquals('doc1', $results[0]->getId());
-        $this->assertEquals('doc2', $results[1]->getId());
+        $resultsArray = $results->getResults();
+        $this->assertEquals('doc1', $resultsArray[0]->getId());
+        $this->assertEquals('doc2', $resultsArray[1]->getId());
     }
     
     
@@ -93,7 +99,13 @@ class SearchEngineTest extends TestCase
         $query = new SearchQuery('test');
         
         $this->analyzer->expects($this->once())
-            ->method('analyze')
+            ->method('tokenize')
+            ->with('test')
+            ->willReturn(['test']);
+        
+        $this->analyzer->expects($this->once())
+            ->method('removeStopWords')
+            ->with(['test'], null)
             ->willReturn(['test']);
         
         $this->storage->expects($this->once())

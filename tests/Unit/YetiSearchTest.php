@@ -272,7 +272,7 @@ class YetiSearchTest extends TestCase
         $stats = $this->yetiSearch->getStats('test_index');
         
         $this->assertIsArray($stats);
-        $this->assertArrayHasKey('total_documents', $stats);
+        $this->assertArrayHasKey('document_count', $stats);
     }
     
     
