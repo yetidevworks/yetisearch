@@ -804,6 +804,47 @@ $document = [
 ];
 ```
 
+#### Content vs Metadata
+
+Understanding the distinction between `content` and `metadata` fields:
+
+**Content Fields:**
+- Are indexed and searchable - these fields are analyzed, tokenized, and can be found via search queries
+- Affect relevance scoring - matches in content fields contribute to the document's search score
+- Support field boosting - you can make certain fields more important for ranking
+- Are returned in search results by default
+- Examples: title, body, description, tags, author, category
+
+**Metadata Fields:**
+- Are NOT indexed - stored in the database but not searchable
+- Don't affect search scoring - won't influence relevance ranking
+- Are returned in results - currently included but could be made optional
+- Useful for filtering - can still filter results by metadata values using filters
+- Examples: prices, stock counts, internal IDs, timestamps, flags, view counts
+
+**When to use metadata:**
+```php
+$document = [
+    'id' => 'product-123',
+    'content' => [
+        'name' => 'Wireless Headphones',
+        'description' => 'High-quality Bluetooth headphones with noise cancellation',
+        'brand' => 'TechAudio',
+        'features' => 'bluetooth wireless noise-cancelling comfortable'
+    ],
+    'metadata' => [
+        'price' => 149.99,           // Don't want searches for "149.99" to match
+        'sku' => 'TA-WH-2024-BK',   // Internal reference code
+        'stock_count' => 42,         // Numeric data not meant for text search
+        'warehouse_id' => 'WH-03',   // Internal data
+        'cost' => 89.50,            // Sensitive data
+        'last_restock' => time()     // System tracking
+    ]
+];
+```
+
+This separation improves performance (less data to index), prevents false matches (searching "42" won't find products with 42 in stock), and keeps your search index focused on actual searchable content.
+
 ### SearchQuery Model
 
 ```php
