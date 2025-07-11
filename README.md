@@ -1,8 +1,8 @@
 # YetiSearch
 
-[![CI](https://github.com/rhukster/yetisearch/workflows/CI/badge.svg)](https://github.com/rhukster/yetisearch/actions)
+[![CI](https://github.com/yetidevworks/yetisearch/workflows/CI/badge.svg)](https://github.com/yetidevworks/yetisearch/actions)
 [![PHP Version](https://img.shields.io/packagist/php-v/rhukster/yetisearch)](https://packagist.org/packages/rhukster/yetisearch)
-[![License](https://img.shields.io/github/license/rhukster/yetisearch)](LICENSE)
+[![License](https://img.shields.io/github/license/yetidevworks/yetisearch)](LICENSE)
 [![Latest Stable Version](https://img.shields.io/packagist/v/rhukster/yetisearch)](https://packagist.org/packages/rhukster/yetisearch)
 
 A powerful, pure-PHP search engine library with advanced full-text search capabilities, designed for modern PHP applications.
