@@ -1,0 +1,68 @@
+# Changelog
+
+## [1.0.0] - 2025-01-11
+
+### Summary
+
+YetiSearch is a powerful, pure-PHP search engine library designed for modern PHP applications. This initial release provides a complete full-text search solution with advanced features typically found only in dedicated search servers, all while maintaining the simplicity of a PHP library with zero external service dependencies.
+
+### Core Features
+
+#### Search Capabilities
+- **Full-text search** powered by SQLite FTS5 with BM25 relevance scoring
+- **Multi-index search** - Search across multiple indexes simultaneously with pattern matching
+- **Smart result deduplication** - Shows best match per document by default
+- **Search highlighting** with customizable tags
+- **Fuzzy matching** for typo-tolerant searches
+- **Faceted search** and aggregations support
+- **Advanced filtering** with multiple operators (=, !=, <, >, <=, >=, in, contains, exists)
+
+#### Document Processing
+- **Automatic document chunking** for indexing large documents
+- **Configurable chunk sizes and overlap** for optimal search results
+- **Field-specific boosting** to prioritize important content
+- **Metadata support** for non-indexed document properties
+
+#### Language Support
+- **Multi-language stemming** for 11 languages including English, French, German, Spanish, Italian, Portuguese, Dutch, Swedish, Norwegian, Danish, and Russian
+- **Custom stop words** configuration in addition to language defaults
+- **Language-aware text analysis** with proper tokenization
+
+#### Geographic Search
+- **Geo-spatial search** capabilities using SQLite R-tree indexing
+- **Radius search** - Find documents within a specified distance
+- **Bounding box search** - Search within geographic boundaries
+- **Distance-based sorting** for location-aware results
+- **Support for both point and area indexing**
+
+#### Architecture & Performance
+- **Zero external dependencies** - No separate search server required
+- **SQLite-based storage** with optimized schema design
+- **Batch indexing** support for efficient bulk operations
+- **Configurable caching** for improved query performance
+- **Transaction support** for data integrity
+- **Index optimization** capabilities
+
+### Technical Specifications
+
+#### Requirements
+- PHP 7.4 or higher (tested up to PHP 8.3)
+- SQLite3 PHP extension
+- PDO PHP extension with SQLite driver
+- Mbstring PHP extension
+- JSON PHP extension
+
+#### Storage Configuration
+- SQLite with Write-Ahead Logging (WAL) for better concurrency
+- Configurable connection and busy timeouts
+- Memory-based temporary tables option
+- Automatic database management
+
+#### API Design
+- **PSR-4 autoloading** compliant
+- **PSR-3 logging** support
+- Clean interface-based architecture for extensibility
+- Comprehensive exception handling
+- Fluent query builder interface
+
+[1.0.0]: https://github.com/yetidevworks/yetisearch/releases/tag/v1.0.0
