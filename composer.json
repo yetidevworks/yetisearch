@@ -1,12 +1,12 @@
 {
-    "name": "rhukster/yetisearch",
+    "name": "yetidevworks/yetisearch",
     "description": "A powerful, pure-PHP search engine library with advanced features",
     "type": "library",
     "license": "MIT",
     "authors": [
         {
-            "name": "YetiSearch Team",
-            "email": "info@yetisearch.dev"
+            "name": "Yetidevworks",
+            "email": "info@yetidevworks.com"
         }
     ],
     "require": {
