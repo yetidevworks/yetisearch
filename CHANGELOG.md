@@ -1,6 +1,10 @@
 # Changelog
 
-## [1.0.0] - 2025-01-11
+## [1.0.1] - 2025-06-11
+
+- **More Coverage Tests**: Added additional tests to cover more edge cases and ensure robustness.
+
+## [1.0.0] - 2025-06-11
 
 ### Summary
 
