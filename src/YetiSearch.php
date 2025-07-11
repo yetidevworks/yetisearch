@@ -293,12 +293,12 @@ class YetiSearch
         foreach ($results['results'] as $result) {
             $processedResults['results'][] = [
                 'id' => $result['id'],
-                'content' => json_decode($result['content'], true),
-                'metadata' => json_decode($result['metadata'], true),
-                'score' => $result['rank'] ?? $result['_score'] ?? 0,
-                'language' => $result['language'],
-                'type' => $result['type'],
-                'timestamp' => $result['timestamp'],
+                'content' => $result['document'] ?? [], // Use 'document' key from search results
+                'metadata' => $result['metadata'] ?? [],
+                'score' => $result['score'] ?? $result['rank'] ?? $result['_score'] ?? 0,
+                'language' => $result['language'] ?? null,
+                'type' => $result['type'] ?? null,
+                'timestamp' => $result['timestamp'] ?? null,
                 '_index' => $result['_index']
             ];
         }
