@@ -6,9 +6,7 @@ use YetiSearch\Storage\SqliteStorage;
 use YetiSearch\Analyzers\StandardAnalyzer;
 use YetiSearch\Index\Indexer;
 use YetiSearch\Search\SearchEngine;
-use YetiSearch\Models\Document;
 use YetiSearch\Models\SearchQuery;
-use YetiSearch\Contracts\IndexableInterface;
 use Psr\Log\LoggerInterface;
 
 class YetiSearch
@@ -125,8 +123,7 @@ class YetiSearch
             $indexer = $this->createIndex($indexName);
         }
         
-        $document = Document::fromArray($documentData);
-        $indexer->index($document);
+        $indexer->index($documentData);
     }
     
     public function indexBatch(string $indexName, array $documents): void
@@ -136,11 +133,7 @@ class YetiSearch
             $indexer = $this->createIndex($indexName);
         }
         
-        $indexableDocuments = array_map(function ($doc) {
-            return $doc instanceof IndexableInterface ? $doc : Document::fromArray($doc);
-        }, $documents);
-        
-        $indexer->indexBatch($indexableDocuments);
+        $indexer->indexBatch($documents);
     }
     
     public function search(string $indexName, string $query, array $options = []): array
@@ -325,8 +318,7 @@ class YetiSearch
     {
         $indexer = $this->getIndexer($indexName);
         if ($indexer) {
-            $document = Document::fromArray($documentData);
-            $indexer->update($document);
+            $indexer->update($documentData);
         }
     }
     
