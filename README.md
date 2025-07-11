@@ -247,6 +247,21 @@ foreach ($results['results'] as $result) {
     echo "---\n";
 }
 
+// Available filter operators
+$results = $search->search('products', 'laptop', [
+    'filters' => [
+        ['field' => 'category', 'value' => 'Electronics', 'operator' => '='],      // Exact match
+        ['field' => 'price', 'value' => 500, 'operator' => '<'],                   // Less than
+        ['field' => 'price', 'value' => 100, 'operator' => '>'],                   // Greater than
+        ['field' => 'rating', 'value' => 4, 'operator' => '>='],                   // Greater or equal
+        ['field' => 'stock', 'value' => 10, 'operator' => '<='],                   // Less or equal
+        ['field' => 'brand', 'value' => 'Apple', 'operator' => '!='],              // Not equal
+        ['field' => 'tags', 'value' => ['laptop', 'gaming'], 'operator' => 'in'],  // In array
+        ['field' => 'title', 'value' => 'Pro', 'operator' => 'contains'],          // Contains text
+        ['field' => 'metadata.warranty', 'operator' => 'exists'],                  // Field exists
+    ]
+]);
+
 // Get all chunks (no deduplication)
 $allChunks = $search->search('articles', 'PHP programming', [
     'unique_by_route' => false  // Show all matching chunks
@@ -279,6 +294,28 @@ $results = $search->search('products', 'book', [
 // Access facets
 foreach ($results['facets']['category'] as $facet) {
     echo "{$facet['value']}: {$facet['count']} items\n";
+}
+```
+
+### Multi-Index Search
+
+Search across multiple indexes simultaneously:
+
+```php
+// Search specific indexes
+$results = $search->searchMultiple(['products', 'articles'], 'PHP book', [
+    'limit' => 20
+]);
+
+// Search all indexes matching a pattern
+$results = $search->searchMultiple(['content_*'], 'search term', [
+    'limit' => 20
+]);
+
+// Results include index information
+foreach ($results['results'] as $result) {
+    echo "From index: " . $result['_index'] . "\n";
+    echo "Title: " . $result['title'] . "\n";
 }
 ```
 
@@ -860,6 +897,68 @@ $query->limit($limit)
       ->fuzzy(true)
       ->boost('title', 2.0)
       ->highlight(true);
+```
+
+### Result Structure
+
+Search results are returned as an associative array:
+
+```php
+[
+    'results' => [
+        [
+            'id' => 'doc-123',
+            'score' => 85.5,              // Relevance score (0-100)
+            'title' => 'Document Title',   // From content fields
+            'content' => '...',           // Other content fields
+            'excerpt' => '...<mark>highlighted</mark>...', // With highlights if enabled
+            'metadata' => [...],          // Metadata fields
+            'distance' => 1234.5,         // Distance in meters (if geo search)
+            // ... other fields
+        ],
+        // ... more results
+    ],
+    'total' => 42,                // Total matching documents
+    'count' => 20,                // Results in this page
+    'search_time' => 0.023,       // Search time in seconds
+    'facets' => [...],            // If facets requested
+]
+```
+
+### Performance Tips
+
+1. **Index Configuration**
+   - Use appropriate field boosts - don't over-boost
+   - Only index fields you need to search
+   - Use metadata for non-searchable data
+   - Configure reasonable chunk sizes (default 1000 chars works well)
+
+2. **Search Optimization**
+   - Use field-specific searches when possible: `inFields(['title'])`
+   - Enable `unique_by_route` (default) to avoid duplicate documents
+   - Use filters instead of text queries for exact matches
+   - Limit results with reasonable page sizes
+
+3. **Storage Optimization**
+   - Run `optimize()` periodically on large indexes
+   - Use WAL mode for better concurrency (default)
+   - Consider separate indexes for different content types
+
+### Error Handling
+
+```php
+try {
+    $results = $search->search('index-name', 'query');
+} catch (\YetiSearch\Exceptions\StorageException $e) {
+    // Handle storage/database errors
+    error_log('Storage error: ' . $e->getMessage());
+} catch (\YetiSearch\Exceptions\IndexException $e) {
+    // Handle indexing errors
+    error_log('Index error: ' . $e->getMessage());
+} catch (\Exception $e) {
+    // Handle other errors
+    error_log('Search error: ' . $e->getMessage());
+}
 ```
 
 ## Future Feature Ideas
