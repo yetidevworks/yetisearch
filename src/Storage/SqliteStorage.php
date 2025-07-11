@@ -209,11 +209,15 @@ class SqliteStorage implements StorageInterface
             $this->connection->prepare("DELETE FROM {$index} WHERE id = ?")->execute([$id]);
             $this->connection->prepare("DELETE FROM {$index}_fts WHERE id = ?")->execute([$id]);
             $this->connection->prepare("DELETE FROM {$index}_terms WHERE document_id = ?")->execute([$id]);
-            $this->connection->prepare("DELETE FROM {$index}_id_map WHERE string_id = ?")->execute([$id]);
             
-            // Delete from spatial index (use hash of string ID for R-tree integer ID)
-            $spatialId = $this->getNumericId($id);
-            $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?")->execute([$spatialId]);
+            // Only delete from spatial-related tables if R-tree support is available
+            if ($this->hasRTreeSupport()) {
+                $this->connection->prepare("DELETE FROM {$index}_id_map WHERE string_id = ?")->execute([$id]);
+                
+                // Delete from spatial index (use hash of string ID for R-tree integer ID)
+                $spatialId = $this->getNumericId($id);
+                $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?")->execute([$spatialId]);
+            }
             
             $this->connection->commit();
         } catch (\PDOException $e) {
