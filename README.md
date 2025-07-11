@@ -1,9 +1,9 @@
 # YetiSearch
 
 [![CI](https://github.com/yetidevworks/yetisearch/workflows/CI/badge.svg)](https://github.com/yetidevworks/yetisearch/actions)
-[![PHP Version](https://img.shields.io/packagist/php-v/rhukster/yetisearch)](https://packagist.org/packages/rhukster/yetisearch)
+[![PHP Version](https://img.shields.io/packagist/php-v/yetidevworks/yetisearch)](https://packagist.org/packages/yetidevworks/yetisearch)
 [![License](https://img.shields.io/github/license/yetidevworks/yetisearch)](LICENSE)
-[![Latest Stable Version](https://img.shields.io/packagist/v/rhukster/yetisearch)](https://packagist.org/packages/rhukster/yetisearch)
+[![Latest Stable Version](https://img.shields.io/packagist/v/yetidevworks/yetisearch)](https://packagist.org/packages/yetidevworks/yetisearch)
 
 A powerful, pure-PHP search engine library with advanced full-text search capabilities, designed for modern PHP applications.
 
@@ -65,7 +65,7 @@ A powerful, pure-PHP search engine library with advanced full-text search capabi
 Install YetiSearch via Composer:
 
 ```bash
-composer require rhukster/yetisearch
+composer require yetidevworks/yetisearch
 ```
 
 ## Quick Start
