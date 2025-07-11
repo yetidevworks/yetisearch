@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.2] - 2025-06-11
+
+- **LICENSE file added**: Forgot to include the LICENSE file in the initial release. This has now been added to clarify the licensing terms for YetiSearch.
+
 ## [1.0.1] - 2025-06-11
 
 - **More Coverage Tests**: Added additional tests to cover more edge cases and ensure robustness.
