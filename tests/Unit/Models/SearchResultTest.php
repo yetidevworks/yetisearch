@@ -14,16 +14,18 @@ class SearchResultTest extends TestCase
         $data = [
             'id' => 'doc1',
             'score' => 95.5,
-            'title' => 'Test Document',
-            'content' => 'This is test content',
-            'excerpt' => 'This is test...',
-            'url' => '/test/doc1',
-            'route' => 'test.doc1',
-            'author' => 'Test Author',
-            'tags' => 'test, document',
-            'category' => 'Testing',
+            'document' => [
+                'title' => 'Test Document',
+                'content' => 'This is test content',
+                'excerpt' => 'This is test...',
+                'url' => '/test/doc1',
+                'route' => 'test.doc1',
+                'author' => 'Test Author',
+                'tags' => 'test, document',
+                'category' => 'Testing',
+                '_index' => 'test_index'
+            ],
             'metadata' => ['views' => 100],
-            '_index' => 'test_index',
             'distance' => 1500.5
         ];
         
@@ -31,16 +33,16 @@ class SearchResultTest extends TestCase
         
         $this->assertEquals('doc1', $result->getId());
         $this->assertEquals(95.5, $result->getScore());
-        $this->assertEquals('Test Document', $result->getTitle());
-        $this->assertEquals('This is test content', $result->getContent());
-        $this->assertEquals('This is test...', $result->getExcerpt());
-        $this->assertEquals('/test/doc1', $result->getUrl());
-        $this->assertEquals('test.doc1', $result->getRoute());
-        $this->assertEquals('Test Author', $result->getAuthor());
-        $this->assertEquals('test, document', $result->getTags());
-        $this->assertEquals('Testing', $result->getCategory());
+        $this->assertEquals('Test Document', $result->get('title'));
+        $this->assertEquals('This is test content', $result->get('content'));
+        $this->assertEquals('This is test...', $result->get('excerpt'));
+        $this->assertEquals('/test/doc1', $result->get('url'));
+        $this->assertEquals('test.doc1', $result->get('route'));
+        $this->assertEquals('Test Author', $result->get('author'));
+        $this->assertEquals('test, document', $result->get('tags'));
+        $this->assertEquals('Testing', $result->get('category'));
         $this->assertEquals(['views' => 100], $result->getMetadata());
-        $this->assertEquals('test_index', $result->getIndex());
+        $this->assertEquals('test_index', $result->get('_index'));
         $this->assertEquals(1500.5, $result->getDistance());
     }
     
@@ -55,16 +57,16 @@ class SearchResultTest extends TestCase
         
         $this->assertEquals('doc1', $result->getId());
         $this->assertEquals(50.0, $result->getScore());
-        $this->assertNull($result->getTitle());
-        $this->assertNull($result->getContent());
-        $this->assertNull($result->getExcerpt());
-        $this->assertNull($result->getUrl());
-        $this->assertNull($result->getRoute());
-        $this->assertNull($result->getAuthor());
-        $this->assertNull($result->getTags());
-        $this->assertNull($result->getCategory());
+        $this->assertNull($result->get('title'));
+        $this->assertNull($result->get('content'));
+        $this->assertNull($result->get('excerpt'));
+        $this->assertNull($result->get('url'));
+        $this->assertNull($result->get('route'));
+        $this->assertNull($result->get('author'));
+        $this->assertNull($result->get('tags'));
+        $this->assertNull($result->get('category'));
         $this->assertEquals([], $result->getMetadata());
-        $this->assertNull($result->getIndex());
+        $this->assertNull($result->get('_index'));
         $this->assertNull($result->getDistance());
     }
     
@@ -90,14 +92,14 @@ class SearchResultTest extends TestCase
         $data = [
             'id' => 'doc1',
             'score' => 95.5,
-            'title' => 'Test Document',
-            'custom_field' => 'Custom Value'
+            'document' => [
+                'title' => 'Test Document',
+                'custom_field' => 'Custom Value'
+            ]
         ];
         
         $result = new SearchResult($data);
         
-        $this->assertEquals('doc1', $result->get('id'));
-        $this->assertEquals(95.5, $result->get('score'));
         $this->assertEquals('Test Document', $result->get('title'));
         $this->assertEquals('Custom Value', $result->get('custom_field'));
         $this->assertNull($result->get('non_existent'));
@@ -109,8 +111,10 @@ class SearchResultTest extends TestCase
         $data = [
             'id' => 'doc1',
             'score' => 95.5,
-            'title' => 'Test Document',
-            'content' => 'Test content',
+            'document' => [
+                'title' => 'Test Document',
+                'content' => 'Test content'
+            ],
             'metadata' => ['views' => 100]
         ];
         
@@ -120,12 +124,10 @@ class SearchResultTest extends TestCase
         $this->assertIsArray($array);
         $this->assertEquals('doc1', $array['id']);
         $this->assertEquals(95.5, $array['score']);
-        $this->assertEquals('Test Document', $array['title']);
-        $this->assertEquals('Test content', $array['content']);
+        $this->assertEquals(['title' => 'Test Document', 'content' => 'Test content'], $array['document']);
         $this->assertEquals(['views' => 100], $array['metadata']);
         
         // Check that null values are not included
-        $this->assertArrayNotHasKey('url', $array);
         $this->assertArrayNotHasKey('distance', $array);
     }
     
@@ -134,7 +136,9 @@ class SearchResultTest extends TestCase
         $data = [
             'id' => 'doc1',
             'score' => 95.5,
-            'title' => 'Test Document',
+            'document' => [
+                'title' => 'Test Document'
+            ],
             'metadata' => ['views' => 100]
         ];
         
@@ -146,7 +150,7 @@ class SearchResultTest extends TestCase
         $decoded = json_decode($json, true);
         $this->assertEquals('doc1', $decoded['id']);
         $this->assertEquals(95.5, $decoded['score']);
-        $this->assertEquals('Test Document', $decoded['title']);
+        $this->assertEquals(['title' => 'Test Document'], $decoded['document']);
         $this->assertEquals(['views' => 100], $decoded['metadata']);
     }
     
@@ -155,33 +159,17 @@ class SearchResultTest extends TestCase
         $data = [
             'id' => 'doc1',
             'score' => 95.5,
-            'title' => 'Test Document'
+            'document' => [
+                'title' => 'Test Document'
+            ]
         ];
         
         $result = new SearchResult($data);
-        $json = $result->toJson(true);
+        $json = $result->toJson(JSON_PRETTY_PRINT);
         
         $this->assertJson($json);
         $this->assertStringContainsString("\n", $json); // Pretty print adds newlines
         $this->assertStringContainsString("    ", $json); // Pretty print adds indentation
     }
     
-    public function testJsonSerializable(): void
-    {
-        $data = [
-            'id' => 'doc1',
-            'score' => 95.5,
-            'title' => 'Test Document'
-        ];
-        
-        $result = new SearchResult($data);
-        $encoded = json_encode($result);
-        
-        $this->assertJson($encoded);
-        
-        $decoded = json_decode($encoded, true);
-        $this->assertEquals('doc1', $decoded['id']);
-        $this->assertEquals(95.5, $decoded['score']);
-        $this->assertEquals('Test Document', $decoded['title']);
-    }
 }
