@@ -15,9 +15,7 @@
         "ext-mbstring": "*",
         "ext-pdo": "*",
         "ext-sqlite3": "*",
-        "psr/log": "^1.1",
-        "voku/portable-utf8": "^6.0",
-        "wamania/php-stemmer": "^3.0.1"
+        "psr/log": "^1.1"
     },
     "require-dev": {
         "fakerphp/faker": "^1.19",
