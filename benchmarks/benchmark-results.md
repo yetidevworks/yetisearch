@@ -7,55 +7,55 @@ YetiSearch Benchmark Test
 ========================
 Using trigram fuzzy search algorithm
 
-Loading movies.json... Done! (31944 movies loaded in 0.0440 seconds)
+Loading movies.json... Done! (31944 movies loaded in 0.0462 seconds)
 
 Initializing YetiSearch... Done!
 Clearing existing index... Done!
 Indexing movies...
-  Indexed: 1000 movies | Rate: 4,698 movies/sec | Elapsed: 0.21s
-  Indexed: 2000 movies | Rate: 4,722 movies/sec | Elapsed: 0.42s
-  Indexed: 3000 movies | Rate: 4,736 movies/sec | Elapsed: 0.63s
-  Indexed: 4000 movies | Rate: 4,764 movies/sec | Elapsed: 0.84s
-  Indexed: 5000 movies | Rate: 4,758 movies/sec | Elapsed: 1.05s
-  Indexed: 6000 movies | Rate: 4,734 movies/sec | Elapsed: 1.27s
-  Indexed: 7000 movies | Rate: 4,682 movies/sec | Elapsed: 1.49s
-  Indexed: 8000 movies | Rate: 4,670 movies/sec | Elapsed: 1.71s
-  Indexed: 9000 movies | Rate: 4,664 movies/sec | Elapsed: 1.93s
-  Indexed: 10000 movies | Rate: 4,690 movies/sec | Elapsed: 2.13s
-  Indexed: 11000 movies | Rate: 4,679 movies/sec | Elapsed: 2.35s
-  Indexed: 12000 movies | Rate: 4,632 movies/sec | Elapsed: 2.59s
-  Indexed: 13000 movies | Rate: 4,588 movies/sec | Elapsed: 2.83s
-  Indexed: 14000 movies | Rate: 4,564 movies/sec | Elapsed: 3.07s
-  Indexed: 15000 movies | Rate: 4,526 movies/sec | Elapsed: 3.31s
-  Indexed: 16000 movies | Rate: 4,505 movies/sec | Elapsed: 3.55s
-  Indexed: 17000 movies | Rate: 4,473 movies/sec | Elapsed: 3.80s
-  Indexed: 18000 movies | Rate: 4,448 movies/sec | Elapsed: 4.05s
-  Indexed: 19000 movies | Rate: 4,401 movies/sec | Elapsed: 4.32s
-  Indexed: 20000 movies | Rate: 4,384 movies/sec | Elapsed: 4.56s
-  Indexed: 21000 movies | Rate: 4,363 movies/sec | Elapsed: 4.81s
-  Indexed: 22000 movies | Rate: 4,354 movies/sec | Elapsed: 5.05s
-  Indexed: 23000 movies | Rate: 4,327 movies/sec | Elapsed: 5.32s
-  Indexed: 24000 movies | Rate: 4,325 movies/sec | Elapsed: 5.55s
-  Indexed: 25000 movies | Rate: 4,329 movies/sec | Elapsed: 5.78s
-  Indexed: 26000 movies | Rate: 4,325 movies/sec | Elapsed: 6.01s
-  Indexed: 27000 movies | Rate: 4,334 movies/sec | Elapsed: 6.23s
-  Indexed: 28000 movies | Rate: 4,346 movies/sec | Elapsed: 6.44s
-  Indexed: 29000 movies | Rate: 4,340 movies/sec | Elapsed: 6.68s
-  Indexed: 30000 movies | Rate: 4,343 movies/sec | Elapsed: 6.91s
-  Indexed: 31000 movies | Rate: 4,357 movies/sec | Elapsed: 7.12s
-  Indexed: 31944 movies | Rate: 4,368 movies/sec | Elapsed: 7.31s
+  Indexed: 1000 movies | Rate: 4,087 movies/sec | Elapsed: 0.24s
+  Indexed: 2000 movies | Rate: 4,389 movies/sec | Elapsed: 0.46s
+  Indexed: 3000 movies | Rate: 4,521 movies/sec | Elapsed: 0.66s
+  Indexed: 4000 movies | Rate: 4,598 movies/sec | Elapsed: 0.87s
+  Indexed: 5000 movies | Rate: 4,596 movies/sec | Elapsed: 1.09s
+  Indexed: 6000 movies | Rate: 4,634 movies/sec | Elapsed: 1.29s
+  Indexed: 7000 movies | Rate: 4,659 movies/sec | Elapsed: 1.50s
+  Indexed: 8000 movies | Rate: 4,649 movies/sec | Elapsed: 1.72s
+  Indexed: 9000 movies | Rate: 4,657 movies/sec | Elapsed: 1.93s
+  Indexed: 10000 movies | Rate: 4,675 movies/sec | Elapsed: 2.14s
+  Indexed: 11000 movies | Rate: 4,680 movies/sec | Elapsed: 2.35s
+  Indexed: 12000 movies | Rate: 4,638 movies/sec | Elapsed: 2.59s
+  Indexed: 13000 movies | Rate: 4,591 movies/sec | Elapsed: 2.83s
+  Indexed: 14000 movies | Rate: 4,575 movies/sec | Elapsed: 3.06s
+  Indexed: 15000 movies | Rate: 4,545 movies/sec | Elapsed: 3.30s
+  Indexed: 16000 movies | Rate: 4,530 movies/sec | Elapsed: 3.53s
+  Indexed: 17000 movies | Rate: 4,496 movies/sec | Elapsed: 3.78s
+  Indexed: 18000 movies | Rate: 4,472 movies/sec | Elapsed: 4.02s
+  Indexed: 19000 movies | Rate: 4,454 movies/sec | Elapsed: 4.27s
+  Indexed: 20000 movies | Rate: 4,437 movies/sec | Elapsed: 4.51s
+  Indexed: 21000 movies | Rate: 4,416 movies/sec | Elapsed: 4.76s
+  Indexed: 22000 movies | Rate: 4,414 movies/sec | Elapsed: 4.98s
+  Indexed: 23000 movies | Rate: 4,381 movies/sec | Elapsed: 5.25s
+  Indexed: 24000 movies | Rate: 4,384 movies/sec | Elapsed: 5.47s
+  Indexed: 25000 movies | Rate: 4,387 movies/sec | Elapsed: 5.70s
+  Indexed: 26000 movies | Rate: 4,381 movies/sec | Elapsed: 5.94s
+  Indexed: 27000 movies | Rate: 4,389 movies/sec | Elapsed: 6.15s
+  Indexed: 28000 movies | Rate: 4,391 movies/sec | Elapsed: 6.38s
+  Indexed: 29000 movies | Rate: 4,386 movies/sec | Elapsed: 6.61s
+  Indexed: 30000 movies | Rate: 4,390 movies/sec | Elapsed: 6.83s
+  Indexed: 31000 movies | Rate: 4,407 movies/sec | Elapsed: 7.03s
+  Indexed: 31944 movies | Rate: 4,421 movies/sec | Elapsed: 7.22s
 
 Benchmark Results
 =================
 Total movies processed: 31944
 Successfully indexed: 31944
 Errors: 0
-Total time: 7.3564 seconds
-Loading time: 0.0440 seconds
-Indexing time: 7.3124 seconds
-Average indexing rate: 4,368.49 movies/second
+Total time: 7.2711 seconds
+Loading time: 0.0462 seconds
+Indexing time: 7.2249 seconds
+Average indexing rate: 4,421.38 movies/second
 Memory used: 58.69 MB
-Peak memory: 59.88 MB
+Peak memory: 60.17 MB
 ```
 
 ## Testing Search Functionality
