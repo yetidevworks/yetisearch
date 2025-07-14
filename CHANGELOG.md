@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.0.3] - 2025-06-13
+## [1.1.0] - 2025-06-14
 
 #### Enhanced Fuzzy Search Capabilities
 - **New default algorithm:** Changed default fuzzy matching to trigram algorithm for better accuracy
@@ -21,11 +21,12 @@
 - **Weight application:** Fixed and improved weight calculation for better relevance scoring
 - **Performance enhancements:** Various optimizations to fuzzy search performance
 - **Refactored fuzzy implementation:** Major refactor to improve fuzzy search capability and maintainability
+- **Switched to local UTF-8 helper and stemmer:** Improved performance and PHP 8.4 compatibility by using local classes instead of external libraries
 
 #### Technical Updates
 - **API clarity:** Changed method name from ->index() to ->insert() for better API clarity
 - **Test improvements:** Enhanced test coverage and fixed existing tests
-- **Documentation updates:** Updated documentation to reflect new fuzzy sea
+- **Documentation updates:** Updated documentation to reflect new fuzzy search capabilities and performance improvements
 
 ## [1.0.2] - 2025-06-11
 
