@@ -26,8 +26,10 @@ class UTF8Helper
     
     /**
      * Find position of string (case-insensitive, UTF-8 safe)
+     * 
+     * @return int|false
      */
-    public static function stripos(string $haystack, string $needle, int $offset = 0): int|false
+    public static function stripos(string $haystack, string $needle, int $offset = 0)
     {
         return mb_stripos($haystack, $needle, $offset, 'UTF-8');
     }
