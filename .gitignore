@@ -3,3 +3,4 @@
 /build
 /benchmarks/benchmark.db
 /benchmarks/movies.json
+/.claude
