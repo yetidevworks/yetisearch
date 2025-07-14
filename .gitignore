@@ -2,3 +2,4 @@
 /.phpunit.cache
 /build
 /benchmarks/benchmark.db
+/benchmarks/movies.json
