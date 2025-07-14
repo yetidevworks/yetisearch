@@ -103,7 +103,7 @@ class Indexer implements IndexerInterface
         
         if (!empty($errors)) {
             $this->logger->warning('Some documents failed to process', ['errors' => $errors]);
-            if ($isSingle && !empty($errors)) {
+            if ($isSingle) {
                 throw new IndexException("Failed to index document: " . $errors[0]['error']);
             }
         }
