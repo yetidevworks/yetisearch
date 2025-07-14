@@ -4,9 +4,7 @@ namespace YetiSearch\Contracts;
 
 interface IndexerInterface
 {
-    public function index(array $document): void;
-    
-    public function indexBatch(array $documents): void;
+    public function insert($documents): void;
     
     public function update(array $document): void;
     

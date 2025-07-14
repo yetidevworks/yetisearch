@@ -108,7 +108,7 @@ class YetiSearchTest extends TestCase
     {
         // Create and populate an index
         $indexer = $this->yetiSearch->createIndex('test_index');
-        $indexer->index([
+        $indexer->insert([
             'id' => 'doc1',
             'content' => ['title' => 'Test Document', 'body' => 'Test content']
         ]);
@@ -129,12 +129,12 @@ class YetiSearchTest extends TestCase
         $indexer1 = $this->yetiSearch->createIndex('index1');
         $indexer2 = $this->yetiSearch->createIndex('index2');
         
-        $indexer1->index([
+        $indexer1->insert([
             'id' => 'doc1',
             'content' => ['title' => 'Index 1 Document']
         ]);
         
-        $indexer2->index([
+        $indexer2->insert([
             'id' => 'doc2',
             'content' => ['title' => 'Index 2 Document']
         ]);
@@ -148,7 +148,7 @@ class YetiSearchTest extends TestCase
     public function testCount(): void
     {
         $indexer = $this->yetiSearch->createIndex('test_index');
-        $indexer->index([
+        $indexer->insert([
             'id' => 'doc1',
             'content' => ['title' => 'Test Document']
         ]);
@@ -162,7 +162,7 @@ class YetiSearchTest extends TestCase
     public function testSuggest(): void
     {
         $indexer = $this->yetiSearch->createIndex('test_index');
-        $indexer->index([
+        $indexer->insert([
             'id' => 'doc1',
             'content' => ['title' => 'Testing suggestions']
         ]);
@@ -242,8 +242,8 @@ class YetiSearchTest extends TestCase
         $indexer = $this->yetiSearch->createIndex('test_index');
         
         // Add some documents
-        $indexer->index(['id' => 'doc1', 'content' => ['title' => 'Document 1']]);
-        $indexer->index(['id' => 'doc2', 'content' => ['title' => 'Document 2']]);
+        $indexer->insert(['id' => 'doc1', 'content' => ['title' => 'Document 1']]);
+        $indexer->insert(['id' => 'doc2', 'content' => ['title' => 'Document 2']]);
         
         // Clear the index - clear() returns void
         $this->yetiSearch->clear('test_index');
@@ -266,8 +266,8 @@ class YetiSearchTest extends TestCase
         $indexer = $this->yetiSearch->createIndex('test_index');
         
         // Add some documents
-        $indexer->index(['id' => 'doc1', 'content' => ['title' => 'Document 1']]);
-        $indexer->index(['id' => 'doc2', 'content' => ['title' => 'Document 2']]);
+        $indexer->insert(['id' => 'doc1', 'content' => ['title' => 'Document 1']]);
+        $indexer->insert(['id' => 'doc2', 'content' => ['title' => 'Document 2']]);
         
         $stats = $this->yetiSearch->getStats('test_index');
         

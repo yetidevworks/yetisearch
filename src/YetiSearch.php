@@ -91,11 +91,25 @@ class YetiSearch
         $storage = $this->getStorage();
         $analyzer = $this->getAnalyzer();
         
+        // Get field weights from indexer config if available
+        $searchConfig = array_merge($this->config['search'], $options);
+        if (!empty($this->config['indexer']['fields'])) {
+            $fieldWeights = [];
+            foreach ($this->config['indexer']['fields'] as $field => $fieldConfig) {
+                if (isset($fieldConfig['boost'])) {
+                    $fieldWeights[$field] = $fieldConfig['boost'];
+                }
+            }
+            if (!empty($fieldWeights)) {
+                $searchConfig['field_weights'] = $fieldWeights;
+            }
+        }
+        
         $searchEngine = new SearchEngine(
             $storage,
             $analyzer,
             $indexName,
-            array_merge($this->config['search'], $options),
+            $searchConfig,
             $this->logger
         );
         
@@ -123,7 +137,7 @@ class YetiSearch
             $indexer = $this->createIndex($indexName);
         }
         
-        $indexer->index($documentData);
+        $indexer->insert($documentData);
     }
     
     public function indexBatch(string $indexName, array $documents): void
@@ -133,11 +147,34 @@ class YetiSearch
             $indexer = $this->createIndex($indexName);
         }
         
-        $indexer->indexBatch($documents);
+        $indexer->insert($documents);
     }
     
     public function search(string $indexName, string $query, array $options = []): array
     {
+        // Extract fuzzy algorithm options to pass to search engine
+        $fuzzyOptions = [];
+        $fuzzyConfigKeys = [
+            'fuzzy_algorithm',
+            'fuzzy_score_penalty',
+            'levenshtein_threshold',
+            'jaro_winkler_threshold',
+            'jaro_winkler_prefix_scale',
+            'trigram_threshold',
+            'trigram_size',
+            'min_term_frequency',
+            'max_fuzzy_variations',
+            'max_indexed_terms',
+            'indexed_terms_cache_ttl'
+        ];
+        
+        foreach ($fuzzyConfigKeys as $key) {
+            if (isset($options[$key])) {
+                $fuzzyOptions[$key] = $options[$key];
+            }
+        }
+        
+        // Get or create search engine with fuzzy options
         $searchEngine = $this->getSearchEngine($indexName);
         if (!$searchEngine) {
             return [
@@ -146,6 +183,11 @@ class YetiSearch
                 'count' => 0,
                 'search_time' => 0
             ];
+        }
+        
+        // Update search engine config with runtime options
+        if (!empty($fuzzyOptions)) {
+            $searchEngine->updateConfig($fuzzyOptions);
         }
         
         $searchQuery = new SearchQuery($query);
@@ -368,7 +410,12 @@ class YetiSearch
     {
         if ($this->storage === null) {
             $this->storage = new SqliteStorage();
-            $this->storage->connect($this->config['storage']);
+            // Pass both storage and search config to storage layer
+            $storageConfig = array_merge(
+                $this->config['storage'],
+                ['search' => $this->config['search']]
+            );
+            $this->storage->connect($storageConfig);
         }
         
         return $this->storage;

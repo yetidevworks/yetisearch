@@ -59,10 +59,10 @@ class IndexerTest extends TestCase
             });
         
         $this->storage->expects($this->once())
-            ->method('insert');
+            ->method('insertBatch');
         
-        // index() returns void, not boolean
-        $this->indexer->index($document);
+        // insert() returns void, not boolean
+        $this->indexer->insert($document);
         
         // If we get here without exception, the test passes
         $this->assertTrue(true);
@@ -87,9 +87,9 @@ class IndexerTest extends TestCase
             ->willReturn(['geo', 'document']);
         
         $this->storage->expects($this->once())
-            ->method('insert');
+            ->method('insertBatch');
         
-        $this->indexer->index($document);
+        $this->indexer->insert($document);
         $this->assertTrue(true);
     }
     
@@ -114,9 +114,9 @@ class IndexerTest extends TestCase
             ->willReturn(['area', 'document']);
         
         $this->storage->expects($this->once())
-            ->method('insert');
+            ->method('insertBatch');
         
-        $this->indexer->index($document);
+        $this->indexer->insert($document);
         $this->assertTrue(true);
     }
     
@@ -132,11 +132,12 @@ class IndexerTest extends TestCase
             ->method('analyze')
             ->willReturn(['test']);
         
-        $this->storage->expects($this->atLeastOnce())
-            ->method('insert');
+        $this->storage->expects($this->once())
+            ->method('insertBatch')
+            ->with($this->equalTo('test_index'), $this->anything());
         
-        // indexBatch returns void
-        $this->indexer->indexBatch($documents);
+        // insert() handles arrays too
+        $this->indexer->insert($documents);
         $this->assertTrue(true);
     }
     
@@ -153,10 +154,10 @@ class IndexerTest extends TestCase
             ->willReturn(['test']);
         
         $this->storage->expects($this->any())
-            ->method('insert');
+            ->method('insertBatch');
         
         // Should handle invalid documents gracefully
-        $this->indexer->indexBatch($documents);
+        $this->indexer->insert($documents);
         $this->assertTrue(true);
     }
     
@@ -178,9 +179,9 @@ class IndexerTest extends TestCase
         
         // Chunking may result in multiple insert calls
         $this->storage->expects($this->atLeast(1))
-            ->method('insert');
+            ->method('insertBatch');
         
-        $this->indexer->index($document);
+        $this->indexer->insert($document);
         $this->assertTrue(true);
     }
     
@@ -262,7 +263,7 @@ class IndexerTest extends TestCase
             ->method('createIndex');
             
         $this->storage->expects($this->any())
-            ->method('insert');
+            ->method('insertBatch');
             
         $this->storage->expects($this->once())
             ->method('optimize');
@@ -303,13 +304,14 @@ class IndexerTest extends TestCase
             ->method('analyze')
             ->willReturn(['test']);
         
-        // Storage should receive inserts when we flush
-        $this->storage->expects($this->atLeast(5))
-            ->method('insert');
+        // Storage should receive insertBatch when we flush
+        $this->storage->expects($this->once())
+            ->method('insertBatch')
+            ->with($this->equalTo('test_index'), $this->anything());
         
         // Add 5 documents
         for ($i = 1; $i <= 5; $i++) {
-            $indexer->index([
+            $indexer->insert([
                 'id' => "doc{$i}",
                 'content' => ['title' => "Document {$i}"]
             ]);
@@ -327,10 +329,10 @@ class IndexerTest extends TestCase
             ->willReturn(['test']);
             
         $this->storage->expects($this->once())
-            ->method('insert');
+            ->method('insertBatch');
         
         // Documents without ID get a generated ID
-        $this->indexer->index(['content' => ['title' => 'No ID']]);
+        $this->indexer->insert(['content' => ['title' => 'No ID']]);
         $this->assertTrue(true);
     }
     
@@ -341,10 +343,10 @@ class IndexerTest extends TestCase
             ->willReturn(['test']);
             
         $this->storage->expects($this->once())
-            ->method('insert');
+            ->method('insertBatch');
         
         // Empty ID gets replaced with generated ID
-        $this->indexer->index(['id' => '', 'content' => ['title' => 'Empty ID']]);
+        $this->indexer->insert(['id' => '', 'content' => ['title' => 'Empty ID']]);
         $this->assertTrue(true);
     }
     
@@ -355,10 +357,10 @@ class IndexerTest extends TestCase
             ->willReturn(['test']);
             
         $this->storage->expects($this->once())
-            ->method('insert');
+            ->method('insertBatch');
         
         // Missing content field defaults to empty array
-        $this->indexer->index(['id' => 'doc1']);
+        $this->indexer->insert(['id' => 'doc1']);
         $this->assertTrue(true);
     }
     
@@ -369,10 +371,10 @@ class IndexerTest extends TestCase
             ->willReturn(['test']);
             
         $this->storage->expects($this->once())
-            ->method('insert');
+            ->method('insertBatch');
         
         // Non-array content should still be processed
-        $this->indexer->index(['id' => 'doc1', 'content' => 'string content']);
+        $this->indexer->insert(['id' => 'doc1', 'content' => 'string content']);
         $this->assertTrue(true);
     }
     
@@ -396,9 +398,9 @@ class IndexerTest extends TestCase
             ->willReturn(['test']);
         
         $this->storage->expects($this->once())
-            ->method('insert');
+            ->method('insertBatch');
         
-        $this->indexer->index($document);
+        $this->indexer->insert($document);
         $this->assertTrue(true);
     }
 }

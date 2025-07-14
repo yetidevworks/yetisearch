@@ -52,37 +52,13 @@ class Indexer implements IndexerInterface
         $this->ensureIndexExists();
     }
     
-    public function index(array $document): void
+    public function insert($documents): void
     {
-        $id = $document['id'] ?? uniqid();
-        $this->logger->debug('Indexing document', ['id' => $id]);
+        // Handle both single document and array of documents
+        $isSingle = isset($documents['id']) || (isset($documents['content']) && !is_numeric(key($documents)));
+        $documents = $isSingle ? [$documents] : $documents;
         
-        try {
-            $processedDocument = $this->processDocument($document);
-            
-            if ($this->config['auto_flush']) {
-                $this->storage->insert($this->indexName, $processedDocument);
-            } else {
-                $this->batchQueue[] = $processedDocument;
-                
-                if (count($this->batchQueue) >= $this->batchSize) {
-                    $this->flush();
-                }
-            }
-            
-            $this->logger->info('Document indexed successfully', ['id' => $id]);
-        } catch (\Exception $e) {
-            $this->logger->error('Failed to index document', [
-                'id' => $id,
-                'error' => $e->getMessage()
-            ]);
-            throw new IndexException("Failed to index document: " . $e->getMessage(), 0, $e);
-        }
-    }
-    
-    public function indexBatch(array $documents): void
-    {
-        $this->logger->debug('Indexing batch', ['count' => count($documents)]);
+        $this->logger->debug('Inserting document(s)', ['count' => count($documents)]);
         
         $processed = [];
         $errors = [];
@@ -102,22 +78,37 @@ class Indexer implements IndexerInterface
                     'id' => $id,
                     'error' => $e->getMessage()
                 ];
+                $this->logger->error('Failed to process document', [
+                    'id' => $id,
+                    'error' => $e->getMessage()
+                ]);
             }
         }
         
         if (!empty($processed)) {
-            foreach (array_chunk($processed, $this->batchSize) as $chunk) {
-                foreach ($chunk as $doc) {
-                    $this->storage->insert($this->indexName, $doc);
+            if ($this->config['auto_flush']) {
+                // Immediate insert using batch for efficiency
+                foreach (array_chunk($processed, $this->batchSize) as $chunk) {
+                    $this->storage->insertBatch($this->indexName, $chunk);
+                }
+            } else {
+                // Add to queue for later flush
+                $this->batchQueue = array_merge($this->batchQueue, $processed);
+                
+                if (count($this->batchQueue) >= $this->batchSize) {
+                    $this->flush();
                 }
             }
         }
         
         if (!empty($errors)) {
-            $this->logger->warning('Some documents failed to index', ['errors' => $errors]);
+            $this->logger->warning('Some documents failed to process', ['errors' => $errors]);
+            if ($isSingle && !empty($errors)) {
+                throw new IndexException("Failed to index document: " . $errors[0]['error']);
+            }
         }
         
-        $this->logger->info('Batch indexed', [
+        $this->logger->info('Documents processed', [
             'total' => count($documents),
             'success' => count($processed),
             'failed' => count($errors)
@@ -189,7 +180,7 @@ class Indexer implements IndexerInterface
         ]);
         
         $this->clear();
-        $this->indexBatch($documents);
+        $this->insert($documents);
         $this->optimize();
         
         $this->logger->info('Index rebuilt successfully', [
@@ -227,9 +218,8 @@ class Indexer implements IndexerInterface
             return;
         }
         
-        foreach ($this->batchQueue as $document) {
-            $this->storage->insert($this->indexName, $document);
-        }
+        // Use batch insert for better performance
+        $this->storage->insertBatch($this->indexName, $this->batchQueue);
         
         $this->batchQueue = [];
     }
@@ -260,11 +250,12 @@ class Indexer implements IndexerInterface
             if ($fieldConfig['index'] ?? true) {
                 if (is_string($fieldValue)) {
                     $analyzed = $this->analyzer->analyze($fieldValue, $language);
+                    $tokens = is_array($analyzed) && isset($analyzed['tokens']) ? $analyzed['tokens'] : $analyzed;
                     $boost = $fieldConfig['boost'] ?? 1.0;
                     
-                    for ($i = 0; $i < $boost; $i++) {
-                        $searchableText = array_merge($searchableText, $analyzed);
-                    }
+                    // Instead of duplicating tokens, we'll apply boost at search time
+                    // For now, just add tokens once
+                    $searchableText = array_merge($searchableText, $tokens);
                 }
             }
         }
@@ -274,6 +265,7 @@ class Indexer implements IndexerInterface
             $metadata['chunks'] = count($chunks);
             $metadata['chunked'] = true;
             
+            $chunkDocs = [];
             foreach ($chunks as $index => $chunk) {
                 $chunkId = $id . '#chunk' . $index;
                 $chunkDoc = [
@@ -298,7 +290,12 @@ class Indexer implements IndexerInterface
                     $chunkDoc['geo_bounds'] = $document['geo_bounds'];
                 }
                 
-                $this->storage->insert($this->indexName, $chunkDoc);
+                $chunkDocs[] = $chunkDoc;
+            }
+            
+            // Insert all chunks in batch
+            if (!empty($chunkDocs)) {
+                $this->storage->insertBatch($this->indexName, $chunkDocs);
             }
         }
         
