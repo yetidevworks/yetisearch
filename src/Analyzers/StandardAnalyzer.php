@@ -3,8 +3,8 @@
 namespace YetiSearch\Analyzers;
 
 use YetiSearch\Contracts\AnalyzerInterface;
-use Wamania\Snowball\StemmerFactory;
-use voku\helper\UTF8;
+use YetiSearch\Stemmer\StemmerFactory;
+use YetiSearch\Helpers\UTF8Helper as UTF8;
 
 class StandardAnalyzer implements AnalyzerInterface
 {
@@ -189,10 +189,10 @@ class StandardAnalyzer implements AnalyzerInterface
             ],
             'french' => [
                 'au', 'aux', 'avec', 'ce', 'ces', 'dans', 'de', 'des', 'du', 'elle', 'en', 'et',
-                'eux', 'il', 'je', 'la', 'le', 'leur', 'lui', 'ma', 'mais', 'me', 'même', 'mes',
+                'eux', 'il', 'je', 'la', 'le', 'les', 'leur', 'lui', 'ma', 'mais', 'me', 'même', 'mes',
                 'moi', 'mon', 'ne', 'nos', 'notre', 'nous', 'on', 'ou', 'par', 'pas', 'pour',
                 'qu', 'que', 'qui', 'sa', 'se', 'ses', 'son', 'sur', 'ta', 'te', 'tes', 'toi',
-                'ton', 'tu', 'un', 'une', 'vos', 'votre', 'vous'
+                'ton', 'tu', 'un', 'une', 'vos', 'votre', 'vous', 'sont', 'est', 'été', 'être'
             ],
             'german' => [
                 'aber', 'als', 'am', 'an', 'auch', 'auf', 'aus', 'bei', 'bin', 'bis', 'bist',
