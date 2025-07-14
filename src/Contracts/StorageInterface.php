@@ -16,6 +16,8 @@ interface StorageInterface
     
     public function insert(string $index, array $document): void;
     
+    public function insertBatch(string $index, array $documents): void;
+    
     public function update(string $index, string $id, array $document): void;
     
     public function delete(string $index, string $id): void;

@@ -11,13 +11,22 @@ class SqliteStorage implements StorageInterface
 {
     private ?\PDO $connection = null;
     private array $config = [];
+    private array $searchConfig = [];
     private array $preparedStatements = [];
     private ?bool $rtreeSupport = null;
+    private bool $useTermsIndex = false;
     
     public function connect(array $config): void
     {
         $this->config = $config;
         $dbPath = $config['path'] ?? ':memory:';
+        
+        // Extract search config if available
+        $this->searchConfig = $config['search'] ?? [];
+        
+        // Only use terms index if Levenshtein fuzzy search is enabled
+        $this->useTermsIndex = ($this->searchConfig['enable_fuzzy'] ?? false) && 
+                               ($this->searchConfig['fuzzy_algorithm'] ?? 'basic') === 'levenshtein';
         
         // Create directory if it doesn't exist and path is not :memory:
         if ($dbPath !== ':memory:') {
@@ -37,9 +46,10 @@ class SqliteStorage implements StorageInterface
             
             $this->connection->exec('PRAGMA foreign_keys = ON');
             $this->connection->exec('PRAGMA journal_mode = WAL');
-            $this->connection->exec('PRAGMA synchronous = NORMAL');
+            $this->connection->exec('PRAGMA synchronous = OFF'); // Most aggressive for bulk loading
             $this->connection->exec('PRAGMA temp_store = MEMORY');
             $this->connection->exec('PRAGMA cache_size = -20000');
+            $this->connection->exec('PRAGMA mmap_size = 268435456'); // 256MB memory map
             
             $this->initializeDatabase();
         } catch (\PDOException $e) {
@@ -85,20 +95,23 @@ class SqliteStorage implements StorageInterface
             ";
             $this->connection->exec($sql);
             
-            $termsSql = "
-                CREATE TABLE IF NOT EXISTS {$name}_terms (
-                    term TEXT NOT NULL,
-                    document_id TEXT NOT NULL,
-                    field TEXT NOT NULL,
-                    frequency INTEGER DEFAULT 1,
-                    positions TEXT,
-                    PRIMARY KEY (term, document_id, field)
-                )
-            ";
-            $this->connection->exec($termsSql);
-            
-            $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_terms_term ON {$name}_terms(term)");
-            $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_terms_doc ON {$name}_terms(document_id)");
+            // Only create terms table if Levenshtein fuzzy search is enabled
+            if ($this->useTermsIndex) {
+                $termsSql = "
+                    CREATE TABLE IF NOT EXISTS {$name}_terms (
+                        term TEXT NOT NULL,
+                        document_id TEXT NOT NULL,
+                        field TEXT NOT NULL,
+                        frequency INTEGER DEFAULT 1,
+                        positions TEXT,
+                        PRIMARY KEY (term, document_id, field)
+                    )
+                ";
+                $this->connection->exec($termsSql);
+                
+                $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_terms_term ON {$name}_terms(term)");
+                $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_terms_doc ON {$name}_terms(document_id)");
+            }
             
             // Create R-tree spatial index if available
             if ($this->hasRTreeSupport()) {
@@ -181,7 +194,10 @@ class SqliteStorage implements StorageInterface
             $ftsStmt = $this->connection->prepare($ftsSql);
             $ftsStmt->execute([$id, $searchableContent]);
             
-            $this->indexTerms($index, $id, $document['content']);
+            // Only index terms if Levenshtein fuzzy search is enabled
+            if ($this->useTermsIndex) {
+                $this->indexTerms($index, $id, $document['content']);
+            }
             
             // Handle spatial indexing
             $this->indexSpatialData($index, $id, $document);
@@ -190,6 +206,92 @@ class SqliteStorage implements StorageInterface
         } catch (\PDOException $e) {
             $this->connection->rollBack();
             throw new StorageException("Failed to insert document: " . $e->getMessage());
+        }
+    }
+    
+    public function insertBatch(string $index, array $documents): void
+    {
+        $this->ensureConnected();
+        
+        if (empty($documents)) {
+            return;
+        }
+        
+        try {
+            $this->connection->beginTransaction();
+            
+            // Prepare statements once
+            $docStmt = $this->connection->prepare("
+                INSERT OR REPLACE INTO {$index} 
+                (id, content, metadata, language, type, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ");
+            
+            $ftsStmt = $this->connection->prepare("
+                INSERT OR REPLACE INTO {$index}_fts (id, content) VALUES (?, ?)
+            ");
+            
+            $termsStmt = null;
+            if ($this->useTermsIndex) {
+                $termsStmt = $this->connection->prepare("
+                    INSERT OR REPLACE INTO {$index}_terms 
+                    (term, document_id, field, frequency, positions)
+                    VALUES (?, ?, ?, ?, ?)
+                ");
+            }
+            
+            // Process all documents in a single transaction
+            foreach ($documents as $document) {
+                $id = $document['id'];
+                $content = json_encode($document['content']);
+                $metadata = json_encode($document['metadata'] ?? []);
+                $language = $document['language'] ?? null;
+                $type = $document['type'] ?? 'default';
+                $timestamp = $document['timestamp'] ?? time();
+                
+                // Insert main document
+                $docStmt->execute([$id, $content, $metadata, $language, $type, $timestamp]);
+                
+                // Insert FTS content
+                $searchableContent = $this->extractSearchableContent($document['content']);
+                $ftsStmt->execute([$id, $searchableContent]);
+                
+                // Only index terms if Levenshtein fuzzy search is enabled
+                if ($this->useTermsIndex && $termsStmt) {
+                    $this->indexTermsWithStatement($termsStmt, $id, $document['content']);
+                }
+                
+                // Handle spatial indexing
+                $this->indexSpatialData($index, $id, $document);
+            }
+            
+            $this->connection->commit();
+        } catch (\PDOException $e) {
+            $this->connection->rollBack();
+            throw new StorageException("Failed to insert batch: " . $e->getMessage());
+        }
+    }
+    
+    private function indexTermsWithStatement(\PDOStatement $stmt, string $documentId, array $content): void
+    {
+        foreach ($content as $field => $value) {
+            if (!is_string($value)) {
+                continue;
+            }
+            
+            $terms = $this->tokenizeText($value);
+            $termFrequencies = array_count_values($terms);
+            
+            foreach ($termFrequencies as $term => $frequency) {
+                $positions = $this->findTermPositions($value, $term);
+                $stmt->execute([
+                    $term,
+                    $documentId,
+                    $field,
+                    $frequency,
+                    json_encode($positions)
+                ]);
+            }
         }
     }
     
@@ -208,7 +310,11 @@ class SqliteStorage implements StorageInterface
             
             $this->connection->prepare("DELETE FROM {$index} WHERE id = ?")->execute([$id]);
             $this->connection->prepare("DELETE FROM {$index}_fts WHERE id = ?")->execute([$id]);
-            $this->connection->prepare("DELETE FROM {$index}_terms WHERE document_id = ?")->execute([$id]);
+            
+            // Only delete from terms table if it exists (Levenshtein enabled)
+            if ($this->useTermsIndex) {
+                $this->connection->prepare("DELETE FROM {$index}_terms WHERE document_id = ?")->execute([$id]);
+            }
             
             // Only delete from spatial-related tables if R-tree support is available
             if ($this->hasRTreeSupport()) {
@@ -237,6 +343,7 @@ class SqliteStorage implements StorageInterface
         $sort = $query['sort'] ?? [];
         $language = $query['language'] ?? null;
         $geoFilters = $query['geoFilters'] ?? [];
+        $fieldWeights = $query['field_weights'] ?? [];
         
         // Build spatial query components
         $spatial = $this->buildSpatialQuery($index, $geoFilters);
@@ -244,6 +351,7 @@ class SqliteStorage implements StorageInterface
         
         // Check if we have a search query
         $hasSearchQuery = !empty(trim($searchQuery));
+        
         
         // Detect if we need PHP-based sorting (FTS5 + distance sorting)
         $needsPhpSort = false;
@@ -255,6 +363,10 @@ class SqliteStorage implements StorageInterface
                 $needsPhpSort = true;
             }
         }
+        
+        // When using field weights, we need to fetch more results to ensure proper scoring
+        $effectiveLimit = (!empty($fieldWeights) && $hasSearchQuery) ? min(max($limit * 20, 200), 500) : $limit;
+        
         
         if ($hasSearchQuery) {
             // Full text search with optional spatial filters
@@ -346,7 +458,7 @@ class SqliteStorage implements StorageInterface
             $fetchLimit = min(1000, max($limit * 10, 100));
             
             // Apply basic ordering by rank to get most relevant results first
-            $sql .= " ORDER BY rank DESC";
+            $sql .= " ORDER BY rank ASC";
             $sql .= " LIMIT ?";
             $params[] = $fetchLimit;
         } else {
@@ -355,7 +467,7 @@ class SqliteStorage implements StorageInterface
                 $dir = strtoupper($geoFilters['distance_sort']['direction']) === 'DESC' ? 'DESC' : 'ASC';
                 $sql .= " ORDER BY distance {$dir}";
             } elseif (empty($sort)) {
-                $sql .= " ORDER BY rank DESC";
+                $sql .= " ORDER BY rank ASC";
             } else {
                 $orderClauses = [];
                 foreach ($sort as $field => $direction) {
@@ -372,11 +484,12 @@ class SqliteStorage implements StorageInterface
             }
             
             $sql .= " LIMIT ? OFFSET ?";
-            $params[] = $limit;
+            $params[] = $effectiveLimit;
             $params[] = $offset;
         }
         
         try {
+            
             $stmt = $this->connection->prepare($sql);
             $stmt->execute($params);
             
@@ -388,11 +501,25 @@ class SqliteStorage implements StorageInterface
                 $radiusFilter = $geoFilters['near']['radius'];
             }
             
+            $rowCount = 0;
             while ($row = $stmt->fetch()) {
+                $rowCount++;
+                $content = json_decode($row['content'], true);
+                $baseScore = abs($row['rank']);
+                
+                // Apply field weights if provided
+                if (!empty($fieldWeights) && $hasSearchQuery) {
+                    $weightedScore = $this->calculateFieldWeightedScore($searchQuery, $content, $fieldWeights, $baseScore);
+                    $finalScore = $weightedScore;
+                    
+                } else {
+                    $finalScore = $baseScore;
+                }
+                
                 $result = [
                     'id' => $row['id'],
-                    'score' => abs($row['rank']),
-                    'document' => json_decode($row['content'], true),
+                    'score' => $finalScore,
+                    'document' => $content,
                     'metadata' => json_decode($row['metadata'], true),
                     'language' => $row['language'],
                     'type' => $row['type'],
@@ -412,6 +539,17 @@ class SqliteStorage implements StorageInterface
                 }
                 
                 $results[] = $result;
+            }
+            
+            // Re-sort results if field weights were applied
+            if (!empty($fieldWeights) && $hasSearchQuery) {
+                usort($results, function($a, $b) {
+                    // Sort by score descending (highest score first)
+                    return $b['score'] <=> $a['score'];
+                });
+                
+                // Apply the actual limit after sorting
+                $results = array_slice($results, 0, $limit);
             }
             
             // Apply PHP sorting if needed
@@ -1090,5 +1228,242 @@ class SqliteStorage implements StorageInterface
         }
         
         return $this->rtreeSupport;
+    }
+    
+    /**
+     * Get all index names from the database
+     * 
+     * @return array Array of index names
+     */
+    private function getIndexNames(): array
+    {
+        $stmt = $this->connection->query("
+            SELECT DISTINCT name 
+            FROM sqlite_master 
+            WHERE type = 'table' 
+            AND name NOT LIKE '%_fts' 
+            AND name NOT LIKE '%_terms'
+            AND name NOT LIKE '%_vocab'
+            AND name NOT LIKE '%_spatial'
+            AND name NOT LIKE '%_id_map'
+            AND name NOT LIKE 'sqlite_%'
+            AND name != 'yetisearch_metadata'
+        ");
+        
+        return $stmt->fetchAll(\PDO::FETCH_COLUMN);
+    }
+    
+    /**
+     * Get unique indexed terms from the database
+     * 
+     * @param string|null $indexName Specific index to query, or null for all
+     * @param int $minFrequency Minimum frequency threshold
+     * @param int $limit Maximum number of terms to return
+     * @return array Array of indexed terms
+     */
+    public function getIndexedTerms(?string $indexName = null, int $minFrequency = 2, int $limit = 10000): array
+    {
+        $this->ensureConnected();
+        
+        try {
+            if ($indexName && !$this->indexExists($indexName)) {
+                return [];
+            }
+            
+            $tables = $indexName ? [$indexName] : $this->getIndexNames();
+            $allTerms = [];
+            
+            foreach ($tables as $table) {
+                $termsTable = "{$table}_terms";
+                
+                // Check if terms table exists
+                $stmt = $this->connection->prepare("
+                    SELECT name FROM sqlite_master 
+                    WHERE type='table' AND name=:table
+                ");
+                $stmt->execute([':table' => $termsTable]);
+                
+                if ($stmt->fetch()) {
+                    // Use existing terms table (Levenshtein mode)
+                    $sql = "
+                        SELECT term, COUNT(*) as frequency
+                        FROM {$termsTable}
+                        GROUP BY term
+                        HAVING frequency >= :min_freq
+                        ORDER BY frequency DESC
+                        LIMIT :limit
+                    ";
+                    
+                    $stmt = $this->connection->prepare($sql);
+                    $stmt->execute([
+                        ':min_freq' => $minFrequency,
+                        ':limit' => $limit
+                    ]);
+                    
+                    while ($row = $stmt->fetch(\PDO::FETCH_ASSOC)) {
+                        $allTerms[$row['term']] = ($allTerms[$row['term']] ?? 0) + $row['frequency'];
+                    }
+                } else {
+                    // No terms table - try FTS5 vocabulary for other fuzzy algorithms
+                    $vocabTable = "{$table}_fts_vocab";
+                    
+                    // Check if vocab table exists
+                    $stmt = $this->connection->prepare("
+                        SELECT name FROM sqlite_master 
+                        WHERE type='table' AND name=:table
+                    ");
+                    $stmt->execute([':table' => $vocabTable]);
+                    
+                    if (!$stmt->fetch()) {
+                        // Create vocab table if it doesn't exist
+                        try {
+                            $this->connection->exec("CREATE VIRTUAL TABLE {$vocabTable} USING fts5vocab('{$table}_fts', 'row')");
+                        } catch (\PDOException $e) {
+                            // Skip if can't create vocab table
+                            continue;
+                        }
+                    }
+                    
+                    // Query vocab table
+                    $sql = "
+                        SELECT term, doc as frequency
+                        FROM {$vocabTable}
+                        WHERE doc >= ?
+                        ORDER BY doc DESC
+                        LIMIT ?
+                    ";
+                    
+                    $stmt = $this->connection->prepare($sql);
+                    $stmt->bindValue(1, $minFrequency, \PDO::PARAM_INT);
+                    $stmt->bindValue(2, $limit, \PDO::PARAM_INT);
+                    $stmt->execute();
+                    
+                    while ($row = $stmt->fetch(\PDO::FETCH_ASSOC)) {
+                        $allTerms[$row['term']] = ($allTerms[$row['term']] ?? 0) + $row['frequency'];
+                    }
+                }
+            }
+            
+            // Sort by frequency and return just the terms
+            arsort($allTerms);
+            return array_keys(array_slice($allTerms, 0, $limit, true));
+            
+        } catch (\PDOException $e) {
+            throw new StorageException("Failed to get indexed terms: " . $e->getMessage());
+        }
+    }
+    
+    /**
+     * Calculate field-weighted score based on which fields contain the search terms
+     */
+    private function calculateFieldWeightedScore(string $searchQuery, array $content, array $fieldWeights, float $baseScore): float
+    {
+        // Handle complex queries with phrases and OR operators
+        // Example: ("star wars" OR star OR wars) -> extract both phrase and individual terms
+        $searchTerms = [];
+        $exactPhrases = [];
+        
+        // Extract quoted phrases first
+        if (preg_match_all('/"([^"]+)"/', $searchQuery, $matches)) {
+            foreach ($matches[1] as $phrase) {
+                $exactPhrases[] = strtolower($phrase);
+            }
+        }
+        
+        // Remove quoted phrases and parentheses from query to get individual terms
+        $cleanQuery = preg_replace('/["\(\)]/', ' ', $searchQuery);
+        $allTerms = array_map('trim', explode(' ', strtolower($cleanQuery)));
+        
+        // Filter out OR operators and empty terms
+        $searchTerms = array_filter($allTerms, function($term) {
+            return $term !== 'or' && !empty($term);
+        });
+        
+        // If no exact phrases were found but we have multiple terms, treat them as a phrase too
+        if (empty($exactPhrases) && count($searchTerms) > 1) {
+            $exactPhrases[] = implode(' ', $searchTerms);
+        }
+        
+        $maxFieldScore = 0.0;
+        $totalWeight = 0.0;
+        
+        // Check each field for search terms
+        foreach ($fieldWeights as $field => $weight) {
+            if (!isset($content[$field]) || !is_string($content[$field])) {
+                continue;
+            }
+            
+            $fieldText = strtolower($content[$field]);
+            $fieldScore = 0.0;
+            $matchCount = 0;
+            $hasExactPhrase = false;
+            
+            // First check for exact phrase matches (highest boost)
+            foreach ($exactPhrases as $phrase) {
+                if (strpos($fieldText, $phrase) !== false) {
+                    $fieldScore += 15.0; // Massive boost for exact phrase
+                    $matchCount = count(explode(' ', $phrase)); // Count words in phrase
+                    $hasExactPhrase = true;
+                    
+                    // Extra boost for high-weight fields (likely primary fields like title, name, etc)
+                    // Use boost threshold to determine if this is a "primary" field
+                    if ($weight >= 2.5) {
+                        // Exact match gets huge bonus
+                        if ($fieldText === $phrase) {
+                            $fieldScore += 50.0;
+                        } 
+                        // Near-exact match (just punctuation differences) gets good bonus
+                        else if (trim(preg_replace('/[^\w\s]/', '', $fieldText)) === $phrase) {
+                            $fieldScore += 30.0;
+                        }
+                        // For high-boost fields, apply length penalty to prefer shorter exact matches
+                        else {
+                            $phraseLen = strlen($phrase);
+                            $fieldLen = strlen($fieldText);
+                            if ($fieldLen > $phraseLen) {
+                                // Penalize longer values - the longer, the less score
+                                $lengthPenalty = 1.0 - min(0.5, ($fieldLen - $phraseLen) / 100.0);
+                                $fieldScore *= $lengthPenalty;
+                            }
+                        }
+                    }
+                    break; // One exact phrase match is enough
+                }
+            }
+            
+            // If no exact phrase match, check individual terms
+            if (!$hasExactPhrase) {
+                foreach ($searchTerms as $term) {
+                    if (strpos($fieldText, $term) !== false) {
+                        $matchCount++;
+                        // Give extra weight for exact matches in high-boost fields
+                        if ($weight >= 2.5 && $fieldText === $term) {
+                            $fieldScore += 2.0;
+                        } else {
+                            $fieldScore += 1.0;
+                        }
+                    }
+                }
+            }
+            
+            // Apply field weight
+            if ($matchCount > 0) {
+                // Bonus for matching multiple terms in the same field
+                $multiTermBonus = ($matchCount > 1) ? pow($matchCount, 1.5) : 1.0;
+                $weightedFieldScore = $fieldScore * $weight * $multiTermBonus;
+                $maxFieldScore = max($maxFieldScore, $weightedFieldScore);
+                $totalWeight += $weight;
+            }
+        }
+        
+        // If we found matches in weighted fields, use the weighted score
+        if ($maxFieldScore > 0) {
+            // Combine base BM25 score with field-weighted score
+            // Give more importance to field weights
+            return $baseScore * (0.3 + $maxFieldScore);
+        }
+        
+        // Fallback to base score if no matches in weighted fields
+        return $baseScore;
     }
 }

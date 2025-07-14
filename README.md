@@ -21,6 +21,7 @@ A powerful, pure-PHP search engine library with advanced full-text search capabi
 - [Configuration](#configuration)
 - [Advanced Features](#advanced-features)
   - [Document Chunking](#document-chunking)
+  - [Field Boosting and Exact Match Scoring](#field-boosting-and-exact-match-scoring)
   - [Multi-language Support](#multi-language-support)
   - [Custom Stop Words](#custom-stop-words)
   - [Geo-Spatial Search](#geo-spatial-search)
@@ -43,7 +44,7 @@ A powerful, pure-PHP search engine library with advanced full-text search capabi
 - 🌍 **Multi-language support** with built-in stemming for multiple languages
 - ⚡ **Lightning-fast** indexing and searching with SQLite backend
 - 🔧 **Flexible architecture** with interfaces for easy extension
-- 📊 **Advanced scoring** with field boosting and relevance tuning
+- 📊 **Advanced scoring** with intelligent field boosting and exact match prioritization
 - 🎨 **Search highlighting** with customizable tags
 - 🔤 **Fuzzy matching** for typo-tolerant searches
 - 📈 **Faceted search** and aggregations support
@@ -86,7 +87,7 @@ $search = new YetiSearch($config);
 $indexer = $search->createIndex('pages');
 
 // Index a document
-$indexer->index([
+$indexer->insert([
     'id' => 'doc1',
     'content' => [
         'title' => 'Introduction to YetiSearch',
@@ -134,7 +135,7 @@ $document = [
     ]
 ];
 
-$indexer->index($document);
+$indexer->insert($document);
 
 // Index multiple documents
 $documents = [
@@ -160,7 +161,7 @@ $documents = [
     ]
 ];
 
-$indexer->indexBatch($documents);
+$indexer->insert($documents);
 
 // Flush to ensure all documents are written
 $indexer->flush();
@@ -200,7 +201,7 @@ $product = [
     ]
 ];
 
-$indexer->index($product);
+$indexer->insert($product);
 ```
 
 ### Search Examples
@@ -399,6 +400,13 @@ $config = [
         'snippet_length' => 150,        // Length of snippets
         'max_results' => 1000,          // Maximum results to return
         'enable_fuzzy' => true,         // Enable fuzzy search
+        'fuzzy_algorithm' => 'levenshtein', // 'basic' or 'levenshtein'
+        'levenshtein_threshold' => 2,   // Max edit distance for Levenshtein
+        'min_term_frequency' => 2,      // Min term frequency for fuzzy matching
+        'max_indexed_terms' => 10000,   // Max indexed terms to check
+        'max_fuzzy_variations' => 8,    // Max fuzzy variations per term
+        'fuzzy_score_penalty' => 0.4,   // Score penalty for fuzzy matches
+        'indexed_terms_cache_ttl' => 300, // Cache TTL for indexed terms
         'enable_suggestions' => true,   // Enable search suggestions
         'cache_ttl' => 300,             // Cache TTL in seconds
         'result_fields' => [            // Fields to include in results
@@ -423,7 +431,7 @@ $indexer = $search->createIndex('books', [
 ]);
 
 // Index a large document - it will be automatically chunked
-$indexer->index([
+$indexer->insert([
     'id' => 'book-1',
     'title' => 'War and Peace',
     'content' => $veryLongBookContent,  // Will be split into chunks
@@ -439,18 +447,65 @@ $allChunks = $search->search('books', 'Napoleon', [
 ]);
 ```
 
+### Field Boosting and Exact Match Scoring
+
+YetiSearch provides intelligent field-weighted scoring with special handling for exact matches in high-priority fields:
+
+```php
+$config = [
+    'indexer' => [
+        'fields' => [
+            'title' => ['boost' => 3.0],      // High-priority field
+            'name' => ['boost' => 3.0],       // Another high-priority field
+            'description' => ['boost' => 1.0], // Standard content field
+            'tags' => ['boost' => 2.0],       // Medium priority
+        ]
+    ]
+];
+```
+
+**How Field Boosting Works:**
+
+1. **Basic Boost Values**: Each field's boost value multiplies its relevance score
+2. **High-Priority Fields** (boost ≥ 2.5): Get special exact match handling:
+   - Exact field match: +50 point bonus (e.g., searching "Star Wars" finds a movie titled exactly "Star Wars")
+   - Near-exact match: +30 point bonus (ignoring punctuation)
+   - Length penalty: Shorter exact matches score higher than longer titles containing the phrase
+
+3. **Phrase Matching**: Exact phrases get 15x boost over individual word matches
+
+**Example:**
+```php
+// With this configuration:
+$indexer = $search->createIndex('movies', [
+    'fields' => [
+        'title' => ['boost' => 3.0],    // High-priority field
+        'overview' => ['boost' => 1.0]  // Standard field
+    ]
+]);
+
+// Searching for "star wars" will rank results as:
+// 1. "Star Wars" (exact title match - huge bonus)
+// 2. "Star Wars: Episode IV" (contains phrase but longer)
+// 3. Movies with "star wars" in overview (lower boost field)
+```
+
+This intelligent scoring ensures the most relevant results appear first, with exact matches in important fields (like titles or names) getting priority over partial matches in longer text.
+
+For more detailed information about scoring and configuration options, see the [Field Boosting and Scoring Guide](docs/field-boosting-and-scoring.md).
+
 ### Multi-language Support
 
 ```php
 // Index documents in different languages
-$indexer->index([
+$indexer->insert([
     'id' => 'doc-fr-1',
     'title' => 'Introduction à PHP',
     'content' => 'PHP est un langage de programmation...',
     'language' => 'french'
 ]);
 
-$indexer->index([
+$indexer->insert([
     'id' => 'doc-de-1',
     'title' => 'Einführung in PHP',
     'content' => 'PHP ist eine Programmiersprache...',
@@ -513,7 +568,7 @@ use YetiSearch\Geo\GeoPoint;
 use YetiSearch\Geo\GeoBounds;
 
 // Index documents with location data
-$indexer->index([
+$indexer->insert([
     'id' => 'coffee-shop-1',
     'content' => [
         'title' => 'Blue Bottle Coffee',
@@ -584,7 +639,7 @@ $point = GeoUtils::parsePoint('37.7749,-122.4194');
 
 ```php
 // Index areas/regions with bounding boxes
-$indexer->index([
+$indexer->insert([
     'id' => 'downtown-sf',
     'content' => [
         'title' => 'Downtown San Francisco',
@@ -651,6 +706,79 @@ $results = $search->search('pages', 'porgramming', [  // Note the typo
 ]);
 
 // Will still find documents about "programming"
+```
+
+#### Advanced Fuzzy Search with Levenshtein Algorithm
+
+YetiSearch now supports the Levenshtein distance algorithm for more accurate fuzzy matching:
+
+```php
+// Configure Levenshtein fuzzy search
+$config = [
+    'search' => [
+        'enable_fuzzy' => true,
+        'fuzzy_algorithm' => 'levenshtein',     // 'basic' or 'levenshtein'
+        'levenshtein_threshold' => 2,           // Max edit distance (default: 2)
+        'min_term_frequency' => 2,              // Min occurrences for a term to be indexed
+        'max_indexed_terms' => 10000,           // Max terms to check for fuzzy matches
+        'max_fuzzy_variations' => 8,            // Max variations per search term
+        'fuzzy_score_penalty' => 0.4,           // Score reduction for fuzzy matches (0.0-1.0)
+        'indexed_terms_cache_ttl' => 300        // Cache indexed terms for 5 minutes
+    ]
+];
+
+$search = new YetiSearch($config);
+
+// Search with advanced fuzzy matching
+$results = $search->search('movies', 'Amakin Dkywalker', ['fuzzy' => true]);
+// Will find "Anakin Skywalker" despite multiple typos
+```
+
+**Levenshtein Configuration Options:**
+
+- `fuzzy_algorithm`: Choose between 'basic' (simple character variations) or 'levenshtein' (edit distance)
+- `levenshtein_threshold`: Maximum edit distance allowed (1-3 recommended)
+  - 1 = Single character changes only (fastest)
+  - 2 = Up to 2 character edits (balanced)
+  - 3 = Up to 3 character edits (most flexible but slower)
+- `min_term_frequency`: Minimum occurrences for a term to be considered for fuzzy matching
+- `max_indexed_terms`: Maximum number of indexed terms to check (affects performance)
+- `max_fuzzy_variations`: Maximum fuzzy variations generated per search term
+- `fuzzy_score_penalty`: Score reduction factor for fuzzy matches (0.0 = no penalty, 1.0 = zero score)
+- `indexed_terms_cache_ttl`: How long to cache the indexed terms list (seconds)
+
+**Performance Considerations:**
+
+The Levenshtein algorithm requires additional term indexing during document insertion, which impacts indexing performance:
+- **Basic fuzzy search**: ~670 documents/second (no term indexing)
+- **Levenshtein fuzzy search**: ~295 documents/second (with term indexing)
+
+Term indexing is only performed when `fuzzy_algorithm` is set to `'levenshtein'`. If you don't need advanced fuzzy matching, use `'basic'` for significantly faster indexing.
+
+**Performance Optimization Tips:**
+
+```php
+// For best performance (3-5ms searches)
+$config = [
+    'search' => [
+        'fuzzy_algorithm' => 'levenshtein',
+        'levenshtein_threshold' => 1,        // Single edits only
+        'min_term_frequency' => 5,           // Skip rare terms
+        'max_indexed_terms' => 5000,         // Check fewer terms
+        'indexed_terms_cache_ttl' => 600    // Cache for 10 minutes
+    ]
+];
+
+// For best accuracy (handles more typos)
+$config = [
+    'search' => [
+        'fuzzy_algorithm' => 'levenshtein',
+        'levenshtein_threshold' => 2,        // Allow 2 edits
+        'min_term_frequency' => 1,           // Include all terms
+        'max_indexed_terms' => 20000,        // Check more terms
+        'fuzzy_score_penalty' => 0.3        // Lower penalty for fuzzy matches
+    ]
+];
 ```
 
 ### Faceted Search

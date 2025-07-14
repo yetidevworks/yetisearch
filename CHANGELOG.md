@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.0.3] - 2025-06-13
+
+#### Enhanced Fuzzy Search Capabilities
+- **New default algorithm:** Changed default fuzzy matching to trigram algorithm for better accuracy
+- **Multiple fuzzy algorithms:** Added support for various matching algorithms including:
+  - Trigram matching (now default)
+  - Jaro-Winkler distance
+  - Levenshtein distance
+- **Flexible fuzzy toggle:** Added ability to easily enable/disable fuzzy matching for standard searches
+- **Algorithm benchmarking:** Added performance testing tools to compare different fuzzy algorithms
+
+#### Search Quality Improvements
+- **Better multi-word matching:** Enhanced handling of multi-word queries for more accurate results
+- **Short text matching:** Improved flexibility for matching short text queries
+- **Match preference:** Added logic to prefer shorter, more exact matches over longer partial matches
+- **Regular vs fuzzy priority:** Implemented result ranking that prioritizes exact matches over fuzzy matches
+
+#### Performance Optimizations
+- **Weight application:** Fixed and improved weight calculation for better relevance scoring
+- **Performance enhancements:** Various optimizations to fuzzy search performance
+- **Refactored fuzzy implementation:** Major refactor to improve fuzzy search capability and maintainability
+
+#### Technical Updates
+- **API clarity:** Changed method name from ->index() to ->insert() for better API clarity
+- **Test improvements:** Enhanced test coverage and fixed existing tests
+- **Documentation updates:** Updated documentation to reflect new fuzzy sea
+
 ## [1.0.2] - 2025-06-11
 
 - **LICENSE file added**: Forgot to include the LICENSE file in the initial release. This has now been added to clarify the licensing terms for YetiSearch.
