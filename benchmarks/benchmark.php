@@ -1,4 +1,16 @@
 <?php
+/**
+ * YetiSearch Benchmark Script
+ *
+ * This script benchmarks the YetiSearch library by indexing a dataset of movies
+ * and performing search queries with and without fuzzy matching.
+ *
+ * Usage:
+ * php benchmark.php [--skip-indexing]
+ *
+ * Options:
+ * --skip-indexing: Skip the indexing step and only run searches on existing data.
+ */
 
 // Use the existing vendor autoloader
 require_once __DIR__ . '/../vendor/autoload.php';
@@ -292,4 +304,3 @@ foreach ($fuzzyTests as $test) {
 
 echo "\nBenchmark complete!\n";
 echo "\nNote: Database file saved at: " . realpath(__DIR__ . '/benchmark.db') . "\n";
-echo "Use --skip-indexing flag to skip indexing and only run searches on existing data.\n";
