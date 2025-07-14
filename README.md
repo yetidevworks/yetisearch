@@ -46,7 +46,9 @@ A powerful, pure-PHP search engine library with advanced full-text search capabi
 - 🔧 **Flexible architecture** with interfaces for easy extension
 - 📊 **Advanced scoring** with intelligent field boosting and exact match prioritization
 - 🎨 **Search highlighting** with customizable tags
-- 🔤 **Fuzzy matching** for typo-tolerant searches
+- 🔤 **Advanced fuzzy matching** with multiple algorithms (Trigram, Jaro-Winkler, Levenshtein, Basic)
+- 🎯 **Enhanced multi-word matching** for more accurate search results
+- 🏆 **Smart result ranking** prioritizing exact matches over fuzzy matches
 - 📈 **Faceted search** and aggregations support
 - 📍 **Geo-spatial search** with R-tree indexing for location-based queries
 - 🚀 **Zero dependencies** except PHP extensions and small utility packages
@@ -99,6 +101,9 @@ $indexer->insert([
 
 // Search for documents
 $results = $search->search('pages', 'powerful search');
+
+// Search with fuzzy matching enabled (uses trigram algorithm by default)
+$fuzzyResults = $search->search('pages', 'powerfull serch', ['fuzzy' => true]);
 
 // Display results
 foreach ($results['results'] as $result) {
@@ -400,7 +405,7 @@ $config = [
         'snippet_length' => 150,        // Length of snippets
         'max_results' => 1000,          // Maximum results to return
         'enable_fuzzy' => true,         // Enable fuzzy search
-        'fuzzy_algorithm' => 'levenshtein', // 'basic' or 'levenshtein'
+        'fuzzy_algorithm' => 'trigram', // 'trigram', 'jaro_winkler', or 'levenshtein'
         'levenshtein_threshold' => 2,   // Max edit distance for Levenshtein
         'min_term_frequency' => 2,      // Min term frequency for fuzzy matching
         'max_indexed_terms' => 10000,   // Max indexed terms to check
@@ -492,7 +497,15 @@ $indexer = $search->createIndex('movies', [
 
 This intelligent scoring ensures the most relevant results appear first, with exact matches in important fields (like titles or names) getting priority over partial matches in longer text.
 
+**Enhanced Result Ranking (v1.0.3):**
+- **Exact vs Fuzzy Priority**: Regular matches always rank higher than fuzzy matches
+- **Shorter Match Preference**: Among similar matches, shorter documents score higher
+- **Multi-word Query Handling**: Improved matching for queries with multiple words
+- **Short Text Flexibility**: Better handling of short text queries and matches
+
 For more detailed information about scoring and configuration options, see the [Field Boosting and Scoring Guide](docs/field-boosting-and-scoring.md).
+
+For comprehensive fuzzy search documentation, see the [Fuzzy Search Guide](docs/fuzzy-search.md).
 
 ### Multi-language Support
 
@@ -708,17 +721,17 @@ $results = $search->search('pages', 'porgramming', [  // Note the typo
 // Will still find documents about "programming"
 ```
 
-#### Advanced Fuzzy Search with Levenshtein Algorithm
+#### Advanced Fuzzy Search Algorithms
 
-YetiSearch now supports the Levenshtein distance algorithm for more accurate fuzzy matching:
+YetiSearch supports multiple fuzzy matching algorithms for different use cases:
 
 ```php
-// Configure Levenshtein fuzzy search
+// Configure fuzzy search algorithms
 $config = [
     'search' => [
         'enable_fuzzy' => true,
-        'fuzzy_algorithm' => 'levenshtein',     // 'basic' or 'levenshtein'
-        'levenshtein_threshold' => 2,           // Max edit distance (default: 2)
+        'fuzzy_algorithm' => 'trigram',         // Options: 'trigram', 'jaro_winkler', 'levenshtein'
+        'levenshtein_threshold' => 2,           // Max edit distance for Levenshtein (default: 2)
         'min_term_frequency' => 2,              // Min occurrences for a term to be indexed
         'max_indexed_terms' => 10000,           // Max terms to check for fuzzy matches
         'max_fuzzy_variations' => 8,            // Max variations per search term
@@ -734,10 +747,27 @@ $results = $search->search('movies', 'Amakin Dkywalker', ['fuzzy' => true]);
 // Will find "Anakin Skywalker" despite multiple typos
 ```
 
-**Levenshtein Configuration Options:**
+**Available Fuzzy Algorithms:**
 
-- `fuzzy_algorithm`: Choose between 'basic' (simple character variations) or 'levenshtein' (edit distance)
-- `levenshtein_threshold`: Maximum edit distance allowed (1-3 recommended)
+1. **Trigram (Default)** - Best overall accuracy and performance
+   - Breaks words into 3-character sequences for matching
+   - Excellent for most use cases
+   - Good balance of speed and accuracy
+   
+2. **Jaro-Winkler** - Optimized for short strings
+   - Great for names, titles, and short text
+   - Favors matches with common prefixes
+   - Very fast performance
+   
+3. **Levenshtein** - Edit distance algorithm
+   - Counts insertions, deletions, and substitutions
+   - Most flexible but requires term indexing
+   - Best for handling complex typos
+
+**Configuration Options:**
+
+- `fuzzy_algorithm`: Choose between 'trigram' (default), 'jaro_winkler', or 'levenshtein'
+- `levenshtein_threshold`: Maximum edit distance allowed for Levenshtein (1-3 recommended)
   - 1 = Single character changes only (fastest)
   - 2 = Up to 2 character edits (balanced)
   - 3 = Up to 3 character edits (most flexible but slower)
@@ -749,11 +779,12 @@ $results = $search->search('movies', 'Amakin Dkywalker', ['fuzzy' => true]);
 
 **Performance Considerations:**
 
-The Levenshtein algorithm requires additional term indexing during document insertion, which impacts indexing performance:
-- **Basic fuzzy search**: ~670 documents/second (no term indexing)
-- **Levenshtein fuzzy search**: ~295 documents/second (with term indexing)
+Different algorithms have different performance characteristics:
+- **Trigram**: Fast indexing and searching, no additional term indexing required
+- **Jaro-Winkler**: Very fast, ideal for short text matching
+- **Levenshtein**: Requires term indexing, impacting indexing performance (~295 docs/sec vs ~670 docs/sec)
 
-Term indexing is only performed when `fuzzy_algorithm` is set to `'levenshtein'`. If you don't need advanced fuzzy matching, use `'basic'` for significantly faster indexing.
+Term indexing is only performed when `fuzzy_algorithm` is set to `'levenshtein'`. For most use cases, `'trigram'` provides the best balance of accuracy and performance.
 
 **Performance Optimization Tips:**
 
@@ -761,8 +792,7 @@ Term indexing is only performed when `fuzzy_algorithm` is set to `'levenshtein'`
 // For best performance (3-5ms searches)
 $config = [
     'search' => [
-        'fuzzy_algorithm' => 'levenshtein',
-        'levenshtein_threshold' => 1,        // Single edits only
+        'fuzzy_algorithm' => 'trigram',      // Fast algorithm
         'min_term_frequency' => 5,           // Skip rare terms
         'max_indexed_terms' => 5000,         // Check fewer terms
         'indexed_terms_cache_ttl' => 600    // Cache for 10 minutes
@@ -779,6 +809,23 @@ $config = [
         'fuzzy_score_penalty' => 0.3        // Lower penalty for fuzzy matches
     ]
 ];
+```
+
+**Algorithm Benchmarking:**
+
+YetiSearch includes built-in benchmarking tools to help you choose the best fuzzy algorithm for your use case:
+
+```php
+// Run benchmarks to compare algorithm performance
+use YetiSearch\Tools\FuzzyBenchmark;
+
+$benchmark = new FuzzyBenchmark($search);
+$results = $benchmark->runAllBenchmarks();
+
+// Results show accuracy and performance metrics for each algorithm
+foreach ($results as $algorithm => $metrics) {
+    echo "$algorithm: {$metrics['accuracy']}% accuracy, {$metrics['avg_time']}ms avg search time\n";
+}
 ```
 
 ### Faceted Search
@@ -926,8 +973,8 @@ $count = $search->count(string $indexName, string $query, array $options = []);
 $suggestions = $search->suggest(string $indexName, string $term, array $options = []);
 
 // Index operations
-$search->index(string $indexName, array $documentData);
-$search->indexBatch(string $indexName, array $documents);
+$search->insert(string $indexName, array $documentData);
+$search->insertBatch(string $indexName, array $documents);
 $search->update(string $indexName, array $documentData);
 $search->delete(string $indexName, string $documentId);
 $search->clear(string $indexName);
