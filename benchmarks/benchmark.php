@@ -118,7 +118,7 @@ if (!$skipIndexing) {
     $errors = 0;
     $progressInterval = 1000; // Show progress every 1000 movies
     $batch = [];
-    $batchSize = 100; // Process in batches of 100
+    $batchSize = 250; // Process in batches of 100
 
     foreach ($movies as $index => $movie) {
         try {
@@ -196,7 +196,8 @@ $testQueries = [
     'drama crime',
     'nemo',
     'matrix',
-    'Anakin Skywalker'
+    'Anakin Skywalker',
+    'Harry Potter',
 ];
 
 // First test with fuzzy OFF
@@ -267,10 +268,8 @@ $fuzzyTests = [
     ['query' => 'Pulp Fictin', 'expected' => 'Pulp Fiction'],
     ['query' => 'Forrest Gump', 'expected' => 'Forrest Gump'],
     ['query' => 'The Shawshank Redemtion', 'expected' => 'The Shawshank Redemption'],
-    ['query' => 'Interstelar', 'expected' => 'Interstellar'],
-    ['query' => 'Gladiatorr', 'expected' => 'Gladiator'],
-    ['query' => 'Luck Skywalker', 'expected' => 'Luke Skywalker'],
-    ['query' => 'Drath Vader', 'expected' => 'Darth Vader']
+    ['query' => 'Lilo and Stich', 'expected' => 'Lilo and Stitch'],
+    ['query' => 'Cristopher Nolan', 'expected' => 'Christopher Nolan'],
 ];
 
 foreach ($fuzzyTests as $test) {

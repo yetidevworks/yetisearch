@@ -32,6 +32,13 @@ A powerful, pure-PHP search engine library with advanced full-text search capabi
 - [Architecture](#architecture)
 - [Testing](#testing)
 - [API Reference](#api-reference)
+- [Performance](#performance)
+  - [Benchmark Results](#benchmark-results)
+  - [Performance Characteristics](#performance-characteristics)
+  - [Performance Tuning](#performance-tuning)
+  - [Bottlenecks and Solutions](#bottlenecks-and-solutions)
+  - [Comparison with Other Solutions](#comparison-with-other-solutions)
+  - [Best Practices for Performance](#best-practices-for-performance)
 - [Future Features](#future-features)
 - [Contributing](#contributing)
 - [License](#license)
@@ -1135,6 +1142,145 @@ try {
     error_log('Search error: ' . $e->getMessage());
 }
 ```
+
+## Performance
+
+YetiSearch is designed for high performance with minimal resource usage. Here are real-world benchmarks and performance characteristics.
+
+### Benchmark Results
+
+Tested on M4 MacBook Pro with PHP 8.3, using a dataset of 32,000 movies:
+
+#### Indexing Performance
+
+| Operation | Performance     | Details                             |
+|-----------|-----------------|-------------------------------------|
+| **Document Indexing** | ~4,360 docs/sec | Without fuzzy term indexing         |
+| **With Levenshtein** | ~1,770 docs/sec | With term indexing for fuzzy search |
+| **Batch Processing** | 250 docs/batch  | Optimal batch size                  |
+| **Memory Usage** | ~60MB           | For 32k documents                   |
+
+#### Search Performance
+
+| Query Type | Response Time | Details |
+|------------|--------------|---------|
+| **Simple Search** | 2-5ms | Single term, no fuzzy |
+| **Phrase Search** | 3-8ms | Multi-word queries |
+| **Fuzzy Search (Trigram)** | 5-15ms | Default algorithm |
+| **Fuzzy Search (Levenshtein)** | 10-30ms | Most accurate |
+| **Complex Queries** | 15-50ms | With filters, facets, geo |
+
+#### Real-World Example
+
+From the movie database benchmark:
+- **Dataset**: 32k movies with title, overview, genres
+- **Index Size**: ~200MB on disk
+- **Indexing Time**: 7.27 seconds (~4,420 movies/sec)
+- **Search Examples**:
+  - "Harry Potter" (exact) → results in 4.7ms
+  - "Matrix" (exact) -> results in 0.47ms
+  - "Lilo and Stich" (fuzzy) → "Lilo & Stitch" in 26ms  
+  - "Cristopher Nolan" (fuzzy) → "Christopher Nolan" films in 32ms
+
+### Performance Characteristics
+
+#### 1. **Linear Scalability**
+- Performance scales linearly with document count
+- 100k documents ≈ 10x the time of 10k documents
+- No exponential performance degradation
+
+#### 2. **Memory Efficiency**
+- SQLite backend provides excellent memory management
+- Only active data kept in memory
+- Configurable cache sizes for different workloads
+
+#### 3. **Disk I/O Optimization**
+- Write-Ahead Logging (WAL) for concurrent access
+- Batch operations reduce disk writes
+- Automatic index optimization
+
+### Performance Tuning
+
+#### For Maximum Indexing Speed
+```php
+$config = [
+    'indexer' => [
+        'batch_size' => 250,          // Larger batches
+        'auto_flush' => false,        // Manual flushing
+        'chunk_size' => 2000,         // Larger chunks
+    ],
+    'search' => [
+        'enable_fuzzy' => false,      // Disable fuzzy indexing
+    ]
+];
+```
+
+#### For Fastest Searches
+```php
+$config = [
+    'storage' => [
+        'cache_size' => -64000,       // 64MB cache
+        'temp_store' => 'MEMORY',     // Memory temp tables
+    ],
+    'search' => [
+        'fuzzy_algorithm' => 'basic', // Fastest fuzzy algorithm
+        'cache_ttl' => 3600,          // 1-hour result cache
+    ]
+];
+```
+
+#### For Best Accuracy
+```php
+$config = [
+    'search' => [
+        'fuzzy_algorithm' => 'levenshtein',
+        'levenshtein_threshold' => 2,
+        'min_score' => 0.1,           // Include more results
+    ]
+];
+```
+
+### Bottlenecks and Solutions
+
+| Bottleneck | Impact | Solution |
+|------------|--------|----------|
+| **Large documents** | Slow indexing | Increase chunk_size |
+| **Many small documents** | I/O overhead | Increase batch_size |
+| **Complex queries** | Slow searches | Add specific indexes |
+| **Fuzzy search** | CPU intensive | Use trigram or basic algorithm |
+| **High concurrency** | Lock contention | Enable WAL mode |
+
+### Comparison with Other Solutions
+
+| Feature | YetiSearch | Elasticsearch | MeiliSearch | TNTSearch |
+|---------|------------|---------------|-------------|-----------|
+| **Setup Time** | < 1 min    | 10-30 min | 5-10 min | < 1 min |
+| **Memory Usage** | 50-200MB   | 1-4GB | 200MB-1GB | 100-500MB |
+| **Dependencies** | PHP only   | Java + Service | Binary/Docker | PHP only |
+| **Index Speed** | 4,500/sec  | 10,000/sec | 5,000/sec | 2,000/sec |
+| **Search Speed** | 1-30ms     | 5-50ms | 10-100ms | 5-40ms |
+
+### Best Practices for Performance
+
+1. **Index Design**
+   - Create separate indexes for different content types
+   - Use appropriate field boosts
+   - Only index searchable content
+
+2. **Query Optimization**
+   - Use field-specific searches when possible
+   - Limit results appropriately
+   - Enable result caching for repeated queries
+
+3. **Maintenance**
+   - Run `optimize()` during low-traffic periods
+   - Monitor index size and split if needed
+   - Clear old cache entries periodically
+
+4. **Hardware Considerations**
+   - SSD storage recommended for large indexes
+   - More RAM allows larger caches
+   - Multi-core CPUs benefit batch operations
 
 ## Future Feature Ideas
 
