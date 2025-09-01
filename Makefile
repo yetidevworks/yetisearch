@@ -1,4 +1,4 @@
-.PHONY: test test-verbose test-coverage test-watch help rg rg-files sd sd-preview sd-in
+.PHONY: test test-verbose test-coverage test-coverage-html test-coverage-clover test-coverage-clover-inline test-coverage-html-inline coverage-info coverage-top test-watch help rg rg-files sd sd-preview sd-in
  .PHONY: bench-after
 
 # Default target
@@ -46,6 +46,49 @@ test-verbose:
 # Run tests with coverage
 test-coverage:
 	@XDEBUG_MODE=coverage vendor/bin/phpunit --coverage-text --colors=always
+
+# Generate HTML coverage report into build/coverage
+test-coverage-html:
+	@mkdir -p build/coverage
+	@XDEBUG_MODE=coverage vendor/bin/phpunit --coverage-html build/coverage --colors=always
+	@if [ -f build/coverage/index.html ]; then echo "HTML coverage written to build/coverage/index.html"; else echo "HTML coverage not generated (no coverage driver)"; fi
+
+# Generate Clover XML report (for automated analysis)
+test-coverage-clover:
+	@mkdir -p build/coverage
+	@XDEBUG_MODE=coverage vendor/bin/phpunit --coverage-clover build/coverage/clover.xml --colors=always
+	@if [ -f build/coverage/clover.xml ]; then echo "Clover coverage written to build/coverage/clover.xml"; else echo "Clover coverage not generated (no coverage driver)"; fi
+
+# Force-enable xdebug for CLI using php-config to locate xdebug.so
+test-coverage-clover-inline:
+	@mkdir -p build/coverage
+	@PHP_EXT_DIR=$$(php-config --extension-dir 2>/dev/null || true); \
+	if [ -n "$$PHP_EXT_DIR" ] && [ -f "$$PHP_EXT_DIR/xdebug.so" ]; then \
+	  php -d zend_extension=$$PHP_EXT_DIR/xdebug.so -d xdebug.mode=coverage vendor/bin/phpunit --coverage-clover build/coverage/clover.xml --colors=always; \
+	  if [ -f build/coverage/clover.xml ]; then echo "Clover coverage written to build/coverage/clover.xml"; else echo "Clover coverage not generated"; fi; \
+	else \
+	  echo "Could not locate xdebug.so (install xdebug or ensure php-config is available)"; exit 1; \
+	fi
+
+test-coverage-html-inline:
+	@mkdir -p build/coverage
+	@PHP_EXT_DIR=$$(php-config --extension-dir 2>/dev/null || true); \
+	if [ -n "$$PHP_EXT_DIR" ] && [ -f "$$PHP_EXT_DIR/xdebug.so" ]; then \
+	  php -d zend_extension=$$PHP_EXT_DIR/xdebug.so -d xdebug.mode=coverage vendor/bin/phpunit --coverage-html build/coverage --colors=always; \
+	  if [ -f build/coverage/index.html ]; then echo "HTML coverage written to build/coverage/index.html"; else echo "HTML coverage not generated"; fi; \
+	else \
+	  echo "Could not locate xdebug.so (install xdebug or ensure php-config is available)"; exit 1; \
+	fi
+
+# Print the 15 lowest-covered files from clover.xml
+coverage-top: test-coverage-clover
+	@php scripts/coverage_top_gaps.php build/coverage/clover.xml 15 || true
+
+# Show coverage driver status and php config used
+coverage-info:
+	@php -v
+	@php -m | rg -i xdebug || true
+	@php -i | rg -n "xdebug|pcov|Configuration File (php.ini) Path|Loaded Configuration File" -n || true
 
 # Watch for changes
 test-watch:
@@ -107,5 +150,3 @@ bench-throughput:
 	@echo "Running benchmark (throughput preset) ..."
 	@rm -f benchmarks/benchmark.db benchmarks/benchmark.db-shm benchmarks/benchmark.db-wal
 	@php benchmarks/benchmark.php --external=1 --multi-column=0 --prefix= --spatial=0 --fts-detail=full | tee benchmarks/benchmark-throughput.txt
-
-

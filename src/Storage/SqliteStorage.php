@@ -443,39 +443,43 @@ class SqliteStorage implements StorageInterface
         
         try {
             $this->connection->beginTransaction();
-            
-            $this->connection->prepare("DELETE FROM {$index} WHERE id = ?")->execute([$id]);
+            // Capture doc_id early for external schema
             $schema = $this->getSchemaMode($index);
+            $savedDocId = null;
             if ($schema === 'external') {
-                $docId = $this->getDocId($index, $id);
-                if ($docId !== null) {
-                    $this->connection->prepare("DELETE FROM {$index}_fts WHERE rowid = ?")->execute([$docId]);
+                $savedDocId = $this->getDocId($index, $id);
+            }
+
+            // Original order: delete main row first
+            $this->connection->prepare("DELETE FROM {$index} WHERE id = ?")->execute([$id]);
+
+            // Delete from FTS
+            if ($schema === 'external') {
+                if ($savedDocId !== null) {
+                    $this->connection->prepare("DELETE FROM {$index}_fts WHERE rowid = ?")->execute([$savedDocId]);
                 }
             } else {
                 $this->connection->prepare("DELETE FROM {$index}_fts WHERE id = ?")->execute([$id]);
             }
-            
-            // Only delete from terms table if it exists (Levenshtein enabled)
+
+            // Terms table
             if ($this->useTermsIndex) {
                 $this->connection->prepare("DELETE FROM {$index}_terms WHERE document_id = ?")->execute([$id]);
             }
-            
-            // Only delete from spatial-related tables if R-tree support is available
+
+            // Spatial cleanup
             if ($this->hasRTreeSupport()) {
-                $schema = $this->getSchemaMode($index);
                 if ($schema === 'external') {
-                    $docId = $this->getDocId($index, $id);
-                    if ($docId !== null) {
-                        $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?")->execute([$docId]);
+                    if ($savedDocId !== null) {
+                        $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?")->execute([$savedDocId]);
                     }
                 } else {
                     $this->connection->prepare("DELETE FROM {$index}_id_map WHERE string_id = ?")->execute([$id]);
-                    // Delete from spatial index (use hash of string ID for R-tree integer ID)
                     $spatialId = $this->getNumericId($id);
                     $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?")->execute([$spatialId]);
                 }
             }
-            
+
             $this->connection->commit();
         } catch (\PDOException $e) {
             $this->connection->rollBack();

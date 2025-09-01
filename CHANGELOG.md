@@ -13,9 +13,15 @@
 - New migration script `scripts/migrate_fts.php` to rebuild an index with multi‑column FTS and optional prefix settings.
 
 ### Storage & Ranking
-- Optional multi‑column FTS5: `indexer.fts.multi_column=true` stores per‑field text and enables weighted `bm25(fts, w_title, w_content, ...)` from field boosts.
+- Optional multi-column FTS5: `indexer.fts.multi_column=true` stores per-field text and enables weighted `bm25(fts, w_title, w_content, ...)` from field boosts.
 - Optional FTS5 prefix indexing: `indexer.fts.prefix=[2,3]` for strict prefix matches.
-- Backward compatible: single‑column `content` remains default; schema only changes when opting in.
+- Backward compatible: single-column `content` remains default; schema only changes when opting in.
+
+### External-Content Schema (Doc ID)
+- Added first-class support for an external-content schema with integer `doc_id` primary keys and `id TEXT UNIQUE` mapping.
+- FTS5 tables now support `content='<index>'` and `content_rowid='doc_id'` modes for better performance and clarity.
+- Migration helper: `SqliteStorage::migrateToExternalContent()` converts legacy indices, recreates spatial tables, and rebuilds FTS.
+- Tests cover external-content schema creation, migration, and geo queries.
 
 ### Geo Search
 - Accurate distances: Haversine great‑circle distance (meters) when SQLite math functions are available; fallback to planar approximation otherwise.
@@ -26,6 +32,8 @@
 - Distance facets: request `facets.distance` with `from`, `ranges`, and optional `units` to get bucketed counts (e.g., `<= 1 km`, `<= 5 km`, ...).
 - Candidate cap: `geoFilters.candidate_cap` limits R-tree candidates for PHP-side distance sorting.
 - Result metadata: add `distance_units`, `bearing`, and `bearing_cardinal` (when distance context is available).
+ - Fix: R-tree availability probe corrected (valid 2D table) so environments with R-tree are detected properly.
+ - Fix: post-filter handling of `near.radius` respects `geoFilters.units` (km/mi/meters) in PHP-side filtering.
 
 ### Docs & Examples
 - README: Type‑Ahead Setup, Weighted FTS + Prefix sections with examples.
@@ -46,6 +54,16 @@
 
 ### Tests & Benchmarks
 - Integration tests for fuzzy algorithms and as‑you‑type mode.
+- New coverage for geo Haversine accuracy and dateline-crossing bounds (no longer skipped when R-tree is available).
+- External-content tests: schema verification, migration, geo distance, and mixed-mode behaviors.
+- Indexer tests: chunking, stored-only fields, queued inserts with manual flush, update/delete in legacy and external schemas, rebuild and stats.
+- Storage tests: metadata JSON filters for `=, !=, >, <, >=, <=, in, contains, exists`; multi-index merged search.
+- SearchEngine tests: distance weighting influence, route de-duplication, suggestions path, distance facets path.
+
+### Tooling & Dev Experience
+- Deep-merge configuration in `YetiSearch` so nested options override safely without dropping defaults.
+- Makefile targets for coverage: `test-coverage`, `test-coverage-html`, `test-coverage-clover`, `coverage-top`, and `coverage-info`.
+- Helper script `scripts/coverage_top_gaps.php` to print lowest-covered files from Clover.
 - Local evaluation script: `benchmarks/fuzzy-eval.php`.
 
 ## [1.1.0] - 2025-06-14
