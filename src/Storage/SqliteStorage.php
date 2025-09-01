@@ -527,17 +527,15 @@ class SqliteStorage implements StorageInterface
                 $this->connection->prepare("DELETE FROM {$index}_terms WHERE document_id = ?")->execute([$id]);
             }
 
-            // Spatial cleanup
-            if ($this->hasRTreeSupport()) {
-                if ($schema === 'external') {
-                    if ($savedDocId !== null) {
-                        $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?")->execute([$savedDocId]);
-                    }
-                } else {
-                    $this->connection->prepare("DELETE FROM {$index}_id_map WHERE string_id = ?")->execute([$id]);
-                    $spatialId = $this->getNumericId($id);
-                    $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?")->execute([$spatialId]);
+            // Spatial cleanup (works for both R-tree and fallback table)
+            if ($schema === 'external') {
+                if ($savedDocId !== null) {
+                    $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?")->execute([$savedDocId]);
                 }
+            } else {
+                $this->connection->prepare("DELETE FROM {$index}_id_map WHERE string_id = ?")->execute([$id]);
+                $spatialId = $this->getNumericId($id);
+                $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?")->execute([$spatialId]);
             }
 
             $this->connection->commit();
@@ -1564,13 +1562,16 @@ class SqliteStorage implements StorageInterface
                 $radius = (float)$near['radius'];
                 $units = $geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? null);
                 if (is_string($units)) { $u=strtolower($units); if ($u==='km') $radius*=1000.0; elseif (in_array($u,['mi','mile','miles'])) $radius*=1609.344; }
-                // Bounding box approximation (no math functions needed)
-                $deg = $radius / 111000.0;
+                // Bounding box approximation with lon scaling by cos(lat)
+                $degLat = $radius / 111000.0;
+                $latRad = deg2rad($point->getLatitude());
+                $cosLat = max(0.000001, cos($latRad));
+                $degLon = $radius / (111000.0 * $cosLat);
                 $where .= " AND {$latCol} BETWEEN ? AND ? AND {$lngCol} BETWEEN ? AND ?";
-                $params[] = $point->getLatitude() - $deg;
-                $params[] = $point->getLatitude() + $deg;
-                $params[] = $point->getLongitude() - $deg;
-                $params[] = $point->getLongitude() + $deg;
+                $params[] = $point->getLatitude() - $degLat;
+                $params[] = $point->getLatitude() + $degLat;
+                $params[] = $point->getLongitude() - $degLon;
+                $params[] = $point->getLongitude() + $degLon;
                 // Provide centroid columns so PHP can compute accurate distance
                 $select .= ", {$latCol} AS _centroid_lat, {$lngCol} AS _centroid_lng";
             }
@@ -1605,12 +1606,15 @@ class SqliteStorage implements StorageInterface
                     $maxD = (float)$geoFilters['max_distance'];
                     $u = strtolower($geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? 'm'));
                     if ($u==='km') $maxD*=1000.0; elseif (in_array($u,['mi','mile','miles'])) $maxD*=1609.344;
-                    $deg = $maxD / 111000.0;
+                    $degLat = $maxD / 111000.0;
+                    $latRad = deg2rad($from->getLatitude());
+                    $cosLat = max(0.000001, cos($latRad));
+                    $degLon = $maxD / (111000.0 * $cosLat);
                     $where .= " AND {$latCol} BETWEEN ? AND ? AND {$lngCol} BETWEEN ? AND ?";
-                    $params[] = $from->getLatitude() - $deg;
-                    $params[] = $from->getLatitude() + $deg;
-                    $params[] = $from->getLongitude() - $deg;
-                    $params[] = $from->getLongitude() + $deg;
+                    $params[] = $from->getLatitude() - $degLat;
+                    $params[] = $from->getLatitude() + $degLat;
+                    $params[] = $from->getLongitude() - $degLon;
+                    $params[] = $from->getLongitude() + $degLon;
                 }
             }
 
