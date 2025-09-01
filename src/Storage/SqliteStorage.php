@@ -265,9 +265,9 @@ class SqliteStorage implements StorageInterface
             
             $id = $document['id'];
             $content = json_encode($document['content']);
-            // Persist metadata and, when R-tree is unavailable, embed geo for JSON fallback
+            // Persist metadata and, when R-tree or math functions are unavailable, embed geo for JSON fallback
             $metadataArr = $document['metadata'] ?? [];
-            if (!$this->hasRTreeSupport()) {
+            if (!$this->hasRTreeSupport() || !$this->hasMathFunctions) {
                 if (isset($document['geo']) && is_array($document['geo'])) {
                     $g = $document['geo'];
                     if (isset($g['lat'], $g['lng'])) {
@@ -413,9 +413,9 @@ class SqliteStorage implements StorageInterface
             foreach ($documents as $document) {
                 $id = $document['id'];
                 $content = json_encode($document['content']);
-                // Persist metadata and, when R-tree is unavailable, embed geo for JSON fallback
+                // Persist metadata and, when R-tree or math functions are unavailable, embed geo for JSON fallback
                 $metadataArr = $document['metadata'] ?? [];
-                if (!$this->hasRTreeSupport()) {
+                if (!$this->hasRTreeSupport() || !$this->hasMathFunctions) {
                     if (isset($document['geo']) && is_array($document['geo'])) {
                         $g = $document['geo'];
                         if (isset($g['lat'], $g['lng'])) {
@@ -575,11 +575,8 @@ class SqliteStorage implements StorageInterface
             strpos($spatial['select'], '_centroid_lat') !== false
         );
         
-        if ($hasSearchQuery && $hasSpatialData) {
-            // Check if sorting by distance
-            if (isset($geoFilters['distance_sort']) || isset($sort['distance'])) {
-                $needsPhpSort = true;
-            }
+        if ($hasSpatialData && (isset($geoFilters['distance_sort']) || isset($sort['distance']))) {
+            $needsPhpSort = true;
         }
         
         // When using field weights, we need to fetch more results to ensure proper scoring
@@ -1452,8 +1449,8 @@ class SqliteStorage implements StorageInterface
     
     private function indexSpatialData(string $index, string $id, array $document): void
     {
-        // Skip if R-tree support is not available or spatial disabled
-        if (!$this->hasRTreeSupport() || !$this->isSpatialEnabled($index)) {
+        // Skip if spatial disabled via config
+        if (!$this->isSpatialEnabled($index)) {
             return;
         }
         
@@ -1514,9 +1511,9 @@ class SqliteStorage implements StorageInterface
                 $mapStmt->execute([$id, $spatialId]);
             }
             
-            // Insert spatial data
+            // Insert spatial data (works for both R-tree and fallback table)
             $spatialStmt = $this->connection->prepare("
-                INSERT INTO {$index}_spatial (id, minLat, maxLat, minLng, maxLng)
+                INSERT OR REPLACE INTO {$index}_spatial (id, minLat, maxLat, minLng, maxLng)
                 VALUES (?, ?, ?, ?, ?)
             ");
             $spatialStmt->execute([$spatialId, $minLat, $maxLat, $minLng, $maxLng]);
@@ -1543,8 +1540,8 @@ class SqliteStorage implements StorageInterface
             return [ 'join' => '', 'where' => '', 'params' => [], 'select' => '' ];
         }
 
-        // JSON-based fallback when R-tree is unavailable (Windows-safe)
-        if (!$this->hasRTreeSupport()) {
+        // JSON-based fallback when R-tree or SQL math functions are unavailable
+        if (!$this->hasRTreeSupport() || !$this->hasMathFunctions) {
             $where = '';
             $params = [];
             $select = '';
