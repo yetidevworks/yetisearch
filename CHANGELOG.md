@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.2.0] - 2025-09-01
+
+### Fuzzy Search UX & Performance
+- Added `fuzzy_last_token_only` to focus typo tolerance on the final term (ideal for as‑you‑type search).
+- Adaptive n‑gram: trigram search now uses bigrams for short tokens to improve recall on short typos.
+- Levenshtein prefiltering: added length/edge‑char/bigram gating to cut false positives and speed up distance checks.
+- Similarity‑aware scoring maintained: fuzzy penalty scales by similarity/distance.
+
+### Type‑Ahead & Prefix Support
+- Optional `prefix_last_token` to apply `*` to the last token (requires FTS5 prefix indexes).
+- New migration script `scripts/migrate_fts.php` to rebuild an index with multi‑column FTS and optional prefix settings.
+
+### Storage & Ranking
+- Optional multi‑column FTS5: `indexer.fts.multi_column=true` stores per‑field text and enables weighted `bm25(fts, w_title, w_content, ...)` from field boosts.
+- Optional FTS5 prefix indexing: `indexer.fts.prefix=[2,3]` for strict prefix matches.
+- Backward compatible: single‑column `content` remains default; schema only changes when opting in.
+
+### Docs & Examples
+- README: Type‑Ahead Setup, Weighted FTS + Prefix sections with examples.
+- Added `docs/architecture-overview.md`.
+- Added `AGENTS.md` contributor guide.
+
+### Tests & Benchmarks
+- Integration tests for fuzzy algorithms and as‑you‑type mode.
+- Local evaluation script: `benchmarks/fuzzy-eval.php`.
+
 ## [1.1.0] - 2025-06-14
 
 #### Enhanced Fuzzy Search Capabilities

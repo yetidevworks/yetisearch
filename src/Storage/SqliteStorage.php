@@ -15,6 +15,7 @@ class SqliteStorage implements StorageInterface
     private array $preparedStatements = [];
     private ?bool $rtreeSupport = null;
     private bool $useTermsIndex = false;
+    private array $ftsColumnsCache = [];
     
     public function connect(array $config): void
     {
@@ -86,13 +87,34 @@ class SqliteStorage implements StorageInterface
             $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_type ON {$name}(type)");
             $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_timestamp ON {$name}(timestamp)");
             
-            $sql = "
-                CREATE VIRTUAL TABLE IF NOT EXISTS {$name}_fts USING fts5(
-                    id UNINDEXED,
-                    content,
-                    tokenize = 'unicode61'
-                )
-            ";
+            // Determine FTS configuration
+            $ftsColumns = ['content'];
+            if (!empty($options['fields']) && !empty(($options['fts']['multi_column'] ?? $options['fts_multi'] ?? false))) {
+                $ftsColumns = [];
+                foreach ($options['fields'] as $field => $cfg) {
+                    $indexable = $cfg['index'] ?? true;
+                    if ($indexable) {
+                        $ftsColumns[] = $field;
+                    }
+                }
+                if (empty($ftsColumns)) {
+                    $ftsColumns = ['content'];
+                }
+            }
+            // Build optional prefix config
+            $prefix = $options['fts']['prefix'] ?? $options['fts_prefix'] ?? $this->searchConfig['fts_prefix'] ?? null;
+            $prefixSql = '';
+            if (is_array($prefix) && !empty($prefix)) {
+                $prefixSql = ", prefix='" . implode(' ', array_map('intval', $prefix)) . "'";
+            }
+            // Create per-index metadata table to store FTS columns
+            $this->connection->exec("CREATE TABLE IF NOT EXISTS {$name}_meta (key TEXT PRIMARY KEY, value TEXT)");
+            $this->setIndexMeta($name, 'fts_columns', json_encode($ftsColumns));
+
+            // Create FTS5 table with configured columns
+            $cols = array_map(function($c){ return $c; }, $ftsColumns);
+            $ftsColsSql = 'id UNINDEXED, ' . implode(', ', $cols);
+            $sql = "CREATE VIRTUAL TABLE IF NOT EXISTS {$name}_fts USING fts5({$ftsColsSql}, tokenize='unicode61'{$prefixSql})";
             $this->connection->exec($sql);
             
             // Only create terms table if Levenshtein fuzzy search is enabled
@@ -150,6 +172,7 @@ class SqliteStorage implements StorageInterface
             $this->connection->exec("DROP TABLE IF EXISTS {$name}_terms");
             $this->connection->exec("DROP TABLE IF EXISTS {$name}_spatial");
             $this->connection->exec("DROP TABLE IF EXISTS {$name}_id_map");
+            $this->connection->exec("DROP TABLE IF EXISTS {$name}_meta");
         } catch (\PDOException $e) {
             throw new StorageException("Failed to drop index '{$name}': " . $e->getMessage());
         }
@@ -189,10 +212,17 @@ class SqliteStorage implements StorageInterface
             $stmt = $this->connection->prepare($sql);
             $stmt->execute([$id, $content, $metadata, $language, $type, $timestamp]);
             
-            $searchableContent = $this->extractSearchableContent($document['content']);
-            $ftsSql = "INSERT OR REPLACE INTO {$index}_fts (id, content) VALUES (?, ?)";
+            // Insert into FTS with dynamic columns
+            $ftsColumns = $this->getFtsColumns($index);
+            $placeholders = implode(', ', array_fill(0, count($ftsColumns) + 1, '?'));
+            $columnsSql = 'id, ' . implode(', ', $ftsColumns);
+            $ftsSql = "INSERT OR REPLACE INTO {$index}_fts ({$columnsSql}) VALUES ({$placeholders})";
             $ftsStmt = $this->connection->prepare($ftsSql);
-            $ftsStmt->execute([$id, $searchableContent]);
+            $values = [$id];
+            foreach ($ftsColumns as $col) {
+                $values[] = $this->getFieldText($document['content'], $col, $index);
+            }
+            $ftsStmt->execute($values);
             
             // Only index terms if Levenshtein fuzzy search is enabled
             if ($this->useTermsIndex) {
@@ -227,9 +257,11 @@ class SqliteStorage implements StorageInterface
                 VALUES (?, ?, ?, ?, ?, ?)
             ");
             
-            $ftsStmt = $this->connection->prepare("
-                INSERT OR REPLACE INTO {$index}_fts (id, content) VALUES (?, ?)
-            ");
+            // Prepare FTS insert statement dynamically
+            $ftsColumns = $this->getFtsColumns($index);
+            $columnsSql = 'id, ' . implode(', ', $ftsColumns);
+            $placeholders = implode(', ', array_fill(0, count($ftsColumns) + 1, '?'));
+            $ftsStmt = $this->connection->prepare("INSERT OR REPLACE INTO {$index}_fts ({$columnsSql}) VALUES ({$placeholders})");
             
             $termsStmt = null;
             if ($this->useTermsIndex) {
@@ -253,8 +285,11 @@ class SqliteStorage implements StorageInterface
                 $docStmt->execute([$id, $content, $metadata, $language, $type, $timestamp]);
                 
                 // Insert FTS content
-                $searchableContent = $this->extractSearchableContent($document['content']);
-                $ftsStmt->execute([$id, $searchableContent]);
+                $values = [$id];
+                foreach ($ftsColumns as $col) {
+                    $values[] = $this->getFieldText($document['content'], $col, $index);
+                }
+                $ftsStmt->execute($values);
                 
                 // Only index terms if Levenshtein fuzzy search is enabled
                 if ($this->useTermsIndex && $termsStmt) {
@@ -370,10 +405,17 @@ class SqliteStorage implements StorageInterface
         
         if ($hasSearchQuery) {
             // Full text search with optional spatial filters
+            // Compute bm25 weights per FTS column (if available)
+            $ftsColumns = $this->getFtsColumns($index);
+            $weights = [];
+            foreach ($ftsColumns as $col) {
+                $weights[] = (float)($fieldWeights[$col] ?? 1.0);
+            }
+            $bm25 = 'bm25(' . $index . "_fts" . (count($weights) ? ', ' . implode(', ', $weights) : '') . ') as rank';
             $sql = "
                 SELECT 
                     d.*,
-                    bm25({$index}_fts) as rank" . $spatial['select'] . "
+                    {$bm25}" . $spatial['select'] . "
                 FROM {$index} d
                 INNER JOIN {$index}_fts f ON d.id = f.id" . $spatial['join'] . "
                 WHERE {$index}_fts MATCH ?" . $spatial['where'] . "
@@ -890,6 +932,55 @@ class SqliteStorage implements StorageInterface
             )
         ";
         $this->connection->exec($sql);
+    }
+
+    private function setIndexMeta(string $index, string $key, string $value): void
+    {
+        $stmt = $this->connection->prepare("INSERT OR REPLACE INTO {$index}_meta (key, value) VALUES (?, ?)");
+        $stmt->execute([$key, $value]);
+    }
+
+    private function getIndexMeta(string $index, string $key): ?string
+    {
+        try {
+            $stmt = $this->connection->prepare("SELECT value FROM {$index}_meta WHERE key = ?");
+            $stmt->execute([$key]);
+            $row = $stmt->fetch();
+            return $row ? $row['value'] : null;
+        } catch (\PDOException $e) {
+            return null;
+        }
+    }
+
+    private function getFtsColumns(string $index): array
+    {
+        if (isset($this->ftsColumnsCache[$index])) {
+            return $this->ftsColumnsCache[$index];
+        }
+        $value = $this->getIndexMeta($index, 'fts_columns');
+        if ($value) {
+            $cols = json_decode($value, true) ?: ['content'];
+        } else {
+            $cols = ['content'];
+        }
+        return $this->ftsColumnsCache[$index] = $cols;
+    }
+
+    private function getFieldText(array $content, string $field, string $index): string
+    {
+        // If in single-column mode (['content']), aggregate all fields
+        $cols = $this->getFtsColumns($index);
+        if (count($cols) === 1 && $cols[0] === 'content' && $field === 'content') {
+            return $this->extractSearchableContent($content);
+        }
+
+        if (isset($content[$field])) {
+            $v = $content[$field];
+            if (is_string($v)) return $v;
+            if (is_array($v)) return $this->extractSearchableContent($v);
+            return (string)$v;
+        }
+        return '';
     }
     
     private function extractSearchableContent(array $content): string

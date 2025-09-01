@@ -53,7 +53,9 @@ class SearchEngine implements SearchEngineInterface
             // Fuzzy behavior tuning
             'fuzzy_last_token_only' => false,
             'trigram_size' => 3,
-            'trigram_threshold' => 0.5
+            'trigram_threshold' => 0.5,
+            // Prefix matching (requires FTS5 prefix index)
+            'prefix_last_token' => false
         ], $config);
         
         $this->logger = $logger ?? new NullLogger();
@@ -307,25 +309,20 @@ class SearchEngine implements SearchEngineInterface
         if ($query->isFuzzy() && !empty($fuzzyTokens)) {
             // Put exact terms first, then fuzzy variations
             // This should give higher scores to exact matches due to BM25 scoring
-            $allTokens = array_unique(array_merge($exactTokens, $fuzzyTokens));
-            
-            if (count($exactTokens) > 1) {
-                // For multi-word queries, also search for the exact phrase
-                $exactPhrase = '"' . implode(' ', $exactTokens) . '"';
-                $processedQuery = $exactPhrase . ' OR ' . implode(' OR ', $allTokens);
-            } else {
-                // Single word query
-                $processedQuery = implode(' OR ', $allTokens);
+            // Optional prefix on last token
+            if (($this->config['prefix_last_token'] ?? false) && !empty($exactTokens)) {
+                $lastIdx = count($exactTokens) - 1;
+                $exactTokens[$lastIdx] .= '*';
             }
+            $allTokens = array_unique(array_merge($exactTokens, $fuzzyTokens));
+            $processedQuery = implode(' OR ', $allTokens);
         } else {
             // No fuzzy search - just use exact tokens
-            if (count($exactTokens) > 1) {
-                $exactPhrase = '"' . implode(' ', $exactTokens) . '"';
-                $orTerms = implode(' OR ', $exactTokens);
-                $processedQuery = "({$exactPhrase} OR {$orTerms})";
-            } else {
-                $processedQuery = implode(' ', $exactTokens);
+            if (($this->config['prefix_last_token'] ?? false) && !empty($exactTokens)) {
+                $lastIdx = count($exactTokens) - 1;
+                $exactTokens[$lastIdx] .= '*';
             }
+            $processedQuery = implode(' ', $exactTokens);
         }
         
         // Debug: Log the processed query

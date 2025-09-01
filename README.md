@@ -42,6 +42,58 @@ A powerful, pure-PHP search engine library with advanced full-text search capabi
 - [Future Features](#future-features)
 - [Contributing](#contributing)
 - [License](#license)
+- [Type-Ahead Setup](#type-ahead-setup)
+- [Weighted FTS and Prefix (Optional)](#weighted-fts-and-prefix-optional)
+
+## Type-Ahead Setup
+
+For as-you-type search, enable fuzzy matching and (optionally) last-token prefixing. Debounce input by 200–300ms on the client.
+
+```php
+// Type-ahead friendly search
+$results = $search->search('movies', $query, [
+    'limit' => 8,
+    'fields' => ['title','overview','url'],
+    'fuzzy' => true,
+    'fuzzy_last_token_only' => true,   // fuzz just the last term
+    'prefix_last_token' => true,       // requires FTS prefix (see below)
+    // choose fuzzy algorithm based on content
+    'fuzzy_algorithm' => 'jaro_winkler', // great for short terms; or 'trigram' for general text
+]);
+```
+
+## Weighted FTS and Prefix (Optional)
+
+You can enable multi-column FTS5 and weighted BM25 to boost important fields (e.g., title, tags). Prefix indexing improves strict prefix matches for type-ahead.
+
+```php
+$config = [
+  'indexer' => [
+    'fields' => [                      // boosts become BM25 weights
+      'title' => ['boost' => 3.0, 'store' => true],
+      'overview' => ['boost' => 1.0, 'store' => true],
+      'tags' => ['boost' => 2.0, 'store' => true],
+    ],
+    'fts' => [
+      'multi_column' => true,          // create FTS with per-field columns
+      'prefix' => [2,3],               // enable FTS5 prefix index (optional)
+    ],
+  ],
+  'search' => [
+    'prefix_last_token' => true,       // use last-token prefix (needs prefix option above)
+  ],
+];
+$search = new YetiSearch($config);
+$indexer = $search->createIndex('movies');
+// Reindex to apply schema changes; or use scripts/migrate_fts.php to migrate existing data
+```
+
+Migration helper:
+
+```bash
+php scripts/migrate_fts.php --db=benchmarks/benchmark.db --index=movies --prefix=2,3
+```
+
 
 ## Features
 
