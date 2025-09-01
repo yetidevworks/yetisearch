@@ -253,7 +253,31 @@ class SqliteStorage implements StorageInterface
             
             $id = $document['id'];
             $content = json_encode($document['content']);
-            $metadata = json_encode($document['metadata'] ?? []);
+            // Persist metadata and, when R-tree is unavailable, embed geo for JSON fallback
+            $metadataArr = $document['metadata'] ?? [];
+            if (!$this->hasRTreeSupport()) {
+                if (isset($document['geo']) && is_array($document['geo'])) {
+                    $g = $document['geo'];
+                    if (isset($g['lat'], $g['lng'])) {
+                        $metadataArr['_geo'] = [
+                            'lat' => (float)$g['lat'],
+                            'lng' => (float)$g['lng'],
+                        ];
+                    }
+                }
+                if (isset($document['geo_bounds']) && is_array($document['geo_bounds'])) {
+                    $b = $document['geo_bounds'];
+                    if (isset($b['north'],$b['south'],$b['east'],$b['west'])) {
+                        $metadataArr['_geo_bounds'] = [
+                            'north' => (float)$b['north'],
+                            'south' => (float)$b['south'],
+                            'east'  => (float)$b['east'],
+                            'west'  => (float)$b['west'],
+                        ];
+                    }
+                }
+            }
+            $metadata = json_encode($metadataArr);
             $language = $document['language'] ?? null;
             $type = $document['type'] ?? 'default';
             $timestamp = $document['timestamp'] ?? time();
@@ -377,7 +401,31 @@ class SqliteStorage implements StorageInterface
             foreach ($documents as $document) {
                 $id = $document['id'];
                 $content = json_encode($document['content']);
-                $metadata = json_encode($document['metadata'] ?? []);
+                // Persist metadata and, when R-tree is unavailable, embed geo for JSON fallback
+                $metadataArr = $document['metadata'] ?? [];
+                if (!$this->hasRTreeSupport()) {
+                    if (isset($document['geo']) && is_array($document['geo'])) {
+                        $g = $document['geo'];
+                        if (isset($g['lat'], $g['lng'])) {
+                            $metadataArr['_geo'] = [
+                                'lat' => (float)$g['lat'],
+                                'lng' => (float)$g['lng'],
+                            ];
+                        }
+                    }
+                    if (isset($document['geo_bounds']) && is_array($document['geo_bounds'])) {
+                        $b = $document['geo_bounds'];
+                        if (isset($b['north'],$b['south'],$b['east'],$b['west'])) {
+                            $metadataArr['_geo_bounds'] = [
+                                'north' => (float)$b['north'],
+                                'south' => (float)$b['south'],
+                                'east'  => (float)$b['east'],
+                                'west'  => (float)$b['west'],
+                            ];
+                        }
+                    }
+                }
+                $metadata = json_encode($metadataArr);
                 $language = $document['language'] ?? null;
                 $type = $document['type'] ?? 'default';
                 $timestamp = $document['timestamp'] ?? time();
@@ -1451,14 +1499,60 @@ class SqliteStorage implements StorageInterface
         $distanceSelect = '';
         $centroidSelect = '';
         
-        // Return empty spatial query if R-tree is not supported or spatial disabled
-        if (!$this->hasRTreeSupport() || !$this->isSpatialEnabled($index)) {
-            return [
-                'join' => '',
-                'where' => '',
-                'params' => [],
-                'select' => ''
-            ];
+        // If spatial is disabled entirely, bail out
+        if (!$this->isSpatialEnabled($index)) {
+            return [ 'join' => '', 'where' => '', 'params' => [], 'select' => '' ];
+        }
+
+        // JSON-based fallback when R-tree is unavailable (Windows-safe)
+        if (!$this->hasRTreeSupport()) {
+            $where = '';
+            $params = [];
+            $select = '';
+
+            // JSON metadata columns for geo
+            $latCol = "CAST(json_extract(d.metadata, '$._geo.lat') AS REAL)";
+            $lngCol = "CAST(json_extract(d.metadata, '$._geo.lng') AS REAL)";
+
+            if (isset($geoFilters['near'])) {
+                $near = $geoFilters['near'];
+                $point = is_array($near['point']) ? new GeoPoint($near['point']['lat'], $near['point']['lng']) : $near['point'];
+                $radius = (float)$near['radius'];
+                $units = $geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? null);
+                if (is_string($units)) { $u=strtolower($units); if ($u==='km') $radius*=1000.0; elseif (in_array($u,['mi','mile','miles'])) $radius*=1609.344; }
+
+                $distanceExpr = $this->getDistanceExpressionForLatLngColumns($point->getLatitude(), $point->getLongitude(), $latCol, $lngCol);
+                $select .= ", {$distanceExpr} AS distance";
+                $where  .= " AND {$distanceExpr} <= ?"; $params[] = $radius;
+            }
+
+            if (isset($geoFilters['within'])) {
+                $b = $geoFilters['within']['bounds'];
+                $bounds = is_array($b) ? GeoBounds::fromArray($b) : $b;
+                $north=$bounds->getNorth(); $south=$bounds->getSouth(); $east=$bounds->getEast(); $west=$bounds->getWest();
+                if ($west > $east) {
+                    $where .= " AND ({$latCol} <= ? AND {$latCol} >= ? AND (({$lngCol} <= ? AND {$lngCol} >= -180) OR ({$lngCol} <= 180 AND {$lngCol} >= ?)))";
+                    array_push($params, $north, $south, $east, $west);
+                } else {
+                    $where .= " AND {$latCol} <= ? AND {$latCol} >= ? AND {$lngCol} <= ? AND {$lngCol} >= ?";
+                    array_push($params, $north, $south, $east, $west);
+                }
+            }
+
+            if (isset($geoFilters['distance_sort']) && isset($geoFilters['distance_sort']['from'])) {
+                $from = $geoFilters['distance_sort']['from'];
+                if (is_array($from)) { $from = new GeoPoint($from['lat'], $from['lng']); }
+                $distanceExpr = $this->getDistanceExpressionForLatLngColumns($from->getLatitude(), $from->getLongitude(), $latCol, $lngCol);
+                $select .= ", {$distanceExpr} AS distance";
+                if (isset($geoFilters['max_distance'])) {
+                    $maxD = (float)$geoFilters['max_distance'];
+                    $u = strtolower($geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? 'm'));
+                    if ($u==='km') $maxD*=1000.0; elseif (in_array($u,['mi','mile','miles'])) $maxD*=1609.344;
+                    $where .= " AND ({$distanceExpr}) <= ?"; $params[] = $maxD;
+                }
+            }
+
+            return [ 'join' => '', 'where' => $where, 'params' => $params, 'select' => $select ];
         }
         
         // Check if we need distance calculation for sorting
@@ -1627,6 +1721,23 @@ class SqliteStorage implements StorageInterface
         // Fallback: planar approx in meters
         $degToKm = 111.12; // km per degree
         return "\n            SQRT(\n                POWER(({$lat} - (({$minLat} + {$maxLat})/2.0)) * {$degToKm}, 2) +\n                POWER(({$lng} - (({$minLng} + {$maxLng})/2.0)) * {$degToKm} * COS((({$minLat} + {$maxLat})/2.0) * 0.0174533), 2)\n            ) * 1000.0\n        ";
+    }
+
+    // JSON/column-based distance expression (meters) for fallback without R-tree
+    private function getDistanceExpressionForLatLngColumns(float $lat, float $lng, string $latCol, string $lngCol): string
+    {
+        if ($this->hasMathFunctions) {
+            $r1 = "(" . $lat . " * (pi()/180.0))";
+            $t1 = "(" . $lng . " * (pi()/180.0))";
+            $r2 = "(" . $latCol . " * (pi()/180.0))";
+            $t2 = "(" . $lngCol . " * (pi()/180.0))";
+            $a  = "(pow(sin((".$r2."-".$r1.")/2.0),2) + cos(".$r1.")*cos(".$r2.")*pow(sin((".$t2."-".$t1.")/2.0),2))";
+            $distanceKm = "(2.0*6371.0*asin(min(1, sqrt(".$a."))))";
+            return "(".$distanceKm." * 1000.0)";
+        }
+        // Planar fallback
+        $degToKm = 111.12;
+        return "\n            SQRT(\n                POWER(({$lat} - ({$latCol})) * {$degToKm}, 2) +\n                POWER(({$lng} - ({$lngCol})) * {$degToKm} * COS(({$latCol}) * 0.0174533), 2)\n            ) * 1000.0\n        ";
     }
     
     public function ensureSpatialTableExists(string $name): void

@@ -2,62 +2,62 @@ YetiSearch Benchmark Test
 ========================
 Using trigram fuzzy search algorithm
 
-Loading movies.json... Done! (31944 movies loaded in 0.0420 seconds)
+Loading movies.json... Done! (31944 movies loaded in 0.0408 seconds)
 
 Initializing YetiSearch... Done!
 Clearing existing index... Done!
 Indexing movies...
-  Indexed: 1000 movies | Rate: 4,292 movies/sec | Elapsed: 0.23s
-  Indexed: 2000 movies | Rate: 4,263 movies/sec | Elapsed: 0.47s
-  Indexed: 3000 movies | Rate: 4,304 movies/sec | Elapsed: 0.70s
-  Indexed: 4000 movies | Rate: 4,332 movies/sec | Elapsed: 0.92s
-  Indexed: 5000 movies | Rate: 4,344 movies/sec | Elapsed: 1.15s
-  Indexed: 6000 movies | Rate: 4,358 movies/sec | Elapsed: 1.38s
-  Indexed: 7000 movies | Rate: 4,359 movies/sec | Elapsed: 1.61s
-  Indexed: 8000 movies | Rate: 4,344 movies/sec | Elapsed: 1.84s
-  Indexed: 9000 movies | Rate: 4,295 movies/sec | Elapsed: 2.10s
-  Indexed: 10000 movies | Rate: 4,298 movies/sec | Elapsed: 2.33s
-  Indexed: 11000 movies | Rate: 4,311 movies/sec | Elapsed: 2.55s
-  Indexed: 12000 movies | Rate: 4,287 movies/sec | Elapsed: 2.80s
-  Indexed: 13000 movies | Rate: 4,262 movies/sec | Elapsed: 3.05s
-  Indexed: 14000 movies | Rate: 4,234 movies/sec | Elapsed: 3.31s
-  Indexed: 15000 movies | Rate: 4,205 movies/sec | Elapsed: 3.57s
-  Indexed: 16000 movies | Rate: 4,175 movies/sec | Elapsed: 3.83s
-  Indexed: 17000 movies | Rate: 4,135 movies/sec | Elapsed: 4.11s
-  Indexed: 18000 movies | Rate: 4,108 movies/sec | Elapsed: 4.38s
-  Indexed: 19000 movies | Rate: 4,098 movies/sec | Elapsed: 4.64s
-  Indexed: 20000 movies | Rate: 4,091 movies/sec | Elapsed: 4.89s
-  Indexed: 21000 movies | Rate: 4,082 movies/sec | Elapsed: 5.14s
-  Indexed: 22000 movies | Rate: 4,079 movies/sec | Elapsed: 5.39s
-  Indexed: 23000 movies | Rate: 4,052 movies/sec | Elapsed: 5.68s
-  Indexed: 24000 movies | Rate: 4,029 movies/sec | Elapsed: 5.96s
-  Indexed: 25000 movies | Rate: 4,016 movies/sec | Elapsed: 6.22s
-  Indexed: 26000 movies | Rate: 4,012 movies/sec | Elapsed: 6.48s
-  Indexed: 27000 movies | Rate: 4,014 movies/sec | Elapsed: 6.73s
-  Indexed: 28000 movies | Rate: 4,024 movies/sec | Elapsed: 6.96s
-  Indexed: 29000 movies | Rate: 4,019 movies/sec | Elapsed: 7.22s
-  Indexed: 30000 movies | Rate: 4,031 movies/sec | Elapsed: 7.44s
-  Indexed: 31000 movies | Rate: 4,038 movies/sec | Elapsed: 7.68s
-  Indexed: 31944 movies | Rate: 4,043 movies/sec | Elapsed: 7.90s
+  Indexed: 1000 movies | Rate: 4,636 movies/sec | Elapsed: 0.22s
+  Indexed: 2000 movies | Rate: 4,713 movies/sec | Elapsed: 0.42s
+  Indexed: 3000 movies | Rate: 4,718 movies/sec | Elapsed: 0.64s
+  Indexed: 4000 movies | Rate: 4,751 movies/sec | Elapsed: 0.84s
+  Indexed: 5000 movies | Rate: 4,725 movies/sec | Elapsed: 1.06s
+  Indexed: 6000 movies | Rate: 4,749 movies/sec | Elapsed: 1.26s
+  Indexed: 7000 movies | Rate: 4,755 movies/sec | Elapsed: 1.47s
+  Indexed: 8000 movies | Rate: 4,740 movies/sec | Elapsed: 1.69s
+  Indexed: 9000 movies | Rate: 4,736 movies/sec | Elapsed: 1.90s
+  Indexed: 10000 movies | Rate: 4,751 movies/sec | Elapsed: 2.10s
+  Indexed: 11000 movies | Rate: 4,747 movies/sec | Elapsed: 2.32s
+  Indexed: 12000 movies | Rate: 4,697 movies/sec | Elapsed: 2.55s
+  Indexed: 13000 movies | Rate: 4,648 movies/sec | Elapsed: 2.80s
+  Indexed: 14000 movies | Rate: 4,626 movies/sec | Elapsed: 3.03s
+  Indexed: 15000 movies | Rate: 4,590 movies/sec | Elapsed: 3.27s
+  Indexed: 16000 movies | Rate: 4,572 movies/sec | Elapsed: 3.50s
+  Indexed: 17000 movies | Rate: 4,536 movies/sec | Elapsed: 3.75s
+  Indexed: 18000 movies | Rate: 4,509 movies/sec | Elapsed: 3.99s
+  Indexed: 19000 movies | Rate: 4,490 movies/sec | Elapsed: 4.23s
+  Indexed: 20000 movies | Rate: 4,468 movies/sec | Elapsed: 4.48s
+  Indexed: 21000 movies | Rate: 4,448 movies/sec | Elapsed: 4.72s
+  Indexed: 22000 movies | Rate: 4,444 movies/sec | Elapsed: 4.95s
+  Indexed: 23000 movies | Rate: 4,414 movies/sec | Elapsed: 5.21s
+  Indexed: 24000 movies | Rate: 4,407 movies/sec | Elapsed: 5.45s
+  Indexed: 25000 movies | Rate: 4,410 movies/sec | Elapsed: 5.67s
+  Indexed: 26000 movies | Rate: 4,402 movies/sec | Elapsed: 5.91s
+  Indexed: 27000 movies | Rate: 4,411 movies/sec | Elapsed: 6.12s
+  Indexed: 28000 movies | Rate: 4,415 movies/sec | Elapsed: 6.34s
+  Indexed: 29000 movies | Rate: 4,406 movies/sec | Elapsed: 6.58s
+  Indexed: 30000 movies | Rate: 4,410 movies/sec | Elapsed: 6.80s
+  Indexed: 31000 movies | Rate: 4,425 movies/sec | Elapsed: 7.01s
+  Indexed: 31944 movies | Rate: 4,439 movies/sec | Elapsed: 7.20s
 
 Benchmark Results
 =================
 Total movies processed: 31944
 Successfully indexed: 31944
 Errors: 0
-Total time: 7.9435 seconds
-Loading time: 0.0420 seconds
-Indexing time: 7.9015 seconds
-Average indexing rate: 4,042.79 movies/second
-Memory used: 58.77 MB
-Peak memory: 60.24 MB
+Total time: 7.2371 seconds
+Loading time: 0.0408 seconds
+Indexing time: 7.1963 seconds
+Average indexing rate: 4,438.96 movies/second
+Memory used: 58.80 MB
+Peak memory: 60.28 MB
 
 Testing Search Functionality
 ===========================
 
 --- Standard Search (fuzzy: OFF) ---
 
-Query: 'star wars' (took 4.15 ms)
+Query: 'star wars' (took 3.93 ms)
 Results found: 5 (Total hits: 946)
   1. Star Wars (Score: 100.0000)
   2. Star Wars: Deleted Magic (Score: 22.3000)
@@ -65,7 +65,7 @@ Results found: 5 (Total hits: 946)
   4. Star Wars: The Legacy Revealed (Score: 21.8000)
   5. The Making of Star Wars (Score: 21.7000)
 
-Query: 'action' (took 5.92 ms)
+Query: 'action' (took 5.66 ms)
 Results found: 5 (Total hits: 5797)
   1. Back in Action (Score: 100.0000)
   2. Action Jackson (Score: 99.0000)
@@ -73,7 +73,7 @@ Results found: 5 (Total hits: 5797)
   4. Quattro Noza (Score: 97.0000)
   5. Missing in Action 2: The Beginning (Score: 96.7000)
 
-Query: 'drama crime' (took 10.82 ms)
+Query: 'drama crime' (took 10.85 ms)
 Results found: 5 (Total hits: 14148)
   1. Cement (Score: 100.0000)
   2. Payback (Score: 93.5000)
@@ -89,7 +89,7 @@ Results found: 5 (Total hits: 11)
   4. The Beautiful Person (Score: 72.8000)
   5. 20,000 Leagues Under the Sea (Score: 69.1000)
 
-Query: 'matrix' (took 0.22 ms)
+Query: 'matrix' (took 0.20 ms)
 Results found: 5 (Total hits: 20)
   1. The Matrix Revisited (Score: 100.0000)
   2. The Matrix (Score: 94.2000)
@@ -97,7 +97,7 @@ Results found: 5 (Total hits: 20)
   4. Matrix of Evil (Score: 89.3000)
   5. The Matrix Revolutions (Score: 88.3000)
 
-Query: 'Anakin Skywalker' (took 0.35 ms)
+Query: 'Anakin Skywalker' (took 0.32 ms)
 Results found: 5 (Total hits: 18)
   1. Star Wars: Episode III - Revenge of the Sith (Score: 100.0000)
   2. Star Wars: Episode I - The Phantom Menace (Score: 96.0000)
@@ -105,7 +105,7 @@ Results found: 5 (Total hits: 18)
   4. The Story of Star Wars (Score: 85.1000)
   5. Star Wars: The Clone Wars (Score: 3.7000)
 
-Query: 'Harry Potter' (took 1.35 ms)
+Query: 'Harry Potter' (took 1.31 ms)
 Results found: 5 (Total hits: 172)
   1. Harry Potter and the Goblet of Fire (Score: 100.0000)
   2. Harry Potter and the Chamber of Secrets (Score: 98.2000)
@@ -116,7 +116,7 @@ Results found: 5 (Total hits: 172)
 
 --- Fuzzy Search (fuzzy: ON) ---
 
-Query: 'star wars' (took 59.69 ms)
+Query: 'star wars' (took 58.42 ms)
 Results found: 5 (Total hits: 3567)
   1. Star Wars (Score: 100.0000)
   2. Star Wars: Deleted Magic (Score: 22.3000)
@@ -124,7 +124,7 @@ Results found: 5 (Total hits: 3567)
   4. Star Wars: The Legacy Revealed (Score: 21.8000)
   5. The Making of Star Wars (Score: 20.2000)
 
-Query: 'action' (took 21.22 ms)
+Query: 'action' (took 20.00 ms)
 Results found: 5 (Total hits: 5937)
   1. Attraction (Score: 85.0000)
   2. Attraction (Score: 83.0000)
@@ -132,7 +132,7 @@ Results found: 5 (Total hits: 5937)
   4. Three Colors: Blue (Score: 49.7000)
   5. Just Say Love (Score: 49.7000)
 
-Query: 'drama crime' (took 25.15 ms)
+Query: 'drama crime' (took 24.55 ms)
 Results found: 5 (Total hits: 14148)
   1. The Krays (Score: 85.0000)
   2. Like Mother Like Son: The Strange Story of Sante and Kenny Kimes (Score: 85.0000)
@@ -140,7 +140,7 @@ Results found: 5 (Total hits: 14148)
   4. The Maker (Score: 72.5000)
   5. McBride: Semper Fi (Score: 67.2000)
 
-Query: 'nemo' (took 12.35 ms)
+Query: 'nemo' (took 11.67 ms)
 Results found: 5 (Total hits: 40)
   1. Captain Nemo and the Underwater City (Score: 41.8000)
   2. Finding Nemo (Score: 41.6000)
@@ -148,7 +148,7 @@ Results found: 5 (Total hits: 40)
   4. Neo Tokyo (Score: 37.5000)
   5. The Matrix Reloaded (Score: 14.0000)
 
-Query: 'matrix' (took 14.93 ms)
+Query: 'matrix' (took 14.42 ms)
 Results found: 5 (Total hits: 20)
   1. The Matrix Revisited (Score: 100.0000)
   2. The Matrix (Score: 94.2000)
@@ -156,7 +156,7 @@ Results found: 5 (Total hits: 20)
   4. Matrix of Evil (Score: 89.3000)
   5. The Matrix Revolutions (Score: 88.3000)
 
-Query: 'Anakin Skywalker' (took 17.40 ms)
+Query: 'Anakin Skywalker' (took 16.83 ms)
 Results found: 5 (Total hits: 18)
   1. Star Wars: Episode III - Revenge of the Sith (Score: 100.0000)
   2. Star Wars: Episode I - The Phantom Menace (Score: 96.0000)
@@ -164,7 +164,7 @@ Results found: 5 (Total hits: 18)
   4. The Story of Star Wars (Score: 85.1000)
   5. Star Wars: The Clone Wars (Score: 3.7000)
 
-Query: 'Harry Potter' (took 18.49 ms)
+Query: 'Harry Potter' (took 15.61 ms)
 Results found: 5 (Total hits: 172)
   1. Harry Potter and the Goblet of Fire (Score: 100.0000)
   2. Harry Potter and the Chamber of Secrets (Score: 98.2000)
@@ -176,7 +176,7 @@ Results found: 5 (Total hits: 172)
 Fuzzy Search Tests
 =============================
 
-Query: 'Amakin Dkywalker' (took 17.21 ms)
+Query: 'Amakin Dkywalker' (took 16.81 ms)
 Results found: 5 (Total hits: 16)
 [Looking for: 'Anakin Skywalker']
   1. Star Wars: The Rise of Skywalker (Score: 57.1000)
@@ -185,7 +185,7 @@ Results found: 5 (Total hits: 16)
   4. Fanboys (Score: 16.4000)
   5. Star Wars: Episode I - The Phantom Menace (Score: 15.8000)
 
-Query: 'Skywaker' (took 16.17 ms)
+Query: 'Skywaker' (took 15.98 ms)
 Results found: 5 (Total hits: 16)
 [Looking for: 'Skywalker']
   1. Star Wars: The Rise of Skywalker (Score: 61.5000)
@@ -195,7 +195,7 @@ Results found: 5 (Total hits: 16)
   4. Fanboys (Score: 17.7000)
   5. Star Wars: Episode I - The Phantom Menace (Score: 17.0000)
 
-Query: 'Star Wrs' (took 2.41 ms)
+Query: 'Star Wrs' (took 2.35 ms)
 Results found: 5 (Total hits: 838)
 [Looking for: 'Star Wars']
   1. Catch a Falling Star (Score: 100.0000)
@@ -206,7 +206,7 @@ Results found: 5 (Total hits: 838)
   5. Robot Chicken: Star Wars Episode III (Score: 96.0000)
      *** Found expected result! ***
 
-Query: 'The Godfater' (took 16.31 ms)
+Query: 'The Godfater' (took 16.06 ms)
 Results found: 5 (Total hits: 22)
 [Looking for: 'The Godfather']
   1. Bonanno: A Godfather's Story (Score: 61.5000)
@@ -219,11 +219,11 @@ Results found: 5 (Total hits: 22)
   5. Herschell Gordon Lewis: The Godfather of Gore (Score: 57.1000)
      *** Found expected result! ***
 
-Query: 'Inceptionn' (took 34.66 ms)
+Query: 'Inceptionn' (took 34.44 ms)
 Results found: 0 (Total hits: 0)
 [Looking for: 'Inception']
 
-Query: 'The Dark Knigh' (took 16.18 ms)
+Query: 'The Dark Knigh' (took 15.96 ms)
 Results found: 5 (Total hits: 827)
 [Looking for: 'The Dark Knight']
   1. The Dark Knight Rises (Score: 85.0000)
@@ -237,7 +237,7 @@ Results found: 5 (Total hits: 827)
   5. Legends of the Dark Knight: The History of Batman (Score: 64.7000)
      *** Found expected result! ***
 
-Query: 'Pulp Fictin' (took 18.43 ms)
+Query: 'Pulp Fictin' (took 17.60 ms)
 Results found: 5 (Total hits: 2939)
 [Looking for: 'Pulp Fiction']
   1. Pulp Fiction (Score: 85.0000)
@@ -247,7 +247,7 @@ Results found: 5 (Total hits: 2939)
   4. Pulp: a Film About Life, Death & Supermarkets (Score: 26.7000)
   5. The Magnificent One (Score: 22.8000)
 
-Query: 'Forrest Gump' (took 11.98 ms)
+Query: 'Forrest Gump' (took 11.77 ms)
 Results found: 5 (Total hits: 14)
 [Looking for: 'Forrest Gump']
   1. Forrest Gump (Score: 100.0000)
@@ -257,7 +257,7 @@ Results found: 5 (Total hits: 14)
   4. Sex Files: Alien Erotica II (Score: 0.2000)
   5. Deadly Honeymoon (Score: 0.2000)
 
-Query: 'The Shawshank Redemtion' (took 17.44 ms)
+Query: 'The Shawshank Redemtion' (took 17.42 ms)
 Results found: 5 (Total hits: 109)
 [Looking for: 'The Shawshank Redemption']
   1. The Shawshank Redemption (Score: 85.0000)
@@ -267,7 +267,7 @@ Results found: 5 (Total hits: 109)
   4. UFC 97: Redemption (Score: 2.0000)
   5. 24: Redemption (Score: 1.9000)
 
-Query: 'Lilo and Stich' (took 14.08 ms)
+Query: 'Lilo and Stich' (took 13.95 ms)
 Results found: 5 (Total hits: 5)
 [Looking for: 'Lilo and Stitch']
   1. The Story Room: The Making of 'Lilo & Stitch' (Score: 100.0000)
@@ -276,7 +276,7 @@ Results found: 5 (Total hits: 5)
   4. Leroy & Stitch (Score: 27.4000)
   5. Stitch! The Movie (Score: 25.4000)
 
-Query: 'Cristopher Nolan' (took 14.02 ms)
+Query: 'Cristopher Nolan' (took 13.75 ms)
 Results found: 5 (Total hits: 17)
 [Looking for: 'Christopher Nolan']
   1. Interstellar: Nolan's Odyssey (Score: 100.0000)
