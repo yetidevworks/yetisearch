@@ -752,7 +752,7 @@ class SqliteStorage implements StorageInterface
             $params[] = $fetchLimit;
         } else {
             // Normal SQL sorting
-            if (isset($geoFilters['distance_sort']) && !empty($spatial['select'])) {
+            if (isset($geoFilters['distance_sort']) && !empty($spatial['select']) && strpos($spatial['select'], 'distance') !== false) {
                 $dir = strtoupper($geoFilters['distance_sort']['direction']) === 'DESC' ? 'DESC' : 'ASC';
                 $sql .= " ORDER BY distance {$dir}";
             } elseif (empty($sort)) {
@@ -1549,9 +1549,17 @@ class SqliteStorage implements StorageInterface
             $params = [];
             $select = '';
 
-            // JSON metadata columns for geo
-            $latCol = "CAST(json_extract(d.metadata, '$._geo.lat') AS REAL)";
-            $lngCol = "CAST(json_extract(d.metadata, '$._geo.lng') AS REAL)";
+            // JSON metadata columns for geo. Use point if available, fallback to centroid of bounds.
+            $geoLat = "CAST(json_extract(d.metadata, '$._geo.lat') AS REAL)";
+            $geoLng = "CAST(json_extract(d.metadata, '$._geo.lng') AS REAL)";
+            $bNorth = "CAST(json_extract(d.metadata, '$._geo_bounds.north') AS REAL)";
+            $bSouth = "CAST(json_extract(d.metadata, '$._geo_bounds.south') AS REAL)";
+            $bEast  = "CAST(json_extract(d.metadata, '$._geo_bounds.east') AS REAL)";
+            $bWest  = "CAST(json_extract(d.metadata, '$._geo_bounds.west') AS REAL)";
+            $centLat = "(({$bNorth}+{$bSouth})/2.0)";
+            $centLng = "(({$bEast}+{$bWest})/2.0)";
+            $latCol = "COALESCE({$geoLat}, {$centLat})";
+            $lngCol = "COALESCE({$geoLng}, {$centLng})";
 
             if (isset($geoFilters['near'])) {
                 $near = $geoFilters['near'];
@@ -1574,14 +1582,21 @@ class SqliteStorage implements StorageInterface
                 $b = $geoFilters['within']['bounds'];
                 $bounds = is_array($b) ? GeoBounds::fromArray($b) : $b;
                 $north=$bounds->getNorth(); $south=$bounds->getSouth(); $east=$bounds->getEast(); $west=$bounds->getWest();
+                // Match either bounds intersection or point-in-rect
                 if ($west > $east) {
-                    $where .= " AND ({$latCol} <= ? AND {$latCol} >= ? AND (({$lngCol} <= ? AND {$lngCol} >= -180) OR ({$lngCol} <= 180 AND {$lngCol} >= ?)))";
-                    array_push($params, $north, $south, $east, $west);
+                    $boundsCond = "(({$bSouth} IS NOT NULL AND {$bNorth} IS NOT NULL AND {$bWest} IS NOT NULL AND {$bEast} IS NOT NULL AND " .
+                        "{$bNorth} >= ? AND {$bSouth} <= ? AND (({$bWest} <= ? AND {$bEast} >= -180) OR ({$bWest} <= 180 AND {$bEast} >= ?)))" .
+                        " OR ({$latCol} <= ? AND {$latCol} >= ? AND (({$lngCol} <= ? AND {$lngCol} >= -180) OR ({$lngCol} <= 180 AND {$lngCol} >= ?))))";
+                    $where .= " AND " . $boundsCond;
+                    array_push($params, $south, $north, $east, $west, $north, $south, $east, $west);
                 } else {
-                    $where .= " AND {$latCol} <= ? AND {$latCol} >= ? AND {$lngCol} <= ? AND {$lngCol} >= ?";
-                    array_push($params, $north, $south, $east, $west);
+                    $boundsCond = "(({$bSouth} IS NOT NULL AND {$bNorth} IS NOT NULL AND {$bWest} IS NOT NULL AND {$bEast} IS NOT NULL AND " .
+                        "{$bNorth} >= ? AND {$bSouth} <= ? AND {$bEast} >= ? AND {$bWest} <= ?)" .
+                        " OR ({$latCol} <= ? AND {$latCol} >= ? AND {$lngCol} <= ? AND {$lngCol} >= ?))";
+                    $where .= " AND " . $boundsCond;
+                    array_push($params, $south, $north, $east, $west, $north, $south, $east, $west);
                 }
-                $select .= ", {$latCol} AS _centroid_lat, {$lngCol} AS _centroid_lng";
+                $select .= ", {$centLat} AS _centroid_lat, {$centLng} AS _centroid_lng";
             }
 
             if (isset($geoFilters['distance_sort']) && isset($geoFilters['distance_sort']['from'])) {
