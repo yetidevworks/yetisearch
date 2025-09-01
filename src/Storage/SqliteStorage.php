@@ -1451,6 +1451,8 @@ class SqliteStorage implements StorageInterface
         if (!$this->isSpatialEnabled($index)) {
             return;
         }
+        // Ensure spatial table exists (handles both R-tree and fallback)
+        $this->ensureSpatialTableExists($index);
         
         // Fast-path exit: if no geo/bounds, skip any ID computation or deletes
         $hasGeo = isset($document['geo']) || isset($document['geo_bounds']);
