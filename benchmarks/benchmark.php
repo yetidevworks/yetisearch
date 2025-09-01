@@ -6,7 +6,7 @@
  * and performing search queries with and without fuzzy matching.
  *
  * Usage:
- * php benchmark.php [--skip-indexing] [--external=0|1]
+ * php benchmark.php [--skip-indexing] [--external=0|1] [--multi-column=0|1] [--prefix=2,3] [--spatial=0|1] [--fts-detail=full|column|none]
  *
  * Options:
  * --skip-indexing: Skip the indexing step and only run searches on existing data.
@@ -19,10 +19,18 @@ use YetiSearch\YetiSearch;
 
 // Check command line arguments
 $skipIndexing = in_array('--skip-indexing', $argv);
-$external = null;
+$external = null; $multiCol = null; $prefixArg = null; $spatial = null; $ftsDetail = null;
 foreach ($argv as $a) {
     if (strpos($a, '--external=') === 0) {
         $external = (int)substr($a, strlen('--external=')) === 1;
+    } elseif (strpos($a, '--multi-column=') === 0) {
+        $multiCol = (int)substr($a, strlen('--multi-column=')) === 1;
+    } elseif (strpos($a, '--prefix=') === 0) {
+        $prefixArg = substr($a, strlen('--prefix='));
+    } elseif (strpos($a, '--spatial=') === 0) {
+        $spatial = (int)substr($a, strlen('--spatial=')) === 1;
+    } elseif (strpos($a, '--fts-detail=') === 0) {
+        $ftsDetail = substr($a, strlen('--fts-detail='));
     }
 }
 
@@ -111,16 +119,24 @@ $config = [
 $search = new YetiSearch($config);
 
 // Allow overriding schema mode from CLI
-if ($external !== null) {
-    // Recreate with explicit storage mode
-    $config['storage']['external_content'] = $external;
-    $search = new YetiSearch($config);
-}
+if ($external !== null) { $config['storage']['external_content'] = $external; }
+// Recreate with explicit storage/storage extras if provided
+if ($external !== null) { $search = new YetiSearch($config); }
 echo "Done!\n";
 
 if (!$skipIndexing) {
     // Create index for movies (will use existing if available)
-    $indexer = $search->createIndex('movies');
+    $createOptions = [
+        'fts' => [
+            'multi_column' => ($multiCol ?? true),
+        ],
+    ];
+    if ($prefixArg !== null) {
+        $createOptions['fts']['prefix'] = ($prefixArg === '' ? [] : array_map('intval', explode(',', $prefixArg)));
+    }
+    if ($spatial !== null) { $createOptions['enable_spatial'] = $spatial; }
+    if ($ftsDetail !== null) { $createOptions['fts']['detail'] = $ftsDetail; }
+    $indexer = $search->createIndex('movies', $createOptions);
     
     // Clear existing index data
     echo "Clearing existing index... ";

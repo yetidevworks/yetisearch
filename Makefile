@@ -23,6 +23,7 @@ help:
 	@echo "  make bench-after     Run benchmark and save to benchmarks/benchmark-after.txt"
 	@echo "  make bench-before    Run legacy benchmark and save to benchmarks/benchmark-before.txt"
 	@echo "  make bench-compare   Run both and print delta summary"
+		@echo "  make bench-throughput  Run with throughput preset and save to benchmarks/benchmark-throughput.txt"
 
 bench-after:
 	@echo "Running benchmark (external-content default) ..."
@@ -100,3 +101,11 @@ bench-compare:
 	@$(MAKE) bench-after
 	@echo ""
 	@php scripts/bench_compare.php
+
+
+bench-throughput:
+	@echo "Running benchmark (throughput preset) ..."
+	@rm -f benchmarks/benchmark.db benchmarks/benchmark.db-shm benchmarks/benchmark.db-wal
+	@php benchmarks/benchmark.php --external=1 --multi-column=0 --prefix= --spatial=0 --fts-detail=full | tee benchmarks/benchmark-throughput.txt
+
+

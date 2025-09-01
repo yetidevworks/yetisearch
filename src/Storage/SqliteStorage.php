@@ -17,6 +17,7 @@ class SqliteStorage implements StorageInterface
     private bool $useTermsIndex = false;
     private ?bool $hasMathFunctions = null;
     private array $ftsColumnsCache = [];
+    private array $spatialEnabledCache = [];
     private bool $externalContentDefault = false;
     
     public function connect(array $config): void
@@ -55,6 +56,9 @@ class SqliteStorage implements StorageInterface
             $this->connection->exec('PRAGMA temp_store = MEMORY');
             $this->connection->exec('PRAGMA cache_size = -20000');
             $this->connection->exec('PRAGMA mmap_size = 268435456'); // 256MB memory map
+            if (!empty($this->config['exclusive_lock'])) {
+                $this->connection->exec('PRAGMA locking_mode = EXCLUSIVE');
+            }
             
             $this->initializeDatabase();
             // Improve query planning on connect
@@ -141,18 +145,25 @@ class SqliteStorage implements StorageInterface
             if (is_array($prefix) && !empty($prefix)) {
                 $prefixSql = ", prefix='" . implode(' ', array_map('intval', $prefix)) . "'";
             }
+            // Optional FTS detail
+            $detail = $options['fts']['detail'] ?? null; // 'full' | 'column' | 'none'
+            $detailSql = '';
+            if (is_string($detail) && in_array(strtolower($detail), ['full','column','none'], true)) {
+                $detailSql = ", detail='" . strtolower($detail) . "'";
+            }
             // Store FTS columns in meta
             $this->setIndexMeta($name, 'fts_columns', json_encode($ftsColumns));
+            if ($detail) { $this->setIndexMeta($name, 'fts_detail', strtolower($detail)); }
 
             // Create FTS5 table with configured columns
             $cols = array_map(function($c){ return $c; }, $ftsColumns);
             if ($useExternal) {
                 $ftsColsSql = implode(', ', $cols);
-                $sql = "CREATE VIRTUAL TABLE IF NOT EXISTS {$name}_fts USING fts5({$ftsColsSql}, content='{$name}', content_rowid='doc_id', tokenize='unicode61'{$prefixSql})";
+                $sql = "CREATE VIRTUAL TABLE IF NOT EXISTS {$name}_fts USING fts5({$ftsColsSql}, content='{$name}', content_rowid='doc_id', tokenize='unicode61'{$prefixSql}{$detailSql})";
                 $this->connection->exec($sql);
             } else {
                 $ftsColsSql = 'id UNINDEXED, ' . implode(', ', $cols);
-                $sql = "CREATE VIRTUAL TABLE IF NOT EXISTS {$name}_fts USING fts5({$ftsColsSql}, tokenize='unicode61'{$prefixSql})";
+                $sql = "CREATE VIRTUAL TABLE IF NOT EXISTS {$name}_fts USING fts5({$ftsColsSql}, tokenize='unicode61'{$prefixSql}{$detailSql})";
                 $this->connection->exec($sql);
             }
             
@@ -174,8 +185,11 @@ class SqliteStorage implements StorageInterface
                 $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_terms_doc ON {$name}_terms(document_id)");
             }
             
-            // Create R-tree spatial index if available
-            if ($this->hasRTreeSupport()) {
+            // Create R-tree spatial index if available and enabled
+            $spatialEnabled = (bool)($options['enable_spatial'] ?? true);
+            $this->setIndexMeta($name, 'spatial_enabled', $spatialEnabled ? '1' : '0');
+            $this->spatialEnabledCache[$name] = $spatialEnabled;
+            if ($spatialEnabled && $this->hasRTreeSupport()) {
                 $spatialSql = "
                     CREATE VIRTUAL TABLE IF NOT EXISTS {$name}_spatial USING rtree(
                         id,              -- Document ID (integer required by R-tree)
@@ -1238,6 +1252,17 @@ class SqliteStorage implements StorageInterface
         return $this->ftsColumnsCache[$index] = $cols;
     }
 
+    private function isSpatialEnabled(string $index): bool
+    {
+        if (array_key_exists($index, $this->spatialEnabledCache)) {
+            return (bool)$this->spatialEnabledCache[$index];
+        }
+        $val = $this->getIndexMeta($index, 'spatial_enabled');
+        return $this->spatialEnabledCache[$index] = ($val === null ? true : $val === '1');
+    }
+
+    //
+
     private function getFieldText(array $content, string $field, string $index): string
     {
         // If in single-column mode (['content']), aggregate all fields
@@ -1330,12 +1355,18 @@ class SqliteStorage implements StorageInterface
     
     private function indexSpatialData(string $index, string $id, array $document): void
     {
-        // Skip if R-tree support is not available
-        if (!$this->hasRTreeSupport()) {
+        // Skip if R-tree support is not available or spatial disabled
+        if (!$this->hasRTreeSupport() || !$this->isSpatialEnabled($index)) {
             return;
         }
         
-        // Determine spatial key
+        // Fast-path exit: if no geo/bounds, skip any ID computation or deletes
+        $hasGeo = isset($document['geo']) || isset($document['geo_bounds']);
+        if (!$hasGeo) {
+            return;
+        }
+
+        // Determine spatial key only when needed
         $schema = $this->getSchemaMode($index);
         if ($schema === 'external') {
             $docId = $this->getDocId($index, $id);
@@ -1345,16 +1376,10 @@ class SqliteStorage implements StorageInterface
             // R-tree requires integer IDs, so we create a numeric hash of the string ID
             $spatialId = $this->getNumericId($id);
         }
-        
-        // First, delete any existing spatial data
+
+        // Delete any existing spatial data for this document
         $deleteStmt = $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?");
         $deleteStmt->execute([$spatialId]);
-        
-        // Check for geo data
-        $hasGeo = isset($document['geo']) || isset($document['geo_bounds']);
-        if (!$hasGeo) {
-            return;
-        }
         
         
         $minLat = $maxLat = $minLng = $maxLng = null;
@@ -1416,8 +1441,8 @@ class SqliteStorage implements StorageInterface
         $distanceSelect = '';
         $centroidSelect = '';
         
-        // Return empty spatial query if R-tree is not supported
-        if (!$this->hasRTreeSupport()) {
+        // Return empty spatial query if R-tree is not supported or spatial disabled
+        if (!$this->hasRTreeSupport() || !$this->isSpatialEnabled($index)) {
             return [
                 'join' => '',
                 'where' => '',
