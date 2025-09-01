@@ -1676,8 +1676,11 @@ class SqliteStorage implements StorageInterface
         $this->ensureConnected();
         
         try {
-            // Try to create a temporary R-tree table to test support
-            $this->connection->exec("CREATE VIRTUAL TABLE IF NOT EXISTS test_rtree_support USING rtree(id, minX, maxX)");
+            // Try to create a temporary 2D R-tree table to test support
+            // A valid R-tree needs id plus min/max for each dimension (5 columns for 2D)
+            $this->connection->exec(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS test_rtree_support USING rtree(id, minX, maxX, minY, maxY)"
+            );
             $this->connection->exec("DROP TABLE IF EXISTS test_rtree_support");
             $this->rtreeSupport = true;
         } catch (\PDOException $e) {

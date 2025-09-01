@@ -15,13 +15,18 @@ class GeoHaversineAndDatelineTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        $this->search = new YetiSearch([
+        // Use test helper to ensure an isolated per-test DB
+        $this->search = $this->createSearchInstance([
             'analyzer' => [
                 'remove_stop_words' => false,
                 'disable_stop_words' => true,
             ],
+            // Ensure geo-only queries are not filtered by score
+            'search' => [
+                'min_score' => 0.0,
+            ],
         ]);
-        $this->search->createIndex($this->index);
+        $this->createTestIndex($this->index);
 
         // Seed a couple of well-known points
         $docs = [
