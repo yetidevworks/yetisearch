@@ -971,6 +971,39 @@ echo "Average price: $" . $results['aggregations']['avg_price'] . "\n";
 
 See the architecture overview diagram and component notes in `docs/architecture-overview.md`.
 
+## Geo Search
+
+YetiSearch supports location filtering and sorting with SQLite R-tree and accurate distances:
+
+- Accurate distances: uses Haversine great‑circle distance (meters) when SQLite math functions are available; otherwise falls back to a planar approximation.
+- `near` radius filter: radius (in meters) is applied in SQL using the computed distance for better performance and correctness.
+- `within` bounds: supports standard bounding boxes; if the bounds cross the antimeridian (west > east), the query splits into two longitude ranges.
+- Distance sorting: include a sort‑by‑distance option in your query for nearest‑first results.
+
+Units
+- Radius units default to meters. You can switch per-query via `units: 'km' | 'mi'` inside the geo filter, or set a global default in `search.geo_units` (e.g., `'km'`).
+
+Example (PHP):
+```php
+use YetiSearch\Geo\GeoPoint;
+use YetiSearch\Models\SearchQuery;
+
+$engine = $search->getSearchEngine('places');
+$center = new GeoPoint(40.7128, -74.0060); // NYC
+$q = (new SearchQuery('coffee'))
+  ->near($center, 5)                  // radius 5 km
+  // or pass via facade options: ['geoFilters' => ['near' => ['point'=>..., 'radius'=>5, 'units'=>'km']]]
+  ->sortByDistance($center, 'asc');   // nearest first
+
+$results = $engine->search($q);
+foreach ($results->getResults() as $r) {
+  echo $r->get('title') . ' - ' . round($r->getDistance()) . " m\n";
+}
+```
+
+Note
+- R-tree is used when available; if not, geo search gracefully degrades but may be slower. Ensure your SQLite build has RTREE (check with `scripts/check_sqlite_features.php`).
+
 YetiSearch follows a modular architecture with clear separation of concerns:
 
 ```

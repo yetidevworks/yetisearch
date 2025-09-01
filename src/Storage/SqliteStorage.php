@@ -15,6 +15,7 @@ class SqliteStorage implements StorageInterface
     private array $preparedStatements = [];
     private ?bool $rtreeSupport = null;
     private bool $useTermsIndex = false;
+    private ?bool $hasMathFunctions = null;
     private array $ftsColumnsCache = [];
     
     public function connect(array $config): void
@@ -53,6 +54,14 @@ class SqliteStorage implements StorageInterface
             $this->connection->exec('PRAGMA mmap_size = 268435456'); // 256MB memory map
             
             $this->initializeDatabase();
+
+            // Detect availability of math functions for Haversine
+            try {
+                $this->connection->query('SELECT sin(0.0), cos(0.0), pi()')->fetch();
+                $this->hasMathFunctions = true;
+            } catch (\PDOException $e) {
+                $this->hasMathFunctions = false;
+            }
         } catch (\PDOException $e) {
             throw new StorageException("Failed to connect to SQLite: " . $e->getMessage());
         }
@@ -1167,7 +1176,17 @@ class SqliteStorage implements StorageInterface
         if (isset($geoFilters['near'])) {
             $near = $geoFilters['near'];
             $point = is_array($near['point']) ? new GeoPoint($near['point']['lat'], $near['point']['lng']) : $near['point'];
-            $radius = $near['radius'];
+            $radius = (float)$near['radius'];
+            // Units: default meters; support 'km' and 'mi' via per-query or config
+            $units = $geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? null);
+            if (is_string($units)) {
+                $u = strtolower($units);
+                if ($u === 'km') {
+                    $radius *= 1000.0;
+                } elseif ($u === 'mi' || $u === 'mile' || $u === 'miles') {
+                    $radius *= 1609.344;
+                }
+            }
             
             // Calculate bounding box for initial R-tree filtering
             $bounds = $point->getBoundingBox($radius);
@@ -1175,19 +1194,29 @@ class SqliteStorage implements StorageInterface
             $spatialJoin = " INNER JOIN {$index}_id_map m ON m.string_id = d.id " .
                            "INNER JOIN {$index}_spatial s ON s.id = m.numeric_id";
             
-            // R-tree bounding box filter
-            $spatialSql = " AND s.minLat <= ? AND s.maxLat >= ? AND s.minLng <= ? AND s.maxLng >= ?";
-            $spatialParams = [
-                $bounds->getNorth(),
-                $bounds->getSouth(),
-                $bounds->getEast(),
-                $bounds->getWest()
-            ];
+            // R-tree bounding box filter with dateline handling
+            $north = $bounds->getNorth();
+            $south = $bounds->getSouth();
+            $east = $bounds->getEast();
+            $west = $bounds->getWest();
+
+            if ($west > $east) {
+                // Crosses the antimeridian: split into two longitude ranges
+                $spatialSql = " AND s.minLat <= ? AND s.maxLat >= ? AND ((s.minLng <= ? AND s.maxLng >= -180) OR (s.minLng <= 180 AND s.maxLng >= ?))";
+                $spatialParams = [$north, $south, $east, $west];
+            } else {
+                $spatialSql = " AND s.minLat <= ? AND s.maxLat >= ? AND s.minLng <= ? AND s.maxLng >= ?";
+                $spatialParams = [$north, $south, $east, $west];
+            }
             
             // Add distance calculation for post-filtering and sorting
             $lat = $point->getLatitude();
             $lng = $point->getLongitude();
-            $distanceSelect = ", " . $this->getDistanceExpression($lat, $lng) . " as distance";
+            $distanceExpr = $this->getDistanceExpression($lat, $lng);
+            $distanceSelect = ", " . $distanceExpr . " as distance";
+            // Also filter by radius in SQL
+            $spatialSql .= " AND (" . $distanceExpr . ") <= ?";
+            $spatialParams[] = (float)$radius; // radius expected in meters
         }
         elseif (isset($geoFilters['within'])) {
             $boundsData = $geoFilters['within']['bounds'];
@@ -1196,14 +1225,18 @@ class SqliteStorage implements StorageInterface
             $spatialJoin = " INNER JOIN {$index}_id_map m ON m.string_id = d.id " .
                            "INNER JOIN {$index}_spatial s ON s.id = m.numeric_id";
             
-            // R-tree intersection query
-            $spatialSql = " AND s.minLat <= ? AND s.maxLat >= ? AND s.minLng <= ? AND s.maxLng >= ?";
-            $spatialParams = [
-                $bounds->getNorth(),
-                $bounds->getSouth(), 
-                $bounds->getEast(),
-                $bounds->getWest()
-            ];
+            // R-tree intersection query with dateline handling
+            $north = $bounds->getNorth();
+            $south = $bounds->getSouth();
+            $east = $bounds->getEast();
+            $west = $bounds->getWest();
+            if ($west > $east) {
+                $spatialSql = " AND s.minLat <= ? AND s.maxLat >= ? AND ((s.minLng <= ? AND s.maxLng >= -180) OR (s.minLng <= 180 AND s.maxLng >= ?))";
+                $spatialParams = [$north, $south, $east, $west];
+            } else {
+                $spatialSql = " AND s.minLat <= ? AND s.maxLat >= ? AND s.minLng <= ? AND s.maxLng >= ?";
+                $spatialParams = [$north, $south, $east, $west];
+            }
         }
         
         return [
@@ -1229,10 +1262,7 @@ class SqliteStorage implements StorageInterface
     
     private function getDistanceExpression(float $lat, float $lng, bool $useTablePrefix = true): string
     {
-        // Simplified distance calculation for SQLite
-        // Using degrees directly with approximate conversion
-        $degToKm = 111.12; // Approximate km per degree at equator
-        
+        // Prefer accurate Haversine if math functions are available; otherwise fallback to planar approx
         // Column references
         if ($useTablePrefix) {
             $minLat = "s.minLat";
@@ -1245,15 +1275,23 @@ class SqliteStorage implements StorageInterface
             $minLng = "minLng";
             $maxLng = "maxLng";
         }
-        
-        // Simple Euclidean distance with latitude correction
-        // This is less accurate than Haversine but sufficient for sorting/filtering
-        return "
-            SQRT(
-                POWER(({$lat} - ({$minLat} + {$maxLat}) / 2) * {$degToKm}, 2) +
-                POWER(({$lng} - ({$minLng} + {$maxLng}) / 2) * {$degToKm} * COS(({$minLat} + {$maxLat}) / 2 * 0.0174533), 2)
-            ) * 1000
-        ";
+
+        if ($this->hasMathFunctions) {
+            // Haversine on centroid of bbox; returns meters
+            $r1 = "(" . $lat . " * (pi()/180.0))";
+            $t1 = "(" . $lng . " * (pi()/180.0))";
+            $lat2 = "(({$minLat}+{$maxLat})/2.0)";
+            $lng2 = "(({$minLng}+{$maxLng})/2.0)";
+            $r2 = "(" . $lat2 . " * (pi()/180.0))";
+            $t2 = "(" . $lng2 . " * (pi()/180.0))";
+            $a = "(pow(sin((" . $r2 . "-" . $r1 . ")/2.0),2) + cos(" . $r1 . ")*cos(" . $r2 . ")*pow(sin((" . $t2 . "-" . $t1 . ")/2.0),2))";
+            $distanceKm = "(2.0*6371.0*asin(min(1, sqrt(" . $a . "))))";
+            return "(" . $distanceKm . " * 1000.0)";
+        }
+
+        // Fallback: planar approx in meters
+        $degToKm = 111.12; // km per degree
+        return "\n            SQRT(\n                POWER(({$lat} - (({$minLat} + {$maxLat})/2.0)) * {$degToKm}, 2) +\n                POWER(({$lng} - (({$minLng} + {$maxLng})/2.0)) * {$degToKm} * COS((({$minLat} + {$maxLat})/2.0) * 0.0174533), 2)\n            ) * 1000.0\n        ";
     }
     
     public function ensureSpatialTableExists(string $name): void

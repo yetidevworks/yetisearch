@@ -7,6 +7,8 @@ use YetiSearch\Analyzers\StandardAnalyzer;
 use YetiSearch\Index\Indexer;
 use YetiSearch\Search\SearchEngine;
 use YetiSearch\Models\SearchQuery;
+use YetiSearch\Geo\GeoPoint;
+use YetiSearch\Geo\GeoBounds;
 use Psr\Log\LoggerInterface;
 
 class YetiSearch
@@ -246,6 +248,47 @@ class YetiSearch
         if (isset($options['facets'])) {
             foreach ($options['facets'] as $field => $facetOptions) {
                 $searchQuery->facet($field, $facetOptions);
+            }
+        }
+
+        // Geo filters (facade support): accepts options['geoFilters'] or options['geo']
+        $geo = $options['geoFilters'] ?? $options['geo'] ?? null;
+        if (is_array($geo)) {
+            if (isset($geo['units']) && is_string($geo['units'])) {
+                $searchQuery->geoUnits($geo['units']);
+            }
+            if (isset($geo['near'])) {
+                $n = $geo['near'];
+                $p = $n['point'] ?? null;
+                if ($p instanceof GeoPoint) {
+                    $gp = $p;
+                } elseif (is_array($p) && isset($p['lat'], $p['lng'])) {
+                    $gp = new GeoPoint((float)$p['lat'], (float)$p['lng']);
+                } else {
+                    $gp = null;
+                }
+                if ($gp && isset($n['radius'])) {
+                    $units = isset($n['units']) && is_string($n['units']) ? $n['units'] : null;
+                    $searchQuery->near($gp, (float)$n['radius'], $units);
+                }
+            }
+            if (isset($geo['within'])) {
+                $b = $geo['within']['bounds'] ?? null;
+                if ($b instanceof GeoBounds) {
+                    $searchQuery->within($b);
+                } elseif (is_array($b) && isset($b['north'],$b['south'],$b['east'],$b['west'])) {
+                    $searchQuery->within(new GeoBounds((float)$b['north'], (float)$b['south'], (float)$b['east'], (float)$b['west']));
+                }
+            }
+            if (isset($geo['distance_sort'])) {
+                $ds = $geo['distance_sort'];
+                $from = $ds['from'] ?? null;
+                $dir = $ds['direction'] ?? 'asc';
+                if ($from instanceof GeoPoint) {
+                    $searchQuery->sortByDistance($from, (string)$dir);
+                } elseif (is_array($from) && isset($from['lat'],$from['lng'])) {
+                    $searchQuery->sortByDistance(new GeoPoint((float)$from['lat'], (float)$from['lng']), (string)$dir);
+                }
             }
         }
         

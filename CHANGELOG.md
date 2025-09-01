@@ -17,6 +17,12 @@
 - Optional FTS5 prefix indexing: `indexer.fts.prefix=[2,3]` for strict prefix matches.
 - Backward compatible: single‑column `content` remains default; schema only changes when opting in.
 
+### Geo Search
+- Accurate distances: Haversine great‑circle distance (meters) when SQLite math functions are available; fallback to planar approximation otherwise.
+- SQL radius filtering: `near` now filters by radius in SQL using the computed distance.
+- Dateline handling: bounds crossing the antimeridian (west > east) correctly include both sides.
+- Tests: added integration tests for Haversine accuracy and dateline‑crossing bounds.
+
 ### Docs & Examples
 - README: Type‑Ahead Setup, Weighted FTS + Prefix sections with examples.
 - Added `docs/architecture-overview.md`.

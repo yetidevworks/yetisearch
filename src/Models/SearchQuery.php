@@ -198,12 +198,15 @@ class SearchQuery
         return $this->aggregations;
     }
     
-    public function near(GeoPoint $point, float $radiusInMeters): self
+    public function near(GeoPoint $point, float $radiusInMeters, ?string $units = null): self
     {
         $this->geoFilters['near'] = [
             'point' => $point,
             'radius' => $radiusInMeters
         ];
+        if ($units !== null) {
+            $this->geoFilters['units'] = strtolower($units);
+        }
         return $this;
     }
     
@@ -227,6 +230,12 @@ class SearchQuery
             'from' => $from,
             'direction' => strtolower($direction)
         ];
+        return $this;
+    }
+
+    public function geoUnits(string $units): self
+    {
+        $this->geoFilters['units'] = strtolower($units);
         return $this;
     }
     
