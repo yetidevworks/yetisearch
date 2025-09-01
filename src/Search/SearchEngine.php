@@ -55,7 +55,12 @@ class SearchEngine implements SearchEngineInterface
             'trigram_size' => 3,
             'trigram_threshold' => 0.5,
             // Prefix matching (requires FTS5 prefix index)
-            'prefix_last_token' => false
+            'prefix_last_token' => false,
+            // Geo scoring
+            // distance_weight: 0.0..1.0, proportion of distance score in final score
+            'distance_weight' => 0.0,
+            // distance_decay_k: controls how fast distance score decays per km (higher = steeper)
+            'distance_decay_k' => 0.005
         ], $config);
         
         $this->logger = $logger ?? new NullLogger();
@@ -457,8 +462,19 @@ class SearchEngine implements SearchEngineInterface
                 );
             }
             
-            // Normalize score to 0-100 range
+            // Normalize text score to 0-100 range
             $normalizedScore = $maxScore > 0 ? round(($adjustedScore / $maxScore) * 100, 1) : 0;
+
+            // Optional distance-based scoring (0-100) using exponential decay over km
+            $finalScore = $normalizedScore;
+            if (isset($result['distance'])) {
+                $km = max(0.0, (float)$result['distance'] / 1000.0);
+                $k = (float)($this->config['distance_decay_k'] ?? 0.005);
+                $distanceScore = max(0.0, min(100.0, 100.0 * exp(-$k * $km)));
+                $dw = (float)($this->config['distance_weight'] ?? 0.0);
+                $dw = max(0.0, min(1.0, $dw));
+                $finalScore = round((1.0 - $dw) * $normalizedScore + $dw * $distanceScore, 1);
+            }
             
             $filteredDocument = $this->filterResultFields($result['document']);
             
@@ -476,7 +492,7 @@ class SearchEngine implements SearchEngineInterface
             
             $resultData = [
                 'id' => $result['id'],
-                'score' => $normalizedScore,
+                'score' => $finalScore,
                 'document' => $filteredDocument,
                 'highlights' => $highlights,
                 'metadata' => $result['metadata'] ?? []
@@ -492,8 +508,8 @@ class SearchEngine implements SearchEngineInterface
             $processedResults[] = $processedResult;
         }
         
-        // Re-sort results if we applied fuzzy penalties
-        if ($query->isFuzzy() && !empty($this->fuzzyTermMap)) {
+        // Re-sort results if we applied fuzzy penalties or geo scoring weight
+        if (($query->isFuzzy() && !empty($this->fuzzyTermMap)) || (($this->config['distance_weight'] ?? 0.0) > 0)) {
             usort($processedResults, function($a, $b) {
                 return $b->getScore() <=> $a->getScore();
             });

@@ -981,7 +981,7 @@ YetiSearch supports location filtering and sorting with SQLite R-tree and accura
 - Distance sorting: include a sort‑by‑distance option in your query for nearest‑first results.
 
 Units
-- Radius units default to meters. You can switch per-query via `units: 'km' | 'mi'` inside the geo filter, or set a global default in `search.geo_units` (e.g., `'km'`).
+- Radius units default to meters. You can switch per‑query via `units: 'km' | 'mi'` inside the geo filter, or set a global default in `search.geo_units` (e.g., `'km'`).
 
 Example (PHP):
 ```php
@@ -1003,6 +1003,35 @@ foreach ($results->getResults() as $r) {
 
 Note
 - R-tree is used when available; if not, geo search gracefully degrades but may be slower. Ensure your SQLite build has RTREE (check with `scripts/check_sqlite_features.php`).
+
+### Global Units & Composite Scoring
+
+- Default units (global):
+```php
+$search = new YetiSearch([
+  'search' => [
+    'geo_units' => 'km',   // default units for near() radius if units not specified per query
+  ]
+]);
+```
+
+- Blend text relevance with distance using an exponential decay. Useful for “closest best” ranking:
+```php
+$search = new YetiSearch([
+  'search' => [
+    // Mix distance into final score (0.0..1.0)
+    'distance_weight' => 0.5,
+    // Decay factor per km (higher = faster decay)
+    'distance_decay_k' => 0.01,
+  ]
+]);
+
+// With distance_weight > 0, results incorporate both BM25 text score and proximity
+```
+
+Guidance
+- Start with `distance_weight` between 0.3–0.6; increase if proximity should dominate when text scores are similar.
+- Tune `distance_decay_k` by typical search radius; e.g., 0.005–0.02 for city‑scale queries.
 
 YetiSearch follows a modular architecture with clear separation of concerns:
 
