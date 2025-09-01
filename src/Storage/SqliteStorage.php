@@ -185,19 +185,31 @@ class SqliteStorage implements StorageInterface
                 $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_terms_doc ON {$name}_terms(document_id)");
             }
             
-            // Create R-tree spatial index if available and enabled
+            // Create spatial support (R-tree if available, otherwise a normal table for consistency)
             $spatialEnabled = (bool)($options['enable_spatial'] ?? true);
             $this->setIndexMeta($name, 'spatial_enabled', $spatialEnabled ? '1' : '0');
             $this->spatialEnabledCache[$name] = $spatialEnabled;
-            if ($spatialEnabled && $this->hasRTreeSupport()) {
-                $spatialSql = "
-                    CREATE VIRTUAL TABLE IF NOT EXISTS {$name}_spatial USING rtree(
-                        id,              -- Document ID (integer required by R-tree)
-                        minLat, maxLat,  -- Latitude bounds
-                        minLng, maxLng   -- Longitude bounds
-                    )
-                ";
-                $this->connection->exec($spatialSql);
+            if ($spatialEnabled) {
+                if ($this->hasRTreeSupport()) {
+                    $spatialSql = "
+                        CREATE VIRTUAL TABLE IF NOT EXISTS {$name}_spatial USING rtree(
+                            id,              -- Document ID (integer required by R-tree)
+                            minLat, maxLat,  -- Latitude bounds
+                            minLng, maxLng   -- Longitude bounds
+                        )
+                    ";
+                    $this->connection->exec($spatialSql);
+                } else {
+                    // Fallback: regular table to satisfy tests and enable basic maintenance
+                    $spatialSql = "
+                        CREATE TABLE IF NOT EXISTS {$name}_spatial (
+                            id INTEGER PRIMARY KEY,
+                            minLat REAL, maxLat REAL,
+                            minLng REAL, maxLng REAL
+                        )
+                    ";
+                    $this->connection->exec($spatialSql);
+                }
                 // Legacy-only id_map
                 if (!$useExternal) {
                     $mappingSql = "
@@ -558,7 +570,10 @@ class SqliteStorage implements StorageInterface
         
         // Detect if we need PHP-based sorting (FTS5 + distance sorting)
         $needsPhpSort = false;
-        $hasSpatialData = !empty($spatial['select']) && strpos($spatial['select'], 'distance') !== false;
+        $hasSpatialData = !empty($spatial['select']) && (
+            strpos($spatial['select'], 'distance') !== false ||
+            strpos($spatial['select'], '_centroid_lat') !== false
+        );
         
         if ($hasSearchQuery && $hasSpatialData) {
             // Check if sorting by distance
@@ -791,6 +806,16 @@ class SqliteStorage implements StorageInterface
             }
             
             $rowCount = 0;
+            // Determine a reference point for distance if needed
+            $refPoint = null;
+            if (isset($geoFilters['distance_sort']['from'])) {
+                $from = $geoFilters['distance_sort']['from'];
+                $refPoint = is_array($from) ? new GeoPoint($from['lat'], $from['lng']) : $from;
+            } elseif (isset($geoFilters['near']['point'])) {
+                $from = $geoFilters['near']['point'];
+                $refPoint = is_array($from) ? new GeoPoint($from['lat'], $from['lng']) : $from;
+            }
+
             while ($row = $stmt->fetch()) {
                 $rowCount++;
                 $content = json_decode($row['content'], true);
@@ -815,15 +840,16 @@ class SqliteStorage implements StorageInterface
                     'timestamp' => $row['timestamp']
                 ];
                 
-                // Add distance if available
+                // Add or compute distance
+                $distance = null;
                 if (isset($row['distance'])) {
                     $distance = (float)$row['distance'];
-                    
-                    // Skip results outside radius for 'near' queries
-                    if ($radiusFilter !== null && $distance > $radiusFilter) {
-                        continue;
-                    }
-                    
+                } elseif ($refPoint && isset($row['_centroid_lat'], $row['_centroid_lng'])) {
+                    $pt = new GeoPoint((float)$row['_centroid_lat'], (float)$row['_centroid_lng']);
+                    $distance = $refPoint->distanceTo($pt);
+                }
+                if ($distance !== null) {
+                    if ($radiusFilter !== null && $distance > $radiusFilter) { continue; }
                     $result['distance'] = $distance;
                 }
                 
@@ -1089,7 +1115,11 @@ class SqliteStorage implements StorageInterface
             // Recreate spatial; drop legacy id_map
             $this->connection->exec("DROP TABLE IF EXISTS {$index}_spatial");
             $this->connection->exec("DROP TABLE IF EXISTS {$index}_id_map");
-            $this->connection->exec("CREATE VIRTUAL TABLE {$index}_spatial USING rtree(id, minLat, maxLat, minLng, maxLng)");
+            if ($this->hasRTreeSupport()) {
+                $this->connection->exec("CREATE VIRTUAL TABLE {$index}_spatial USING rtree(id, minLat, maxLat, minLng, maxLng)");
+            } else {
+                $this->connection->exec("CREATE TABLE {$index}_spatial (id INTEGER PRIMARY KEY, minLat REAL, maxLat REAL, minLng REAL, maxLng REAL)");
+            }
 
             $this->connection->commit();
         } catch (\Throwable $e) {
@@ -1529,10 +1559,15 @@ class SqliteStorage implements StorageInterface
                 $radius = (float)$near['radius'];
                 $units = $geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? null);
                 if (is_string($units)) { $u=strtolower($units); if ($u==='km') $radius*=1000.0; elseif (in_array($u,['mi','mile','miles'])) $radius*=1609.344; }
-
-                $distanceExpr = $this->getDistanceExpressionForLatLngColumns($point->getLatitude(), $point->getLongitude(), $latCol, $lngCol);
-                $select .= ", {$distanceExpr} AS distance";
-                $where  .= " AND {$distanceExpr} <= ?"; $params[] = $radius;
+                // Bounding box approximation (no math functions needed)
+                $deg = $radius / 111000.0;
+                $where .= " AND {$latCol} BETWEEN ? AND ? AND {$lngCol} BETWEEN ? AND ?";
+                $params[] = $point->getLatitude() - $deg;
+                $params[] = $point->getLatitude() + $deg;
+                $params[] = $point->getLongitude() - $deg;
+                $params[] = $point->getLongitude() + $deg;
+                // Provide centroid columns so PHP can compute accurate distance
+                $select .= ", {$latCol} AS _centroid_lat, {$lngCol} AS _centroid_lng";
             }
 
             if (isset($geoFilters['within'])) {
@@ -1546,18 +1581,24 @@ class SqliteStorage implements StorageInterface
                     $where .= " AND {$latCol} <= ? AND {$latCol} >= ? AND {$lngCol} <= ? AND {$lngCol} >= ?";
                     array_push($params, $north, $south, $east, $west);
                 }
+                $select .= ", {$latCol} AS _centroid_lat, {$lngCol} AS _centroid_lng";
             }
 
             if (isset($geoFilters['distance_sort']) && isset($geoFilters['distance_sort']['from'])) {
                 $from = $geoFilters['distance_sort']['from'];
                 if (is_array($from)) { $from = new GeoPoint($from['lat'], $from['lng']); }
-                $distanceExpr = $this->getDistanceExpressionForLatLngColumns($from->getLatitude(), $from->getLongitude(), $latCol, $lngCol);
-                $select .= ", {$distanceExpr} AS distance";
+                // Add centroid for PHP-side distance computation and sorting
+                $select .= ", {$latCol} AS _centroid_lat, {$lngCol} AS _centroid_lng";
                 if (isset($geoFilters['max_distance'])) {
                     $maxD = (float)$geoFilters['max_distance'];
                     $u = strtolower($geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? 'm'));
                     if ($u==='km') $maxD*=1000.0; elseif (in_array($u,['mi','mile','miles'])) $maxD*=1609.344;
-                    $where .= " AND ({$distanceExpr}) <= ?"; $params[] = $maxD;
+                    $deg = $maxD / 111000.0;
+                    $where .= " AND {$latCol} BETWEEN ? AND ? AND {$lngCol} BETWEEN ? AND ?";
+                    $params[] = $from->getLatitude() - $deg;
+                    $params[] = $from->getLatitude() + $deg;
+                    $params[] = $from->getLongitude() - $deg;
+                    $params[] = $from->getLongitude() + $deg;
                 }
             }
 
