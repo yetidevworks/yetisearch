@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.2.0] - 2025-09-01
+## [2.0.0] - 2025-09-01
 
 ### Fuzzy Search UX & Performance
 - Added `fuzzy_last_token_only` to focus typo tolerance on the final term (ideal for as‑you‑type search).
