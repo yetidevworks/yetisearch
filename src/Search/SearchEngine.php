@@ -651,19 +651,31 @@ class SearchEngine implements SearchEngineInterface
     private function generateHighlights(array $document, string $query, int $length): array
     {
         $highlights = [];
-        // Use raw query terms for highlighting
-        $queryTokens = array_filter(explode(' ', strtolower($query)));
+        
+        // Build a token list from the raw query and any fuzzy variants
+        $tokens = array_filter(array_map('trim', explode(' ', mb_strtolower($query))));
+        
+        // If fuzzy processing generated variants, include those for highlighting
+        if (!empty($this->fuzzyTermMap)) {
+            foreach ($this->fuzzyTermMap as $term => $info) {
+                // Only include clean terms (skip wildcards or special chars)
+                if ($term === '' || strpos($term, '*') !== false || strpos($term, '"') !== false) {
+                    continue;
+                }
+                $tokens[] = $term;
+            }
+        }
+        
+        // De-duplicate and prefer longer tokens first to avoid nested highlights
+        $tokens = array_values(array_unique($tokens));
+        usort($tokens, function($a, $b) { return mb_strlen($b) <=> mb_strlen($a); });
         
         foreach ($document as $field => $value) {
-            if (!is_string($value) || empty($value)) {
-                continue;
-            }
+            if (!is_string($value) || $value === '') { continue; }
             
-            $snippet = $this->extractSnippet($value, $queryTokens, $length);
-            
-            if (!empty($snippet)) {
-                $highlightedSnippet = $this->highlightTerms($snippet, $queryTokens);
-                $highlights[$field] = $highlightedSnippet;
+            $snippet = $this->extractSnippet($value, $tokens, $length);
+            if ($snippet !== '') {
+                $highlights[$field] = $this->highlightTerms($snippet, $tokens);
             }
         }
         
