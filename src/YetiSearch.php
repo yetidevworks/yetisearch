@@ -22,7 +22,8 @@ class YetiSearch
     
     public function __construct(array $config = [], ?LoggerInterface $logger = null)
     {
-        $this->config = array_merge([
+        // Defaults
+        $defaults = [
             'storage' => [
                 'path' => 'yetisearch.db',
                 'external_content' => true
@@ -57,9 +58,33 @@ class YetiSearch
                 'trigram_size' => 3,
                 'trigram_threshold' => 0.5
             ]
-        ], $config);
+        ];
+        // Deep-merge user config over defaults so nested arrays keep defaults
+        $this->config = self::deepMergeArrays($defaults, $config);
         
         $this->logger = $logger;
+    }
+
+    private static function deepMergeArrays(array $base, array $overrides): array
+    {
+        foreach ($overrides as $key => $value) {
+            if (is_array($value) && isset($base[$key]) && is_array($base[$key])) {
+                // If both sides are arrays, merge recursively for associative keys.
+                // For numeric-indexed arrays, override entirely to avoid duplication.
+                $isAssoc = static function(array $arr): bool {
+                    foreach (array_keys($arr) as $k) { if (!is_int($k)) return true; }
+                    return false;
+                };
+                if ($isAssoc($base[$key]) || $isAssoc($value)) {
+                    $base[$key] = self::deepMergeArrays($base[$key], $value);
+                } else {
+                    $base[$key] = $value; // Replace numeric arrays
+                }
+            } else {
+                $base[$key] = $value;
+            }
+        }
+        return $base;
     }
     
     public function createIndex(string $name, array $options = []): Indexer

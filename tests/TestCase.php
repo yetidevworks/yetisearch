@@ -44,7 +44,9 @@ abstract class TestCase extends BaseTestCase
     {
         $defaultConfig = [
             'storage' => [
-                'path' => $this->getTestDbPath()
+                'path' => $this->getTestDbPath(),
+                // Tests expect legacy FTS schema (id column in FTS table)
+                'external_content' => false
             ],
             'analyzer' => [
                 'min_word_length' => 2,
@@ -52,11 +54,35 @@ abstract class TestCase extends BaseTestCase
                 'remove_stop_words' => true
             ],
             'search' => [
-                'cache_enabled' => false // Disable caching for tests
+                'cache_enabled' => false, // Disable caching for tests
+                // Ensure geo-only queries are not filtered by default in tests
+                'min_score' => 0.0
             ]
         ];
         
-        $config = array_merge_recursive($defaultConfig, $config);
+        // Use a deep merge that preserves defaults but allows overrides
+        $config = (function(array $base, array $overrides) {
+            $merge = function(array $a, array $b) use (&$merge): array {
+                foreach ($b as $k => $v) {
+                    if (is_array($v) && isset($a[$k]) && is_array($a[$k])) {
+                        // Replace numeric arrays; merge associative
+                        $isAssoc = static function(array $arr): bool {
+                            foreach (array_keys($arr) as $kk) { if (!is_int($kk)) return true; }
+                            return false;
+                        };
+                        if ($isAssoc($a[$k]) || $isAssoc($v)) {
+                            $a[$k] = $merge($a[$k], $v);
+                        } else {
+                            $a[$k] = $v;
+                        }
+                    } else {
+                        $a[$k] = $v;
+                    }
+                }
+                return $a;
+            };
+            return $merge($base, $overrides);
+        })($defaultConfig, $config);
         $this->search = new YetiSearch($config);
         
         return $this->search;

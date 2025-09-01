@@ -21,10 +21,6 @@ class GeoHaversineAndDatelineTest extends TestCase
                 'remove_stop_words' => false,
                 'disable_stop_words' => true,
             ],
-            // Ensure geo-only queries are not filtered by score
-            'search' => [
-                'min_score' => 0.0,
-            ],
         ]);
         $this->createTestIndex($this->index);
 

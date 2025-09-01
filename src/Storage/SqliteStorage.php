@@ -718,9 +718,15 @@ class SqliteStorage implements StorageInterface
             $results = [];
             $radiusFilter = null;
             
-            // Check if we need to do radius post-filtering
+            // Check if we need to do radius post-filtering (ensure meters)
             if (isset($geoFilters['near'])) {
-                $radiusFilter = $geoFilters['near']['radius'];
+                $radiusFilter = (float)$geoFilters['near']['radius'];
+                $units = $geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? null);
+                if (is_string($units)) {
+                    $u = strtolower($units);
+                    if ($u === 'km') { $radiusFilter *= 1000.0; }
+                    elseif ($u === 'mi' || $u === 'mile' || $u === 'miles') { $radiusFilter *= 1609.344; }
+                }
             }
             
             $rowCount = 0;
