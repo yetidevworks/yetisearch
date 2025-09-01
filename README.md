@@ -63,6 +63,23 @@ $results = $search->search('movies', $query, [
 ]);
 ```
 
+### CLI Demo
+
+Try an interactive demonstration that seeds a small dataset, prints suggestions, and shows as‑you‑type results:
+
+```bash
+php examples/type-ahead.php --interactive
+```
+
+Or run a single query:
+
+```bash
+php examples/type-ahead.php "anaki skywa"
+```
+
+Notes
+- Interactive mode updates results after each character (min length 2). On macOS/Linux, it uses raw TTY mode; on unsupported environments it falls back to line input.
+
 ## Weighted FTS and Prefix (Optional)
 
 You can enable multi-column FTS5 and weighted BM25 to boost important fields (e.g., title, tags). Prefix indexing improves strict prefix matches for type-ahead.
