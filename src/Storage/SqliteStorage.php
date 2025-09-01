@@ -54,6 +54,8 @@ class SqliteStorage implements StorageInterface
             $this->connection->exec('PRAGMA mmap_size = 268435456'); // 256MB memory map
             
             $this->initializeDatabase();
+            // Improve query planning on connect
+            $this->connection->exec('PRAGMA optimize');
 
             // Detect availability of math functions for Haversine
             try {
@@ -412,6 +414,56 @@ class SqliteStorage implements StorageInterface
         $effectiveLimit = (!empty($fieldWeights) && $hasSearchQuery) ? min(max($limit * 20, 200), 500) : $limit;
         
         
+        // Nearest-neighbor mode (k-NN): ignore text, order by distance asc, limit k
+        if (isset($geoFilters['nearest'])) {
+            $k = is_array($geoFilters['nearest']) ? (int)($geoFilters['nearest']['k'] ?? 10) : (int)$geoFilters['nearest'];
+            $k = max(1, min($k, 1000));
+            $from = $geoFilters['nearest']['from'] ?? ($geoFilters['distance_sort']['from'] ?? null);
+            if ($from && is_array($from)) { $from = new GeoPoint($from['lat'], $from['lng']); }
+            if ($from instanceof GeoPoint) {
+                $lat = $from->getLatitude(); $lng = $from->getLongitude();
+                $join = " INNER JOIN {$index}_id_map m ON m.string_id = d.id INNER JOIN {$index}_spatial s ON s.id = m.numeric_id";
+                $distanceExpr = $this->getDistanceExpression($lat, $lng);
+                $sql = "SELECT d.*, " . $distanceExpr . " AS distance FROM {$index} d" . $join . " WHERE 1=1";
+                $params = [];
+                if (isset($geoFilters['max_distance'])) {
+                    $maxD = (float)$geoFilters['max_distance'];
+                    $units = $geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? null);
+                    if (is_string($units)) { $u=strtolower($units); if ($u==='km') $maxD*=1000.0; elseif ($u==='mi'||$u==='mile'||$u==='miles') $maxD*=1609.344; }
+                    $sql .= " AND (".$distanceExpr.") <= ?"; $params[] = $maxD;
+                }
+                // Apply standard filters
+                foreach ($filters as $filter) {
+                    $field = $filter['field']; $operator = $filter['operator'] ?? '='; $value = $filter['value'];
+                    if (in_array($field, ['type','language','id','timestamp'])) { $sql .= " AND d.{$field} {$operator} ?"; $params[]=$value; }
+                }
+                $sql .= " ORDER BY distance ASC LIMIT ?"; $params[] = $k;
+
+                try {
+                    $stmt = $this->connection->prepare($sql); $stmt->execute($params);
+                    $results = [];
+                    while ($row = $stmt->fetch()) {
+                        $content = json_decode($row['content'], true);
+                        $results[] = [
+                            'id' => $row['id'],
+                            'score' => abs($row['rank'] ?? 0),
+                            'document' => $content,
+                            'metadata' => json_decode($row['metadata'], true),
+                            'language' => $row['language'],
+                            'type' => $row['type'],
+                            'timestamp' => $row['timestamp'],
+                            'distance' => (float)($row['distance'] ?? 0),
+                            'centroid_lat' => $row['_centroid_lat'] ?? null,
+                            'centroid_lng' => $row['_centroid_lng'] ?? null,
+                        ];
+                    }
+                    return $results;
+                } catch (\PDOException $e) {
+                    throw new StorageException("Search failed: " . $e->getMessage());
+                }
+            }
+        }
+
         if ($hasSearchQuery) {
             // Full text search with optional spatial filters
             // Compute bm25 weights per FTS column (if available)
@@ -508,6 +560,9 @@ class SqliteStorage implements StorageInterface
             // For PHP sorting, we need to fetch more results to ensure accurate pagination
             // Fetch up to 1000 results or 10x the requested limit, whichever is smaller
             $fetchLimit = min(1000, max($limit * 10, 100));
+            if (isset($geoFilters['candidate_cap'])) {
+                $fetchLimit = min($fetchLimit, max(10, (int)$geoFilters['candidate_cap']));
+            }
             
             // Apply basic ordering by rank to get most relevant results first
             $sql .= " ORDER BY rank ASC";
@@ -1142,6 +1197,7 @@ class SqliteStorage implements StorageInterface
         $spatialParams = [];
         $spatialJoin = '';
         $distanceSelect = '';
+        $centroidSelect = '';
         
         // Return empty spatial query if R-tree is not supported
         if (!$this->hasRTreeSupport()) {
@@ -1171,6 +1227,19 @@ class SqliteStorage implements StorageInterface
             $spatialJoin = " LEFT JOIN {$index}_id_map m ON m.string_id = d.id " .
                            "LEFT JOIN {$index}_spatial s ON s.id = m.numeric_id";
             $distanceSelect = ", " . $this->getDistanceExpression($lat, $lng) . " as distance";
+            $centroidSelect = ", ((s.minLat+s.maxLat)/2.0) AS _centroid_lat, ((s.minLng+s.maxLng)/2.0) AS _centroid_lng";
+
+            // Optional max_distance clamp (meters)
+            if (isset($geoFilters['max_distance'])) {
+                $maxD = (float)$geoFilters['max_distance'];
+                $units = $geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? null);
+                if (is_string($units)) {
+                    $u = strtolower($units);
+                    if ($u === 'km') $maxD *= 1000.0; elseif ($u === 'mi' || $u === 'mile' || $u==='miles') $maxD *= 1609.344;
+                }
+                $spatialSql .= " AND (" . $this->getDistanceExpression($lat, $lng) . ") <= ?";
+                $spatialParams[] = $maxD;
+            }
         }
         
         if (isset($geoFilters['near'])) {
@@ -1214,6 +1283,7 @@ class SqliteStorage implements StorageInterface
             $lng = $point->getLongitude();
             $distanceExpr = $this->getDistanceExpression($lat, $lng);
             $distanceSelect = ", " . $distanceExpr . " as distance";
+            $centroidSelect = ", ((s.minLat+s.maxLat)/2.0) AS _centroid_lat, ((s.minLng+s.maxLng)/2.0) AS _centroid_lng";
             // Also filter by radius in SQL
             $spatialSql .= " AND (" . $distanceExpr . ") <= ?";
             $spatialParams[] = (float)$radius; // radius expected in meters
@@ -1224,6 +1294,7 @@ class SqliteStorage implements StorageInterface
             
             $spatialJoin = " INNER JOIN {$index}_id_map m ON m.string_id = d.id " .
                            "INNER JOIN {$index}_spatial s ON s.id = m.numeric_id";
+            $centroidSelect = ", ((s.minLat+s.maxLat)/2.0) AS _centroid_lat, ((s.minLng+s.maxLng)/2.0) AS _centroid_lng";
             
             // R-tree intersection query with dateline handling
             $north = $bounds->getNorth();
@@ -1243,7 +1314,7 @@ class SqliteStorage implements StorageInterface
             'join' => $spatialJoin,
             'where' => $spatialSql,
             'params' => $spatialParams,
-            'select' => $distanceSelect
+            'select' => $distanceSelect . $centroidSelect
         ];
     }
     

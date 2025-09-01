@@ -1,4 +1,4 @@
-.PHONY: test test-verbose test-coverage test-watch help
+.PHONY: test test-verbose test-coverage test-watch help rg rg-files sd sd-preview sd-in
 
 # Default target
 help:
@@ -10,6 +10,13 @@ help:
 	@echo "  make test-watch     Watch for changes and re-run tests"
 	@echo "  make test-unit      Run only unit tests"
 	@echo "  make test-filter    Run specific test (use TEST=TestName)"
+	@echo ""
+	@echo "Developer Shortcuts:"
+	@echo "  make rg PATTERN=... [PATHS=\"src tests\"]             # ripgrep search"
+	@echo "  make rg-files PATTERN=... [PATHS=\"src tests\"]        # list files matching pattern"
+	@echo "  make sd FROM=... TO=... FILES=\"file1 file2\" [MODE=literal|regex]  # replace"
+	@echo "  make sd-preview FROM=... TO=... FILES=\"...\" [MODE=...]           # preview replace"
+	@echo "  make sd-in PATTERN=... FROM=... TO=... [PATHS=\"src tests\"] [MODE=...] # replace in files matching PATTERN"
 	@echo ""
 
 # Run all tests
@@ -40,3 +47,33 @@ test-filter:
 # Pretty output
 test-pretty:
 	@php test-runner.php
+
+# ripgrep helpers
+RG_PATHS?=src tests
+
+rg:
+	@rg -n "$(PATTERN)" $(PATHS)
+
+rg-files:
+	@rg -l "$(PATTERN)" $(PATHS)
+
+# sd helpers (MODE=literal|regex; default literal)
+sd:
+	@if [ -z "$(FROM)" ] || [ -z "$(TO)" ] || [ -z "$(FILES)" ]; then \
+		echo "Usage: make sd FROM=... TO=... FILES=\"file1 file2\" [MODE=literal|regex]"; exit 1; fi; \
+	flag="-s"; if [ "$(MODE)" = "regex" ]; then flag=""; fi; \
+	for f in $(FILES); do sd $$flag "$(FROM)" "$(TO)" "$$f"; done
+
+sd-preview:
+	@if [ -z "$(FROM)" ] || [ -z "$(TO)" ] || [ -z "$(FILES)" ]; then \
+		echo "Usage: make sd-preview FROM=... TO=... FILES=\"file1 file2\" [MODE=literal|regex]"; exit 1; fi; \
+	flag="-s"; if [ "$(MODE)" = "regex" ]; then flag=""; fi; \
+	for f in $(FILES); do sd -p $$flag "$(FROM)" "$(TO)" "$$f"; done
+
+sd-in:
+	@if [ -z "$(PATTERN)" ] || [ -z "$(FROM)" ] || [ -z "$(TO)" ]; then \
+		echo "Usage: make sd-in PATTERN=... FROM=... TO=... [PATHS=\"src tests\"] [MODE=literal|regex]"; exit 1; fi; \
+	files=`rg -l "$(PATTERN)" $(PATHS)`; \
+	if [ -z "$$files" ]; then echo "No files matched"; exit 0; fi; \
+	flag="-s"; if [ "$(MODE)" = "regex" ]; then flag=""; fi; \
+	for f in $$files; do sd $$flag "$(FROM)" "$(TO)" "$$f"; done

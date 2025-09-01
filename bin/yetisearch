@@ -1,0 +1,135 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+require_once __DIR__ . '/../vendor/autoload.php';
+
+use YetiSearch\YetiSearch;
+use YetiSearch\Geo\GeoPoint;
+use YetiSearch\Models\SearchQuery;
+
+function out($s = "") { fwrite(STDOUT, $s . PHP_EOL); }
+function err($s) { fwrite(STDERR, $s . PHP_EOL); }
+
+$argv0 = array_shift($argv);
+$cmd = $argv[0] ?? 'help';
+if ($cmd !== 'help') array_shift($argv);
+
+function parseOpts(array $args): array {
+  $opts = [];
+  foreach ($args as $a) {
+    if (substr($a,0,2) === '--') {
+      $eq = strpos($a, '=');
+      if ($eq !== false) { $k = substr($a,2,$eq-2); $v = substr($a,$eq+1); }
+      else { $k = substr($a,2); $v = true; }
+      $opts[$k] = $v;
+    } else {
+      $opts['_'][] = $a;
+    }
+  }
+  return $opts;
+}
+
+function usage(): void {
+  out("Yetisearch CLI");
+  out("Usage: bin/yetisearch <command> [--options]");
+  out("");
+  out("Commands:");
+  out("  help                             Show this help");
+  out("  search --index=IDX --query=Q [--limit=10] [--fuzzy=0|1] [--prefix=0|1] [--fuzzy-last=0|1] [--lat=.. --lng=.. --radius=.. --units=m|km|mi]");
+  out("  suggest --index=IDX --term=T [--limit=8]");
+  out("  knn --index=IDX --lat=.. --lng=.. --k=5 [--units=m|km|mi] [--max-distance=N]");
+  out("  facets-distance --index=IDX --lat=.. --lng=.. --ranges=1,5,10 [--units=m|km|mi]");
+  out("");
+  out("Common options:");
+  out("  --db=PATH             SQLite DB file (default: benchmarks/benchmark.db)");
+  out("  --synonyms=PATH       Synonyms JSON file (default: examples/synonyms.json)");
+  out("  --geo-units=m|km|mi   Default geo units");
+}
+
+if ($cmd === 'help' || in_array($cmd, ['-h','--help'])) { usage(); exit(0); }
+
+$opts = parseOpts($argv);
+
+$db = $opts['db'] ?? (__DIR__ . '/../benchmarks/benchmark.db');
+$syn = $opts['synonyms'] ?? (__DIR__ . '/../examples/synonyms.json');
+$geoUnits = $opts['geo-units'] ?? null;
+
+$config = [
+  'storage' => [ 'path' => $db ],
+  'search' => [
+    'enable_synonyms' => true,
+    'synonyms' => file_exists($syn) ? $syn : [],
+  ],
+];
+if ($geoUnits) { $config['search']['geo_units'] = $geoUnits; }
+
+$ys = new YetiSearch($config);
+
+switch ($cmd) {
+  case 'search': {
+    $index = $opts['index'] ?? null; $query = $opts['query'] ?? '';
+    if (!$index) { err('Missing --index'); exit(1); }
+    $limit = (int)($opts['limit'] ?? 10);
+    $fuzzy = (int)($opts['fuzzy'] ?? 0) === 1;
+    $prefix = (int)($opts['prefix'] ?? 0) === 1;
+    $fuzzyLast = (int)($opts['fuzzy-last'] ?? 0) === 1;
+    $geo = [];
+    if (isset($opts['lat'],$opts['lng'],$opts['radius'])) {
+      $geo['near'] = [ 'point' => ['lat'=>(float)$opts['lat'],'lng'=>(float)$opts['lng']], 'radius' => (float)$opts['radius'], 'units' => ($opts['units'] ?? 'm') ];
+      $geo['distance_sort'] = [ 'from' => ['lat'=>(float)$opts['lat'],'lng'=>(float)$opts['lng']], 'direction' => 'asc' ];
+    }
+    $res = $ys->search($index, $query, [
+      'limit' => $limit,
+      'fuzzy' => $fuzzy,
+      'prefix_last_token' => $prefix,
+      'fuzzy_last_token_only' => $fuzzyLast,
+      'geoFilters' => $geo,
+    ]);
+    out(json_encode($res, JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES));
+    break;
+  }
+  case 'suggest': {
+    $index = $opts['index'] ?? null; $term = $opts['term'] ?? '';
+    if (!$index || $term==='') { err('Missing --index or --term'); exit(1); }
+    $limit = (int)($opts['limit'] ?? 8);
+    $res = $ys->suggest($index, $term, ['limit' => $limit]);
+    out(json_encode($res, JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES));
+    break;
+  }
+  case 'knn': {
+    $index = $opts['index'] ?? null; if (!$index) { err('Missing --index'); exit(1); }
+    if (!isset($opts['lat'],$opts['lng'])) { err('Missing --lat/--lng'); exit(1); }
+    $k = (int)($opts['k'] ?? 5); $units = $opts['units'] ?? 'm';
+    $geo = [
+      'nearest' => $k,
+      'distance_sort' => ['from' => ['lat'=>(float)$opts['lat'],'lng'=>(float)$opts['lng']], 'direction' => 'asc'],
+      'units' => $units
+    ];
+    if (isset($opts['max-distance'])) { $geo['max_distance'] = (float)$opts['max-distance']; }
+    $res = $ys->search($index, '', [ 'limit' => $k, 'geoFilters' => $geo ]);
+    out(json_encode($res, JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES));
+    break;
+  }
+  case 'facets-distance': {
+    $index = $opts['index'] ?? null; if (!$index) { err('Missing --index'); exit(1); }
+    if (!isset($opts['lat'],$opts['lng'],$opts['ranges'])) { err('Missing --lat/--lng/--ranges'); exit(1); }
+    $ranges = array_map('floatval', explode(',', (string)$opts['ranges']));
+    $units = $opts['units'] ?? 'm';
+    $res = $ys->search($index, '', [
+      'limit' => 100,
+      'facets' => [
+        'distance' => [
+          'from' => ['lat'=>(float)$opts['lat'],'lng'=>(float)$opts['lng']],
+          'ranges' => $ranges,
+          'units' => $units
+        ]
+      ],
+      'geoFilters' => [ 'distance_sort' => ['from' => ['lat'=>(float)$opts['lat'],'lng'=>(float)$opts['lng']], 'direction' => 'asc'] ]
+    ]);
+    out(json_encode($res['facets']['distance'] ?? [], JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES));
+    break;
+  }
+  default:
+    usage(); exit(1);
+}

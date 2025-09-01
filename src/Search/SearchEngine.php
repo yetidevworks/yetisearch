@@ -26,6 +26,7 @@ class SearchEngine implements SearchEngineInterface
     private array $fuzzyTermMap = [];
     private ?array $indexedTermsCache = null;
     private float $indexedTermsCacheTime = 0;
+    private ?array $synonymsCache = null;
     
     public function __construct(
         StorageInterface $storage,
@@ -46,6 +47,9 @@ class SearchEngine implements SearchEngineInterface
             'enable_fuzzy' => true,
             'fuzzy_distance' => 2,
             'enable_synonyms' => true,
+            'synonyms' => [],              // array or JSON file path
+            'synonyms_case_sensitive' => false,
+            'synonyms_max_expansions' => 3,
             'enable_suggestions' => true,
             'cache_ttl' => 300,
             'result_fields' => ['title', 'content', 'excerpt', 'url', 'author', 'tags', 'route'],
@@ -329,7 +333,7 @@ class SearchEngine implements SearchEngineInterface
         }
         
         if ($this->config['enable_synonyms']) {
-            $processedTokens = $this->expandSynonyms($processedTokens);
+            $processedTokens = $this->expandSynonyms($processedTokens, $query->getLanguage());
         }
         
         // For SQLite FTS5, we need to properly format the query
@@ -348,6 +352,17 @@ class SearchEngine implements SearchEngineInterface
         }
         
         // Build query that prioritizes exact matches
+        // Include synonyms (if any) even when fuzzy is disabled
+        if (($this->config['enable_synonyms'] ?? false) && !$query->isFuzzy() && !empty($this->config['synonyms'])) {
+            $additional = [];
+            foreach ($processedTokens as $t) {
+                if (!in_array($t, $exactTokens, true)) { $additional[] = $t; }
+            }
+            if (!empty($additional)) {
+                $exactTokens = array_values(array_unique(array_merge($exactTokens, $additional)));
+                $fuzzyTokens = [];
+            }
+        }
         if ($query->isFuzzy() && !empty($fuzzyTokens)) {
             // Put exact terms first, then fuzzy variations
             // This should give higher scores to exact matches due to BM25 scoring
@@ -357,14 +372,24 @@ class SearchEngine implements SearchEngineInterface
                 $exactTokens[$lastIdx] .= '*';
             }
             $allTokens = array_unique(array_merge($exactTokens, $fuzzyTokens));
-            $processedQuery = implode(' OR ', $allTokens);
+            if (count($tokens) > 1) {
+                $exactPhrase = '"' . implode(' ', $tokens) . '"';
+                $processedQuery = $exactPhrase . ' OR ' . implode(' OR ', $allTokens);
+            } else {
+                $processedQuery = implode(' OR ', $allTokens);
+            }
         } else {
-            // No fuzzy search - just use exact tokens
+            // No fuzzy search - use exact tokens (+ synonyms), but build phrase from original tokens only
             if (($this->config['prefix_last_token'] ?? false) && !empty($exactTokens)) {
                 $lastIdx = count($exactTokens) - 1;
                 $exactTokens[$lastIdx] .= '*';
             }
-            $processedQuery = implode(' ', $exactTokens);
+            if (count($tokens) > 1) {
+                $basePhrase = '"' . implode(' ', $tokens) . '"';
+                $processedQuery = $basePhrase . ' OR ' . implode(' OR ', $exactTokens);
+            } else {
+                $processedQuery = implode(' ', $exactTokens);
+            }
         }
         
         // Debug: Log the processed query
@@ -498,9 +523,25 @@ class SearchEngine implements SearchEngineInterface
                 'metadata' => $result['metadata'] ?? []
             ];
             
-            // Add distance if present
+            // Add distance if present and attach optional units/bearing metadata
             if (isset($result['distance'])) {
                 $resultData['distance'] = $result['distance'];
+                $geoFilters = $query->getGeoFilters();
+                $units = strtolower($geoFilters['units'] ?? ($this->config['geo_units'] ?? 'm'));
+                $resultData['metadata']['distance_units'] = in_array($units, ['km','mi']) ? $units : 'm';
+                if (isset($result['centroid_lat']) && isset($result['centroid_lng'])) {
+                    $from = $geoFilters['distance_sort']['from'] ?? ($geoFilters['near']['point'] ?? null);
+                    if ($from instanceof \YetiSearch\Geo\GeoPoint) {
+                        $fromLat = $from->getLatitude(); $fromLng = $from->getLongitude();
+                    } elseif (is_array($from) && isset($from['lat'],$from['lng'])) {
+                        $fromLat = (float)$from['lat']; $fromLng = (float)$from['lng'];
+                    } else { $fromLat = $fromLng = null; }
+                    if ($fromLat !== null) {
+                        $bearing = $this->computeBearing($fromLat, $fromLng, (float)$result['centroid_lat'], (float)$result['centroid_lng']);
+                        $resultData['metadata']['bearing'] = $bearing;
+                        $resultData['metadata']['bearing_cardinal'] = $this->bearingToCardinal($bearing);
+                    }
+                }
             }
             
             $processedResult = new SearchResult($resultData);
@@ -516,6 +557,24 @@ class SearchEngine implements SearchEngineInterface
         }
         
         return $processedResults;
+    }
+
+    private function computeBearing(float $lat1, float $lng1, float $lat2, float $lng2): float
+    {
+        $phi1 = deg2rad($lat1); $phi2 = deg2rad($lat2);
+        $dlambda = deg2rad($lng2 - $lng1);
+        $y = sin($dlambda) * cos($phi2);
+        $x = cos($phi1)*sin($phi2) - sin($phi1)*cos($phi2)*cos($dlambda);
+        $theta = atan2($y, $x);
+        $deg = rad2deg($theta);
+        return fmod(($deg + 360.0), 360.0);
+    }
+
+    private function bearingToCardinal(float $bearing): string
+    {
+        $dirs = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+        $idx = (int)round(($bearing % 360) / 22.5) % 16;
+        return $dirs[$idx];
     }
     
     private function calculateFuzzyPenalty(array $result, SearchQuery $query): float
@@ -735,6 +794,58 @@ class SearchEngine implements SearchEngineInterface
         $facets = [];
         
         foreach ($query->getFacets() as $field => $options) {
+            // Distance facet: bucket results by distance thresholds from a point
+            if ($field === 'distance') {
+                $from = $options['from'] ?? null;
+                if ($from instanceof \YetiSearch\Geo\GeoPoint) {
+                    $fromArr = $from->toArray();
+                } elseif (is_array($from) && isset($from['lat'],$from['lng'])) {
+                    $fromArr = ['lat'=>(float)$from['lat'],'lng'=>(float)$from['lng']];
+                } else {
+                    continue;
+                }
+                $ranges = $options['ranges'] ?? [];
+                if (empty($ranges) || !is_array($ranges)) { continue; }
+                $units = strtolower($options['units'] ?? ($this->config['geo_units'] ?? 'm'));
+                $factor = 1.0; if ($units==='km') $factor=1000.0; elseif (in_array($units,['mi','mile','miles'])) $factor=1609.344;
+
+                $facetQuery = [
+                    'query' => $query->getQuery(),
+                    'filters' => $query->getFilters(),
+                    'language' => $query->getLanguage(),
+                    'limit' => 1000,
+                    'offset' => 0,
+                    'geoFilters' => [
+                        'distance_sort' => ['from' => $fromArr, 'direction' => 'ASC']
+                    ]
+                ];
+                try {
+                    $results = $this->storage->search($this->indexName, $facetQuery);
+                    $buckets = [];
+                    foreach ($ranges as $r) { $buckets[(float)$r]=0; }
+                    $buckets[INF] = 0;
+                    foreach ($results as $row) {
+                        $dist = (float)($row['distance'] ?? 0.0);
+                        $dUnits = $dist / $factor;
+                        $placed = false;
+                        foreach ($ranges as $r) {
+                            if ($dUnits <= (float)$r) { $buckets[(float)$r]++; $placed=true; break; }
+                        }
+                        if (!$placed) { $buckets[INF]++; }
+                    }
+                    $facetResults = [];
+                    foreach ($ranges as $r) {
+                        $facetResults[] = ['value' => sprintf('<= %s %s', $r, $units), 'count' => $buckets[(float)$r] ?? 0];
+                    }
+                    if (($buckets[INF] ?? 0) > 0) {
+                        $facetResults[] = ['value' => sprintf('> %s %s', end($ranges), $units), 'count' => $buckets[INF]];
+                    }
+                    $facets['distance'] = $facetResults;
+                } catch (\Exception $e) {
+                    $this->logger->warning('Failed to compute distance facet', ['error' => $e->getMessage()]);
+                }
+                continue;
+            }
             $facetQuery = [
                 'query' => $query->getQuery(),
                 'filters' => $query->getFilters(),
@@ -1071,11 +1182,51 @@ class SearchEngine implements SearchEngineInterface
         return array_unique($variations);
     }
     
-    private function expandSynonyms(array $tokens): array
+    private function expandSynonyms(array $tokens, ?string $language = null): array
     {
-        // Placeholder for synonym expansion
-        // This would load from a synonym dictionary
-        return $tokens;
+        if ($this->synonymsCache === null) {
+            $map = $this->config['synonyms'] ?? [];
+            if (is_string($map) && file_exists($map)) {
+                try {
+                    $json = file_get_contents($map);
+                    $decoded = json_decode($json, true);
+                    if (is_array($decoded)) { $map = $decoded; }
+                } catch (\Throwable $e) {
+                    $this->logger->warning('Failed to load synonyms file', ['file' => $map, 'error' => $e->getMessage()]);
+                    $map = [];
+                }
+            }
+            $this->synonymsCache = is_array($map) ? $map : [];
+        }
+
+        $map = $this->synonymsCache;
+        if ($language && isset($map[$language]) && is_array($map[$language])) {
+            $map = $map[$language];
+        }
+        if (!is_array($map) || empty($map)) { return $tokens; }
+        $caseSensitive = (bool)($this->config['synonyms_case_sensitive'] ?? false);
+        $perTermMax = (int)($this->config['synonyms_max_expansions'] ?? 3);
+        $totalCap = max(5, $perTermMax * 10);
+
+        $expanded = $tokens;
+        $totalAdded = 0;
+        foreach ($tokens as $t) {
+            $key = $caseSensitive ? $t : mb_strtolower($t);
+            $syns = $map[$key] ?? null;
+            if (!is_array($syns) || empty($syns)) { continue; }
+            $addedForTerm = 0;
+            foreach ($syns as $s) {
+                if ($addedForTerm >= $perTermMax || $totalAdded >= $totalCap) { break; }
+                $s = (string)$s;
+                $tokenToAdd = (strpos($s, ' ') !== false) ? '"' . $s . '"' : $s;
+                if (!in_array($tokenToAdd, $expanded, true)) {
+                    $expanded[] = $tokenToAdd;
+                    $addedForTerm++; $totalAdded++;
+                }
+            }
+            if ($totalAdded >= $totalCap) { break; }
+        }
+        return $expanded;
     }
     
     private function generateSuggestion(string $query): ?string

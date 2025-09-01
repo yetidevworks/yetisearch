@@ -22,15 +22,27 @@
 - SQL radius filtering: `near` now filters by radius in SQL using the computed distance.
 - Dateline handling: bounds crossing the antimeridian (west > east) correctly include both sides.
 - Tests: added integration tests for Haversine accuracy and dateline‑crossing bounds.
+- k‑Nearest Neighbors (k‑NN): `geoFilters.nearest` returns the k closest documents by distance, with optional `max_distance` clamp and units.
+- Distance facets: request `facets.distance` with `from`, `ranges`, and optional `units` to get bucketed counts (e.g., `<= 1 km`, `<= 5 km`, ...).
+- Candidate cap: `geoFilters.candidate_cap` limits R-tree candidates for PHP-side distance sorting.
+- Result metadata: add `distance_units`, `bearing`, and `bearing_cardinal` (when distance context is available).
 
 ### Docs & Examples
 - README: Type‑Ahead Setup, Weighted FTS + Prefix sections with examples.
 - Added `docs/architecture-overview.md`.
 - Added `AGENTS.md` contributor guide.
+- README (Geo): Units, composite scoring, distance facets, and k‑NN usage.
+- Examples: `examples/geo-facets-knn.php` (distance facets + nearest demo).
+- Benchmarks: `benchmarks/geo-benchmark.php` now supports units and `iters`; optional facets output via extra arg.
 
 ### Suggestions
 - Smarter ranking for `suggest()`: aggregates across variants, boosts titles that contain or start with the variant.
 - New options: `limit`, `per_variant`, `title_boost`, `prefix_boost`.
+
+### Synonyms
+- Query‑time synonyms expansion: enable via `search.enable_synonyms` and provide a map in `search.synonyms` (array or JSON file).
+- Supports multi‑word synonyms (added as quoted phrases), case‑insensitive by default.
+- Limits expansions with `search.synonyms_max_expansions` to protect performance.
 
 ### Tests & Benchmarks
 - Integration tests for fuzzy algorithms and as‑you‑type mode.

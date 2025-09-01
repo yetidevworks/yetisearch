@@ -2,5 +2,7 @@
 /.phpunit.cache
 /build
 /benchmarks/benchmark.db
+/benchmarks/geo-bench.db
 /benchmarks/movies.json
 /.claude
+/AGENTS.md

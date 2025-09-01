@@ -1,0 +1,8 @@
+{
+  "nyc": ["new york", "new york city"],
+  "la": ["los angeles"],
+  "sf": ["san francisco", "sfo"],
+  "phx": ["phoenix"],
+  "vegas": ["las vegas"]
+}
+

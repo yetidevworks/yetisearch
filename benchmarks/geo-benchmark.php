@@ -8,8 +8,10 @@ use YetiSearch\Models\SearchQuery;
 
 $count = (int)($argv[1] ?? 50000);
 $units = strtolower((string)($argv[2] ?? 'm')); // m | km | mi
+$iters = (int)($argv[3] ?? 1);
+$doFacets = (string)($argv[4] ?? '') === 'facets';
 if (!in_array($units, ['m','km','mi'], true)) { $units = 'm'; }
-echo "Geo Benchmark (points: {$count}, units: {$units})\n";
+echo "Geo Benchmark (points: {$count}, units: {$units}, iters: {$iters})\n";
 
 $ys = new YetiSearch([
   'storage' => ['path' => __DIR__ . '/geo-bench.db'],
@@ -57,11 +59,15 @@ foreach ($radiiUnits as $ru) {
     $q = new SearchQuery('');
     $q->near($center, $r)->sortByDistance($center, 'asc')->limit(1000);
 
-    $start = microtime(true);
-    $results = $engine->search($q);
-    $ms = (microtime(true) - $start) * 1000;
-    $shown = count($results->getResults());
-    $total = $results->getTotalCount();
+    $msAcc = 0.0; $shown=0; $total=0;
+    for ($i=0; $i < max(1,$iters); $i++) {
+        $start = microtime(true);
+        $results = $engine->search($q);
+        $msAcc += (microtime(true) - $start) * 1000;
+        $shown = count($results->getResults());
+        $total = $results->getTotalCount();
+    }
+    $ms = $msAcc / max(1,$iters);
     if ($units === 'm') {
         echo sprintf("radius=%6dm  shown=%5d  total=%5d  time=%.1fms\n", $r, $shown, $total, $ms);
     } else {
@@ -70,3 +76,23 @@ foreach ($radiiUnits as $ru) {
 }
 
 echo "Done. DB: " . realpath(__DIR__ . '/geo-bench.db') . "\n";
+
+if ($doFacets) {
+    echo "\nDistance facets (demo bands)\n";
+    $ranges = $units === 'm' ? [1000, 5000, 10000, 20000] : [1, 5, 10, 20];
+    $faceted = $ys->search($index, '', [
+      'facets' => [
+        'distance' => [
+          'from' => $center->toArray(),
+          'ranges' => ($units === 'm' ? [1,5,10,20] : [1,5,10,20]),
+          'units' => $units
+        ]
+      ],
+      'geoFilters' => [
+        'distance_sort' => ['from' => $center->toArray(), 'direction' => 'asc']
+      ]
+    ]);
+    foreach (($faceted['facets']['distance'] ?? []) as $b) {
+      echo " - {$b['value']}: {$b['count']}\n";
+    }
+}

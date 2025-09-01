@@ -47,6 +47,8 @@ A powerful, pure-PHP search engine library with advanced full-text search capabi
 - [Type-Ahead Setup](#type-ahead-setup)
 - [Weighted FTS and Prefix (Optional)](#weighted-fts-and-prefix-optional)
  - [Suggestions](#suggestions)
+ - [Synonyms](#synonyms)
+ - [CLI](#cli)
 
 ## Type-Ahead Setup
 
@@ -136,6 +138,77 @@ Tips
 - Pair with `['fuzzy'=>true,'fuzzy_last_token_only'=>true,'prefix_last_token'=>true]` on search for a smooth type‑ahead experience.
 - For short terms (names/titles), try `fuzzy_algorithm='jaro_winkler'`; for general text, use `trigram`.
 
+
+
+## Synonyms
+
+Enable query‑time synonyms expansion to improve recall for known aliases and abbreviations.
+
+Config (array or JSON file):
+```php
+$search = new YetiSearch([
+  'search' => [
+    'enable_synonyms' => true,
+    // Flat map or per‑language: ['en' => ['nyc' => ['new york','new york city']]]
+    'synonyms' => [
+      'nyc' => ['new york', 'new york city'],
+      'la'  => ['los angeles']
+    ],
+    'synonyms_case_sensitive' => false,
+    'synonyms_max_expansions' => 3,
+  ]
+]);
+```
+
+Behavior
+- Expands tokens before building the FTS query. Multi‑word synonyms are added as quoted phrases.
+- Exact phrase is built from the original tokens; synonyms are ORed in. Fuzzy still works independently.
+- Use a small, targeted list to avoid noise; adjust `synonyms_max_expansions` if needed.
+
+## CLI
+
+A simple CLI is included for quick testing of search, suggestions, geo nearest, and distance facets.
+
+Install deps if you haven’t:
+```bash
+composer install
+chmod +x bin/yetisearch
+```
+
+Examples
+- Search (as‑you‑type style):
+```bash
+bin/yetisearch search \
+  --index=movies --query="star wrs" --limit=5 \
+  --fuzzy=1 --fuzzy-last=1 --prefix=1
+```
+
+- Suggestions:
+```bash
+bin/yetisearch suggest --index=movies --term=matr --limit=5
+```
+
+- k‑NN nearest 5 around NYC (km):
+```bash
+bin/yetisearch knn --index=places --lat=40.7128 --lng=-74.0060 --k=5 --units=km --max-distance=10
+```
+
+- Distance facets (<= 1/3/5 km):
+```bash
+bin/yetisearch facets-distance --index=places --lat=40.7128 --lng=-74.0060 --ranges=1,3,5 --units=km
+```
+
+Synonyms example
+```bash
+bin/yetisearch search \
+  --index=places --query="nyc coffee" --limit=5 \
+  --synonyms=examples/synonyms.json
+```
+
+Common flags
+- `--db=PATH` (default `benchmarks/benchmark.db`)
+- `--synonyms=PATH` (default `examples/synonyms.json`)
+- `--geo-units=m|km|mi` (default meters)
 
 ## Features
 
@@ -1032,6 +1105,47 @@ $search = new YetiSearch([
 Guidance
 - Start with `distance_weight` between 0.3–0.6; increase if proximity should dominate when text scores are similar.
 - Tune `distance_decay_k` by typical search radius; e.g., 0.005–0.02 for city‑scale queries.
+
+### Distance Facets
+
+Bucket results by distance from a point to power UI filters.
+
+```php
+// Request distance facets (ranges in chosen units)
+$faceted = $search->search('places', 'coffee', [
+  'facets' => [
+    'distance' => [
+      'from' => ['lat' => 40.7128, 'lng' => -74.0060],
+      'ranges' => [1, 5, 10],   // thresholds
+      'units' => 'km'           // optional (default 'm')
+    ]
+  ],
+  'geoFilters' => [
+    'distance_sort' => ['from' => ['lat'=>40.7128,'lng'=>-74.0060], 'direction' => 'asc']
+  ]
+]);
+
+// Read facet buckets
+foreach (($faceted['facets']['distance'] ?? []) as $bucket) {
+  echo $bucket['value'] . ': ' . $bucket['count'] . "\n"; // e.g., "<= 1 km: 12"
+}
+```
+
+### k‑Nearest Neighbors (k‑NN)
+
+Return the k nearest documents by distance, optionally clamped by max distance:
+
+```php
+$knn = $search->search('places', '', [
+  'geoFilters' => [
+    'nearest' => 5, // or ['k' => 5]
+    'distance_sort' => ['from' => ['lat'=>40.7128,'lng'=>-74.0060], 'direction' => 'asc'],
+    'max_distance' => 10, // optional clamp
+    'units' => 'km'       // interpret nearest/max_distance in km
+  ],
+  'limit' => 5
+]);
+```
 
 YetiSearch follows a modular architecture with clear separation of concerns:
 
