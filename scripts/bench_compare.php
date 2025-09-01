@@ -157,3 +157,22 @@ if (file_exists($resultsMd)) {
     }
     file_put_contents($resultsMd, $md);
 }
+
+// Also emit machine-readable JSON for automation
+$jsonOut = __DIR__ . '/../benchmarks/benchmark-compare.json';
+$payload = [
+    'indexing' => [
+        'before' => ['total_time' => $bt, 'index_time' => $bi, 'rate' => $br, 'memory' => $bm, 'peak' => $bp],
+        'after'  => ['total_time' => $at, 'index_time' => $ai, 'rate' => $ar, 'memory' => $am, 'peak' => $ap],
+        'delta'  => ['total_time' => $at - $bt, 'index_time' => $ai - $bi, 'rate' => $ar - $br, 'memory' => $am - $bm, 'peak' => $ap - $bp],
+    ],
+    'search' => [
+        'standard' => $beforeSearch['standard'] ?? [],
+        'fuzzy'    => $beforeSearch['fuzzy'] ?? [],
+        'standard_after' => $afterSearch['standard'] ?? [],
+        'fuzzy_after'    => $afterSearch['fuzzy'] ?? [],
+    ],
+    'files' => [ 'before' => $before, 'after' => $after ],
+];
+file_put_contents($jsonOut, json_encode($payload, JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES));
+echo "JSON written: $jsonOut\n";

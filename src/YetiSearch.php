@@ -253,8 +253,39 @@ class YetiSearch
             $searchQuery->language($options['language']);
         }
         
-        if (isset($options['fuzzy'])) {
-            $searchQuery->fuzzy($options['fuzzy'], $options['fuzziness'] ?? 0.8);
+        // Fuzzy config: accept boolean or nested array with aliases
+        if (array_key_exists('fuzzy', $options)) {
+            $f = $options['fuzzy'];
+            if (is_bool($f)) {
+                $searchQuery->fuzzy($f, $options['fuzziness'] ?? 0.8);
+            } elseif (is_array($f)) {
+                // Enabled flag
+                $enabled = (bool)($f['enabled'] ?? true);
+                $searchQuery->fuzzy($enabled, $f['fuzziness'] ?? ($options['fuzziness'] ?? 0.8));
+                // Map nested keys to engine config
+                $map = [
+                    'algorithm' => 'fuzzy_algorithm',
+                    'last_token_only' => 'fuzzy_last_token_only',
+                    'prefix_last_token' => 'prefix_last_token',
+                    'penalty' => 'fuzzy_score_penalty',
+                ];
+                foreach ($map as $k => $to) {
+                    if (array_key_exists($k, $f)) { $fuzzyOptions[$to] = $f[$k]; }
+                }
+                if (isset($f['jaro_winkler'])) {
+                    $jw = $f['jaro_winkler'];
+                    if (isset($jw['threshold'])) { $fuzzyOptions['jaro_winkler_threshold'] = $jw['threshold']; }
+                    if (isset($jw['prefix_scale'])) { $fuzzyOptions['jaro_winkler_prefix_scale'] = $jw['prefix_scale']; }
+                }
+                if (isset($f['levenshtein']['threshold'])) {
+                    $fuzzyOptions['levenshtein_threshold'] = $f['levenshtein']['threshold'];
+                }
+                if (isset($f['trigram'])) {
+                    $tg = $f['trigram'];
+                    if (isset($tg['threshold'])) { $fuzzyOptions['trigram_threshold'] = $tg['threshold']; }
+                    if (isset($tg['size'])) { $fuzzyOptions['trigram_size'] = $tg['size']; }
+                }
+            }
         }
         
         if (isset($options['highlight'])) {

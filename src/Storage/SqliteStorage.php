@@ -763,7 +763,16 @@ class SqliteStorage implements StorageInterface
         }
         
         try {
-            
+            // Debug mode: return SQL and params without executing
+            if (!empty($query['_debug_sql'])) {
+                return [
+                    '_sql' => $sql,
+                    '_params' => $params,
+                    '_uses_php_sort' => $needsPhpSort,
+                    '_spatial_select' => $spatial['select'],
+                ];
+            }
+
             $stmt = $this->connection->prepare($sql);
             $stmt->execute($params);
             

@@ -38,6 +38,9 @@ function usage(): void {
   out("  help                             Show this help");
   out("  search --index=IDX --query=Q [--limit=10] [--fuzzy=0|1] [--prefix=0|1] [--fuzzy-last=0|1] [--lat=.. --lng=.. --radius=.. --units=m|km|mi]");
   out("  suggest --index=IDX --term=T [--limit=8]");
+  out("  index:rebuild --index=IDX             Rebuild FTS for index from stored docs");
+  out("  index:verify --index=IDX              Verify index tables and counts");
+  out("  debug:query --index=IDX --query=Q     Print SQL + params for search");
   out("  knn --index=IDX --lat=.. --lng=.. --k=5 [--units=m|km|mi] [--max-distance=N]");
   out("  facets-distance --index=IDX --lat=.. --lng=.. --ranges=1,5,10 [--units=m|km|mi]");
   out("  migrate-external --index=IDX            Migrate a legacy index to external-content schema");
@@ -86,6 +89,61 @@ switch ($cmd) {
     $storage = $m->invoke($ys2);
     $storage->migrateToExternalContent($index);
     out("Index '$index' migrated to external-content.");
+    break;
+  }
+  case 'index:rebuild': {
+    $index = $opts['index'] ?? null; if (!$index) { err('Missing --index'); exit(1); }
+    $ys2 = new YetiSearch($config);
+    $ref = new ReflectionClass($ys2); $m = $ref->getMethod('getStorage'); $m->setAccessible(true);
+    $storage = $m->invoke($ys2);
+    $storage->rebuildFts($index);
+    out("Rebuilt FTS for '$index'.");
+    break;
+  }
+  case 'index:verify': {
+    $index = $opts['index'] ?? null; if (!$index) { err('Missing --index'); exit(1); }
+    $ys2 = new YetiSearch($config);
+    $ref = new ReflectionClass($ys2); $m = $ref->getMethod('getStorage'); $m->setAccessible(true);
+    $storage = $m->invoke($ys2);
+    // Use PDO directly
+    $sref = new ReflectionClass($storage);
+    $p = $sref->getProperty('connection'); $p->setAccessible(true);
+    /** @var PDO $pdo */
+    $pdo = $p->getValue($storage);
+    $schemaMode = (new ReflectionMethod($storage, 'getSchemaMode'))->invoke($storage, $index);
+    $exists = $pdo->query("SELECT name FROM sqlite_master WHERE type='table' AND name='{$index}'")->fetchColumn();
+    $ftsExists = $pdo->query("SELECT name FROM sqlite_master WHERE type='table' AND name='{$index}_fts'")->fetchColumn();
+    $docCount = (int)$pdo->query("SELECT COUNT(*) FROM {$index}")->fetchColumn();
+    $ftsCount = (int)$pdo->query("SELECT COUNT(*) FROM {$index}_fts")->fetchColumn();
+    $ok = ($exists && $ftsExists && $docCount >= 0 && $ftsCount >= 0);
+    $status = [ 'index' => $index, 'schema' => $schemaMode, 'docs' => $docCount, 'fts_rows' => $ftsCount, 'ok' => $ok ];
+    out(json_encode($status, JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES));
+    break;
+  }
+  case 'debug:query': {
+    $index = $opts['index'] ?? null; $queryStr = $opts['query'] ?? '';
+    if (!$index) { err('Missing --index'); exit(1); }
+    $geo = [];
+    if (isset($opts['lat'],$opts['lng'])) {
+      if (isset($opts['radius'])) {
+        $geo['near'] = [ 'point' => ['lat'=>(float)$opts['lat'],'lng'=>(float)$opts['lng']], 'radius' => (float)$opts['radius'], 'units' => ($opts['units'] ?? 'm') ];
+      }
+      $geo['distance_sort'] = [ 'from' => ['lat'=>(float)$opts['lat'],'lng'=>(float)$opts['lng']], 'direction' => ($opts['direction'] ?? 'asc') ];
+    }
+    $ys2 = new YetiSearch($config);
+    $ref = new ReflectionClass($ys2); $m = $ref->getMethod('getStorage'); $m->setAccessible(true);
+    $storage = $m->invoke($ys2);
+    $debug = $storage->search($index, [ 'query' => $queryStr, 'limit' => 10, 'geoFilters' => $geo, '_debug_sql' => true ]);
+    // Try EXPLAIN QUERY PLAN
+    $sref = new ReflectionClass($storage); $p = $sref->getProperty('connection'); $p->setAccessible(true);
+    /** @var PDO $pdo */ $pdo = $p->getValue($storage);
+    $plan = [];
+    try {
+      $stmt = $pdo->prepare('EXPLAIN QUERY PLAN ' . $debug['_sql']);
+      $stmt->execute($debug['_params']);
+      while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) { $plan[] = $row; }
+    } catch (Throwable $e) {}
+    out(json_encode([ 'sql' => $debug['_sql'], 'params' => $debug['_params'], 'uses_php_sort' => $debug['_uses_php_sort'], 'plan' => $plan ], JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES));
     break;
   }
   case 'search': {
