@@ -164,37 +164,74 @@ class SearchEngine implements SearchEngineInterface
     public function suggest(string $term, array $options = []): array
     {
         $this->logger->debug('Generating suggestions', ['term' => $term]);
-        
-        $suggestions = [];
-        
+
+        $limit = (int)($options['limit'] ?? 10);
+        $perVariant = (int)($options['per_variant'] ?? 5);
+        $boostTitle = (float)($options['title_boost'] ?? 100.0);
+        $boostPrefix = (float)($options['prefix_boost'] ?? 25.0);
+
         $fuzzyTerms = $this->generateFuzzyVariations($term);
-        
-        foreach ($fuzzyTerms as $fuzzyTerm) {
-            $query = new SearchQuery($fuzzyTerm);
-            $query->limit(5);
-            
+
+        // Aggregate by suggestion text
+        $agg = [];
+        $seen = [];
+
+        foreach ($fuzzyTerms as $variant) {
+            $query = new SearchQuery($variant);
+            $query->limit($perVariant);
+
             try {
                 $results = $this->search($query);
-                
-                foreach ($results as $result) {
-                    $title = $result->get('title', '');
-                    if (!empty($title) && !in_array($title, $suggestions)) {
-                        $suggestions[] = [
+
+                foreach ($results as $res) {
+                    $title = $res->get('title', '');
+                    if (empty($title)) { continue; }
+
+                    // De-dup per variant-result pair
+                    $key = strtolower($title);
+                    if (isset($seen[$variant][$key])) { continue; }
+                    $seen[$variant][$key] = true;
+
+                    $score = (float)$res->getScore();
+
+                    // Prefer titles that contain or start with the (cleaned) variant
+                    $titleLower = strtolower($title);
+                    $variantLower = strtolower($variant);
+                    if (strpos($titleLower, $variantLower) !== false) {
+                        $score += $boostTitle;
+                    }
+                    if (strpos($titleLower, $variantLower) === 0) {
+                        $score += $boostPrefix;
+                    }
+
+                    if (!isset($agg[$key])) {
+                        $agg[$key] = [
                             'text' => $title,
-                            'score' => $result->getScore()
+                            'score' => $score,
+                            'count' => 1,
                         ];
+                    } else {
+                        $agg[$key]['score'] = max($agg[$key]['score'], $score);
+                        $agg[$key]['count'] += 1;
                     }
                 }
             } catch (\Exception $e) {
-                // Continue with other suggestions
+                // Continue on errors per variant
+                $this->logger->debug('Suggest variant failed', ['variant' => $variant, 'error' => $e->getMessage()]);
+                continue;
             }
         }
-        
-        usort($suggestions, function ($a, $b) {
-            return $b['score'] <=> $a['score'];
+
+        // Rank by frequency first, then score
+        $suggestions = array_values($agg);
+        usort($suggestions, function($a, $b) {
+            if ($a['count'] === $b['count']) {
+                return $b['score'] <=> $a['score'];
+            }
+            return $b['count'] <=> $a['count'];
         });
-        
-        return array_slice($suggestions, 0, $options['limit'] ?? 10);
+
+        return array_slice($suggestions, 0, $limit);
     }
     
     public function count(SearchQuery $query): int

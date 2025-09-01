@@ -44,6 +44,7 @@ A powerful, pure-PHP search engine library with advanced full-text search capabi
 - [License](#license)
 - [Type-Ahead Setup](#type-ahead-setup)
 - [Weighted FTS and Prefix (Optional)](#weighted-fts-and-prefix-optional)
+ - [Suggestions](#suggestions)
 
 ## Type-Ahead Setup
 
@@ -93,6 +94,28 @@ Migration helper:
 ```bash
 php scripts/migrate_fts.php --db=benchmarks/benchmark.db --index=movies --prefix=2,3
 ```
+
+## Suggestions
+
+Use `suggest(index, term, options)` to power a dropdown for type‑ahead. Suggestions are ranked by frequency across fuzzy variants and boosted when the title contains or starts with the variant.
+
+```php
+$suggestions = $search->suggest('movies', $query, [
+  'limit' => 8,         // max suggestions to return
+  'per_variant' => 5,   // results checked per fuzzy variant
+  'title_boost' => 100.0, // extra weight if title contains the variant
+  'prefix_boost' => 25.0, // extra weight if title starts with the variant
+]);
+
+// Example: display top texts
+foreach ($suggestions as $s) {
+  echo $s['text'] . "\n";
+}
+```
+
+Tips
+- Pair with `['fuzzy'=>true,'fuzzy_last_token_only'=>true,'prefix_last_token'=>true]` on search for a smooth type‑ahead experience.
+- For short terms (names/titles), try `fuzzy_algorithm='jaro_winkler'`; for general text, use `trigram`.
 
 
 ## Features

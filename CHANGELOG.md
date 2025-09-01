@@ -22,6 +22,10 @@
 - Added `docs/architecture-overview.md`.
 - Added `AGENTS.md` contributor guide.
 
+### Suggestions
+- Smarter ranking for `suggest()`: aggregates across variants, boosts titles that contain or start with the variant.
+- New options: `limit`, `per_variant`, `title_boost`, `prefix_boost`.
+
 ### Tests & Benchmarks
 - Integration tests for fuzzy algorithms and as‑you‑type mode.
 - Local evaluation script: `benchmarks/fuzzy-eval.php`.
