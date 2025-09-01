@@ -169,7 +169,8 @@ class YetiSearch
             'max_fuzzy_variations',
             'max_indexed_terms',
             'indexed_terms_cache_ttl',
-            'fuzzy_last_token_only'
+            'fuzzy_last_token_only',
+            'prefix_last_token'
         ];
         
         foreach ($fuzzyConfigKeys as $key) {

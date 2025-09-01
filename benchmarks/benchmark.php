@@ -81,6 +81,10 @@ $config = [
             'title' => ['boost' => 3.0, 'store' => true],
             'overview' => ['boost' => 1.0, 'store' => true],  // Add overview field
             'genres' => ['boost' => 2.0, 'store' => true]
+        ],
+        'fts' => [
+            'multi_column' => true,
+            'prefix' => [2,3]
         ]
     ],
     'search' => [
@@ -92,7 +96,9 @@ $config = [
         'max_indexed_terms' => 10000,           // Balance between performance and coverage
         'max_fuzzy_variations' => 5,            // Limit variations for performance
         'fuzzy_score_penalty' => 0.3,           // Moderate penalty since we now prioritize exact matches in query
-        'indexed_terms_cache_ttl' => 300        // Cache indexed terms for 5 minutes
+        'indexed_terms_cache_ttl' => 300,       // Cache indexed terms for 5 minutes
+        'fuzzy_last_token_only' => true,
+        'prefix_last_token' => true
     ]
     // Note: Jaro-Winkler is 2.5x faster than Levenshtein and better for names/titles
 ];

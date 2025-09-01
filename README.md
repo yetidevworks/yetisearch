@@ -7,6 +7,8 @@
 
 A powerful, pure-PHP search engine library with advanced full-text search capabilities, designed for modern PHP applications.
 
+> Important: Requires SQLite FTS5 (full‑text search) support in your PHP’s SQLite library. See “Requirements” for a quick check.
+
 ## Table of Contents
 
 - [Features](#features)
@@ -155,6 +157,10 @@ Tips
 - 🔐 **Production-ready** with comprehensive test coverage
 
 ## Requirements
+
+Important: SQLite FTS5 required
+- YetiSearch uses SQLite FTS5 virtual tables for full‑text search and BM25 ranking. Your PHP build must link against a SQLite library compiled with FTS5 (ENABLE_FTS5).
+- Quick check: `php scripts/check_sqlite_features.php` should report “FTS5: OK”. On macOS, Homebrew PHP typically includes FTS5; some system PHP builds may not.
 
 - PHP 7.4 or higher
 - SQLite3 PHP extension
@@ -962,6 +968,8 @@ echo "Average price: $" . $results['aggregations']['avg_price'] . "\n";
 ```
 
 ## Architecture
+
+See the architecture overview diagram and component notes in `docs/architecture-overview.md`.
 
 YetiSearch follows a modular architecture with clear separation of concerns:
 

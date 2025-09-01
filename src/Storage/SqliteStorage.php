@@ -411,7 +411,8 @@ class SqliteStorage implements StorageInterface
             foreach ($ftsColumns as $col) {
                 $weights[] = (float)($fieldWeights[$col] ?? 1.0);
             }
-            $bm25 = 'bm25(' . $index . "_fts" . (count($weights) ? ', ' . implode(', ', $weights) : '') . ') as rank';
+            // Use table name for bm25() (SQLite expects the FTS table name)
+            $bm25 = 'bm25(' . $index . '_fts' . (count($weights) ? ', ' . implode(', ', $weights) : '') . ') as rank';
             $sql = "
                 SELECT 
                     d.*,

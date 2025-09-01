@@ -7,6 +7,8 @@
 - `docs/`, `benchmarks/`: Documentation and performance artifacts.
 - Tooling: `composer.json`, `phpunit*.xml`, `phpstan.neon`, `Makefile`.
 
+See `docs/architecture-overview.md` for a diagram and component flow.
+
 ## Build, Test, and Development Commands
 - Install deps: `composer install`
 - Run tests: `make test` (or `composer test`)
@@ -39,4 +41,3 @@
 - Required extensions: `pdo`, `sqlite3`, `mbstring`, `json` (see `composer.json`).
 - SQLite: choose a stable file path; enable WAL/journal settings via config if needed; avoid committing DB files.
 - Testing env: phpunit sets SQLite `:memory:`; do not rely on external state.
-
