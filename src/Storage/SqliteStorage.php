@@ -476,7 +476,7 @@ class SqliteStorage implements StorageInterface
             $bm25 = 'bm25(' . $index . '_fts' . (count($weights) ? ', ' . implode(', ', $weights) : '') . ') as rank';
             $inner = "SELECT d.*, {$bm25}" . $spatial['select'] . " FROM {$index} d INNER JOIN {$index}_fts f ON d.id = f.id" . $spatial['join'] . " WHERE {$index}_fts MATCH ?" . $spatial['where'];
             $params = array_merge([$searchQuery], $spatial['params']);
-            if (isset($geoFilters['near'])) {
+            if (isset($geoFilters['near']) && !empty($spatial['select']) && strpos($spatial['select'], 'distance') !== false) {
                 $radius = (float)$geoFilters['near']['radius'];
                 $units = $geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? null);
                 if (is_string($units)) { $u=strtolower($units); if ($u==='km') $radius*=1000.0; elseif(in_array($u,['mi','mile','miles'])) $radius*=1609.344; }
@@ -713,7 +713,7 @@ class SqliteStorage implements StorageInterface
         if ($hasSearchQuery) {
             $inner = "SELECT d.id" . $spatial['select'] . " FROM {$index} d INNER JOIN {$index}_fts f ON d.id = f.id" . $spatial['join'] . " WHERE {$index}_fts MATCH ?" . $spatial['where'];
             $params = array_merge([$searchQuery], $spatial['params']);
-            if (isset($geoFilters['near'])) {
+            if (isset($geoFilters['near']) && !empty($spatial['select']) && strpos($spatial['select'], 'distance') !== false) {
                 $radius = (float)$geoFilters['near']['radius'];
                 $units = $geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? null);
                 if (is_string($units)) { $u=strtolower($units); if ($u==='km') $radius*=1000.0; elseif(in_array($u,['mi','mile','miles'])) $radius*=1609.344; }
