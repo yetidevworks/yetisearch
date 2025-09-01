@@ -99,4 +99,28 @@ bench-compare:
 	@$(MAKE) bench-before
 	@$(MAKE) bench-after
 	@echo ""
-	@php scripts/bench_compare.php
+	@python3 - << 'PY'
+import re
+
+def get(path, key):
+    with open(path) as f:
+        for line in f:
+            if line.startswith(key):
+                if key == 'Average indexing rate':
+                    return re.sub(',', '', line.split()[3])
+                return line.split()[2]
+    return '0'
+
+b='benchmarks/benchmark-before.txt'; a='benchmarks/benchmark-after.txt'
+bt=get(b,'Total time'); at=get(a,'Total time')
+bi=get(b,'Indexing time'); ai=get(a,'Indexing time')
+br=get(b,'Average indexing rate'); ar=get(a,'Average indexing rate')
+bm=get(b,'Memory used'); am=get(a,'Memory used')
+bp=get(b,'Peak memory'); ap=get(a,'Peak memory')
+print('Benchmark comparison (legacy vs external-content)')
+print(f"Total time: {bt}s -> {at}s (Δ {float(at)-float(bt):+.4f}s)")
+print(f"Indexing time: {bi}s -> {ai}s (Δ {float(ai)-float(bi):+.4f}s)")
+print(f"Indexing rate: {br} -> {ar} docs/s (Δ {float(ar)-float(br):+.2f} docs/s)")
+print(f"Memory used: {bm} MB -> {am} MB (Δ {float(am)-float(bm):+.2f} MB)")
+print(f"Peak memory: {bp} MB -> {ap} MB (Δ {float(ap)-float(bp):+.2f} MB)")
+PY

@@ -6,11 +6,11 @@ These results showcase the performance of YetiSearch across various scenarios, d
 
 | Metric | Before (legacy) | After (external-content) | Delta |
 | - | - | - | - |
-| Total time | 7.2711 s | 8.3637 s | +1.0926 s |
-| Indexing time | 7.2249 s | 8.3222 s | +1.0973 s |
-| Avg. indexing rate | 4,421.38 docs/s | 3,838.40 docs/s | -582.98 docs/s |
-| Memory used | 58.69 MB | 58.77 MB | +0.08 MB |
-| Peak memory | 60.17 MB | 60.23 MB | +0.06 MB |
+| Total time | 7.5623 s | 8.3637 s | +0.8014 s |
+| Indexing time | 7.5209 s | 8.3222 s | +0.8013 s |
+| Avg. indexing rate | 4,247.39 docs/s | 3,838.40 docs/s | -408.99 docs/s |
+| Memory used | 58.77 MB | 58.77 MB | +0.00 MB |
+| Peak memory | 60.24 MB | 60.23 MB | -0.01 MB |
 
 Notes
 - The “before” metrics come from a prior legacy-schema run captured in this file.
@@ -71,6 +71,14 @@ Average indexing rate: 4,421.38 movies/second
 Memory used: 58.69 MB
 Peak memory: 60.17 MB
 ```
+
+
+
+## Run History
+
+| Date | Legacy Total (s) | External Total (s) | Δ Total (s) | Legacy Rate (docs/s) | External Rate (docs/s) | Δ Rate (docs/s) |
+| - | - | - | - | - | - | - |
+| 2025-09-01 15:03:11 | 7.8888 | 7.9435 | +0.0547 | 4070.49 | 4042.79 | -27.70 |
 
 ## Testing Search Functionality
 
