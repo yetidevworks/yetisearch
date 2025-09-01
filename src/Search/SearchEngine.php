@@ -49,7 +49,11 @@ class SearchEngine implements SearchEngineInterface
             'enable_suggestions' => true,
             'cache_ttl' => 300,
             'result_fields' => ['title', 'content', 'excerpt', 'url', 'author', 'tags', 'route'],
-            'facet_min_count' => 1
+            'facet_min_count' => 1,
+            // Fuzzy behavior tuning
+            'fuzzy_last_token_only' => false,
+            'trigram_size' => 3,
+            'trigram_threshold' => 0.5
         ], $config);
         
         $this->logger = $logger ?? new NullLogger();
@@ -229,13 +233,18 @@ class SearchEngine implements SearchEngineInterface
         $this->fuzzyTermMap = [];
         
         $processedTokens = [];
-        foreach ($tokens as $token) {
+        $tokenCount = count($tokens);
+        foreach ($tokens as $idx => $token) {
             // For now, don't stem since FTS is not using porter
             $processedTokens[] = $token;
             // Mark original terms as exact matches
             $this->fuzzyTermMap[strtolower($token)] = ['type' => 'exact', 'original' => $token];
             
             if ($query->isFuzzy() && $this->config['enable_fuzzy']) {
+                // If enabled, only fuzz the last token (better for as-you-type)
+                if (($this->config['fuzzy_last_token_only'] ?? false) && $idx !== $tokenCount - 1) {
+                    continue;
+                }
                 $this->logger->debug('Fuzzy search enabled', [
                     'token' => $token,
                     'fuzzy_algorithm' => $this->config['fuzzy_algorithm'] ?? 'basic',
@@ -833,6 +842,23 @@ class SearchEngine implements SearchEngineInterface
                         continue;
                     }
                 }
+
+                // Bigram prefilter for words of reasonable length
+                if ($termLen >= 4 && $indexedLen >= 4) {
+                    $bigrams = static function(string $s): array {
+                        $s = strtolower($s);
+                        $out = [];
+                        for ($i = 0, $n = strlen($s) - 1; $i < $n; $i++) {
+                            $out[] = substr($s, $i, 2);
+                        }
+                        return array_unique($out);
+                    };
+                    $tBi = $bigrams($term);
+                    $iBi = $bigrams($indexedTerm);
+                    if (empty(array_intersect($tBi, $iBi))) {
+                        continue;
+                    }
+                }
                 
                 // Calculate distance only if within bounds
                 if (Levenshtein::isWithinDistance($term, $indexedTerm, $threshold)) {
@@ -945,6 +971,10 @@ class SearchEngine implements SearchEngineInterface
         $minFrequency = $this->config['min_term_frequency'] ?? 2;
         $maxVariations = $this->config['max_fuzzy_variations'] ?? 10;
         $ngramSize = $this->config['trigram_size'] ?? 3;
+        // Adaptive n-gram for short tokens
+        if (mb_strlen($term) <= 4) {
+            $ngramSize = 2;
+        }
         
         try {
             // Use cached indexed terms if available

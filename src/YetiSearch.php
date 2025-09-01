@@ -48,8 +48,11 @@ class YetiSearch
                 'snippet_length' => 150,
                 'max_results' => 1000,
                 'enable_fuzzy' => true,
+                'fuzzy_last_token_only' => false,
                 'enable_suggestions' => true,
-                'cache_ttl' => 300
+                'cache_ttl' => 300,
+                'trigram_size' => 3,
+                'trigram_threshold' => 0.5
             ]
         ], $config);
         
@@ -165,7 +168,8 @@ class YetiSearch
             'min_term_frequency',
             'max_fuzzy_variations',
             'max_indexed_terms',
-            'indexed_terms_cache_ttl'
+            'indexed_terms_cache_ttl',
+            'fuzzy_last_token_only'
         ];
         
         foreach ($fuzzyConfigKeys as $key) {
@@ -370,6 +374,13 @@ class YetiSearch
         if ($indexer) {
             $indexer->clear();
         }
+    }
+
+    public function dropIndex(string $indexName): void
+    {
+        // Remove cached components first
+        unset($this->indexers[$indexName], $this->searchEngines[$indexName]);
+        $this->getStorage()->dropIndex($indexName);
     }
     
     public function optimize(string $indexName): void
