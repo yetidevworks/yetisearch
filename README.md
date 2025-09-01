@@ -46,169 +46,9 @@ A powerful, pure-PHP search engine library with advanced full-text search capabi
 - [License](#license)
 - [Type-Ahead Setup](#type-ahead-setup)
 - [Weighted FTS and Prefix (Optional)](#weighted-fts-and-prefix-optional)
- - [Suggestions](#suggestions)
- - [Synonyms](#synonyms)
- - [CLI](#cli)
-
-## Type-Ahead Setup
-
-For as-you-type search, enable fuzzy matching and (optionally) last-token prefixing. Debounce input by 200–300ms on the client.
-
-```php
-// Type-ahead friendly search
-$results = $search->search('movies', $query, [
-    'limit' => 8,
-    'fields' => ['title','overview','url'],
-    'fuzzy' => true,
-    'fuzzy_last_token_only' => true,   // fuzz just the last term
-    'prefix_last_token' => true,       // requires FTS prefix (see below)
-    // choose fuzzy algorithm based on content
-    'fuzzy_algorithm' => 'jaro_winkler', // great for short terms; or 'trigram' for general text
-]);
-```
-
-### CLI Demo
-
-Try an interactive demonstration that seeds a small dataset, prints suggestions, and shows as‑you‑type results:
-
-```bash
-php examples/type-ahead.php --interactive
-```
-
-Or run a single query:
-
-```bash
-php examples/type-ahead.php "anaki skywa"
-```
-
-Notes
-- Interactive mode updates results after each character (min length 2). On macOS/Linux, it uses raw TTY mode; on unsupported environments it falls back to line input.
-
-## Weighted FTS and Prefix (Optional)
-
-You can enable multi-column FTS5 and weighted BM25 to boost important fields (e.g., title, tags). Prefix indexing improves strict prefix matches for type-ahead.
-
-```php
-$config = [
-  'indexer' => [
-    'fields' => [                      // boosts become BM25 weights
-      'title' => ['boost' => 3.0, 'store' => true],
-      'overview' => ['boost' => 1.0, 'store' => true],
-      'tags' => ['boost' => 2.0, 'store' => true],
-    ],
-    'fts' => [
-      'multi_column' => true,          // create FTS with per-field columns
-      'prefix' => [2,3],               // enable FTS5 prefix index (optional)
-    ],
-  ],
-  'search' => [
-    'prefix_last_token' => true,       // use last-token prefix (needs prefix option above)
-  ],
-];
-$search = new YetiSearch($config);
-$indexer = $search->createIndex('movies');
-// Reindex to apply schema changes; or use scripts/migrate_fts.php to migrate existing data
-```
-
-Migration helper:
-
-```bash
-php scripts/migrate_fts.php --db=benchmarks/benchmark.db --index=movies --prefix=2,3
-```
-
-## Suggestions
-
-Use `suggest(index, term, options)` to power a dropdown for type‑ahead. Suggestions are ranked by frequency across fuzzy variants and boosted when the title contains or starts with the variant.
-
-```php
-$suggestions = $search->suggest('movies', $query, [
-  'limit' => 8,         // max suggestions to return
-  'per_variant' => 5,   // results checked per fuzzy variant
-  'title_boost' => 100.0, // extra weight if title contains the variant
-  'prefix_boost' => 25.0, // extra weight if title starts with the variant
-]);
-
-// Example: display top texts
-foreach ($suggestions as $s) {
-  echo $s['text'] . "\n";
-}
-```
-
-Tips
-- Pair with `['fuzzy'=>true,'fuzzy_last_token_only'=>true,'prefix_last_token'=>true]` on search for a smooth type‑ahead experience.
-- For short terms (names/titles), try `fuzzy_algorithm='jaro_winkler'`; for general text, use `trigram`.
-
-
-
-## Synonyms
-
-Enable query‑time synonyms expansion to improve recall for known aliases and abbreviations.
-
-Config (array or JSON file):
-```php
-$search = new YetiSearch([
-  'search' => [
-    'enable_synonyms' => true,
-    // Flat map or per‑language: ['en' => ['nyc' => ['new york','new york city']]]
-    'synonyms' => [
-      'nyc' => ['new york', 'new york city'],
-      'la'  => ['los angeles']
-    ],
-    'synonyms_case_sensitive' => false,
-    'synonyms_max_expansions' => 3,
-  ]
-]);
-```
-
-Behavior
-- Expands tokens before building the FTS query. Multi‑word synonyms are added as quoted phrases.
-- Exact phrase is built from the original tokens; synonyms are ORed in. Fuzzy still works independently.
-- Use a small, targeted list to avoid noise; adjust `synonyms_max_expansions` if needed.
-
-## CLI
-
-A simple CLI is included for quick testing of search, suggestions, geo nearest, and distance facets.
-
-Install deps if you haven’t:
-```bash
-composer install
-chmod +x bin/yetisearch
-```
-
-Examples
-- Search (as‑you‑type style):
-```bash
-bin/yetisearch search \
-  --index=movies --query="star wrs" --limit=5 \
-  --fuzzy=1 --fuzzy-last=1 --prefix=1
-```
-
-- Suggestions:
-```bash
-bin/yetisearch suggest --index=movies --term=matr --limit=5
-```
-
-- k‑NN nearest 5 around NYC (km):
-```bash
-bin/yetisearch knn --index=places --lat=40.7128 --lng=-74.0060 --k=5 --units=km --max-distance=10
-```
-
-- Distance facets (<= 1/3/5 km):
-```bash
-bin/yetisearch facets-distance --index=places --lat=40.7128 --lng=-74.0060 --ranges=1,3,5 --units=km
-```
-
-Synonyms example
-```bash
-bin/yetisearch search \
-  --index=places --query="nyc coffee" --limit=5 \
-  --synonyms=examples/synonyms.json
-```
-
-Common flags
-- `--db=PATH` (default `benchmarks/benchmark.db`)
-- `--synonyms=PATH` (default `examples/synonyms.json`)
-- `--geo-units=m|km|mi` (default meters)
+- [Suggestions](#suggestions)
+- [Synonyms](#synonyms)
+- [CLI](#cli)
 
 ## Features
 
@@ -1557,6 +1397,164 @@ $config = [
    - SSD storage recommended for large indexes
    - More RAM allows larger caches
    - Multi-core CPUs benefit batch operations
+
+## Type-Ahead Setup
+
+For as-you-type search, enable fuzzy matching and (optionally) last-token prefixing. Debounce input by 200–300ms on the client.
+
+```php
+// Type-ahead friendly search
+$results = $search->search('movies', $query, [
+    'limit' => 8,
+    'fields' => ['title','overview','url'],
+    'fuzzy' => true,
+    'fuzzy_last_token_only' => true,   // fuzz just the last term
+    'prefix_last_token' => true,       // requires FTS prefix (see below)
+    // choose fuzzy algorithm based on content
+    'fuzzy_algorithm' => 'jaro_winkler', // great for short terms; or 'trigram' for general text
+]);
+```
+
+### CLI Demo
+
+Try an interactive demonstration that seeds a small dataset, prints suggestions, and shows as‑you‑type results:
+
+```bash
+php examples/type-ahead.php --interactive
+```
+
+Or run a single query:
+
+```bash
+php examples/type-ahead.php "anaki skywa"
+```
+
+Notes
+- Interactive mode updates results after each character (min length 2). On macOS/Linux, it uses raw TTY mode; on unsupported environments it falls back to line input.
+
+## Weighted FTS and Prefix (Optional)
+
+You can enable multi-column FTS5 and weighted BM25 to boost important fields (e.g., title, tags). Prefix indexing improves strict prefix matches for type-ahead.
+
+```php
+$config = [
+  'indexer' => [
+    'fields' => [                      // boosts become BM25 weights
+      'title' => ['boost' => 3.0, 'store' => true],
+      'overview' => ['boost' => 1.0, 'store' => true],
+      'tags' => ['boost' => 2.0, 'store' => true],
+    ],
+    'fts' => [
+      'multi_column' => true,          // create FTS with per-field columns
+      'prefix' => [2,3],               // enable FTS5 prefix index (optional)
+    ],
+  ],
+  'search' => [
+    'prefix_last_token' => true,       // use last-token prefix (needs prefix option above)
+  ],
+];
+$search = new YetiSearch($config);
+$indexer = $search->createIndex('movies');
+// Reindex to apply schema changes; or use scripts/migrate_fts.php to migrate existing data
+```
+
+Migration helper:
+
+```bash
+php scripts/migrate_fts.php --db=benchmarks/benchmark.db --index=movies --prefix=2,3
+```
+
+## Suggestions
+
+Use `suggest(index, term, options)` to power a dropdown for type‑ahead. Suggestions are ranked by frequency across fuzzy variants and boosted when the title contains or starts with the variant.
+
+```php
+$suggestions = $search->suggest('movies', $query, [
+  'limit' => 8,         // max suggestions to return
+  'per_variant' => 5,   // results checked per fuzzy variant
+  'title_boost' => 100.0, // extra weight if title contains the variant
+  'prefix_boost' => 25.0, // extra weight if title starts with the variant
+]);
+
+// Example: display top texts
+foreach ($suggestions as $s) {
+  echo $s['text'] . "\n";
+}
+```
+
+Tips
+- Pair with `['fuzzy'=>true,'fuzzy_last_token_only'=>true,'prefix_last_token'=>true]` on search for a smooth type‑ahead experience.
+- For short terms (names/titles), try `fuzzy_algorithm='jaro_winkler'`; for general text, use `trigram`.
+
+## Synonyms
+
+Enable query‑time synonyms expansion to improve recall for known aliases and abbreviations.
+
+Config (array or JSON file):
+```php
+$search = new YetiSearch([
+  'search' => [
+    'enable_synonyms' => true,
+    // Flat map or per‑language: ['en' => ['nyc' => ['new york','new york city']]]
+    'synonyms' => [
+      'nyc' => ['new york', 'new york city'],
+      'la'  => ['los angeles']
+    ],
+    'synonyms_case_sensitive' => false,
+    'synonyms_max_expansions' => 3,
+  ]
+]);
+```
+
+Behavior
+- Expands tokens before building the FTS query. Multi‑word synonyms are added as quoted phrases.
+- Exact phrase is built from the original tokens; synonyms are ORed in. Fuzzy still works independently.
+- Use a small, targeted list to avoid noise; adjust `synonyms_max_expansions` if needed.
+
+## CLI
+
+A simple CLI is included for quick testing of search, suggestions, geo nearest, and distance facets.
+
+Install deps if you haven't:
+```bash
+composer install
+chmod +x bin/yetisearch
+```
+
+Examples
+- Search (as‑you‑type style):
+```bash
+bin/yetisearch search \
+  --index=movies --query="star wrs" --limit=5 \
+  --fuzzy=1 --fuzzy-last=1 --prefix=1
+```
+
+- Suggestions:
+```bash
+bin/yetisearch suggest --index=movies --term=matr --limit=5
+```
+
+- k‑NN nearest 5 around NYC (km):
+```bash
+bin/yetisearch knn --index=places --lat=40.7128 --lng=-74.0060 --k=5 --units=km --max-distance=10
+```
+
+- Distance facets (<= 1/3/5 km):
+```bash
+bin/yetisearch facets-distance --index=places --lat=40.7128 --lng=-74.0060 --ranges=1,3,5 --units=km
+```
+
+Synonyms example
+```bash
+bin/yetisearch search \
+  --index=places --query="nyc coffee" --limit=5 \
+  --synonyms=examples/synonyms.json
+```
+
+Common flags
+- `--db=PATH` (default `benchmarks/benchmark.db`)
+- `--synonyms=PATH` (default `examples/synonyms.json`)
+- `--geo-units=m|km|mi` (default meters)
 
 ## Future Feature Ideas
 

@@ -32,17 +32,13 @@ class GeoHaversineAndDatelineTest extends TestCase
         ];
         $this->search->indexBatch($this->index, $docs);
 
-        // Basic geo support probe
+        // Robust geo support probe: requires distance to be computed
         try {
-            $res = $this->search->search($this->index, '', [
-                'limit' => 1,
-                'fuzzy' => false,
-                'filters' => [],
-                'geoFilters' => [
-                    'near' => ['point' => ['lat' => 40.7128, 'lng' => -74.0060], 'radius' => 1000],
-                ],
-            ]);
-            $this->hasGeoSupport = true;
+            $engine = $this->search->getSearchEngine($this->index);
+            $q = new \YetiSearch\Models\SearchQuery('');
+            $q->near(new GeoPoint(40.7128, -74.0060), 1000)->limit(5);
+            $r = $engine->search($q);
+            $this->hasGeoSupport = count($r->getResults()) > 0 && $r->getResults()[0]->hasDistance();
         } catch (\Throwable $e) {
             $this->hasGeoSupport = false;
         }

@@ -474,15 +474,17 @@ class SqliteStorage implements StorageInterface
             }
             // Use table name for bm25() (SQLite expects the FTS table name)
             $bm25 = 'bm25(' . $index . '_fts' . (count($weights) ? ', ' . implode(', ', $weights) : '') . ') as rank';
-            $sql = "
-                SELECT 
-                    d.*,
-                    {$bm25}" . $spatial['select'] . "
-                FROM {$index} d
-                INNER JOIN {$index}_fts f ON d.id = f.id" . $spatial['join'] . "
-                WHERE {$index}_fts MATCH ?" . $spatial['where'] . "
-            ";
+            $inner = "SELECT d.*, {$bm25}" . $spatial['select'] . " FROM {$index} d INNER JOIN {$index}_fts f ON d.id = f.id" . $spatial['join'] . " WHERE {$index}_fts MATCH ?" . $spatial['where'];
             $params = array_merge([$searchQuery], $spatial['params']);
+            if (isset($geoFilters['near'])) {
+                $radius = (float)$geoFilters['near']['radius'];
+                $units = $geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? null);
+                if (is_string($units)) { $u=strtolower($units); if ($u==='km') $radius*=1000.0; elseif(in_array($u,['mi','mile','miles'])) $radius*=1609.344; }
+                $sql = "SELECT * FROM (" . $inner . ") t WHERE t.distance <= ?";
+                $params[] = $radius;
+            } else {
+                $sql = $inner;
+            }
         } else {
             // No text search, only filters and/or spatial search
             $sql = "
@@ -558,8 +560,8 @@ class SqliteStorage implements StorageInterface
         // Handle sorting
         if ($needsPhpSort) {
             // For PHP sorting, we need to fetch more results to ensure accurate pagination
-            // Fetch up to 1000 results or 10x the requested limit, whichever is smaller
-            $fetchLimit = min(1000, max($limit * 10, 100));
+            // Dynamic default: 20x limit (min 200), capped at 1000; override with candidate_cap
+            $fetchLimit = min(1000, max($limit * 20, 200));
             if (isset($geoFilters['candidate_cap'])) {
                 $fetchLimit = min($fetchLimit, max(10, (int)$geoFilters['candidate_cap']));
             }
@@ -709,13 +711,17 @@ class SqliteStorage implements StorageInterface
         $hasSearchQuery = !empty(trim($searchQuery));
         
         if ($hasSearchQuery) {
-            $sql = "
-                SELECT COUNT(*) as total
-                FROM {$index} d
-                INNER JOIN {$index}_fts f ON d.id = f.id" . $spatial['join'] . "
-                WHERE {$index}_fts MATCH ?" . $spatial['where'] . "
-            ";
+            $inner = "SELECT d.id" . $spatial['select'] . " FROM {$index} d INNER JOIN {$index}_fts f ON d.id = f.id" . $spatial['join'] . " WHERE {$index}_fts MATCH ?" . $spatial['where'];
             $params = array_merge([$searchQuery], $spatial['params']);
+            if (isset($geoFilters['near'])) {
+                $radius = (float)$geoFilters['near']['radius'];
+                $units = $geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? null);
+                if (is_string($units)) { $u=strtolower($units); if ($u==='km') $radius*=1000.0; elseif(in_array($u,['mi','mile','miles'])) $radius*=1609.344; }
+                $sql = "SELECT COUNT(*) as total FROM (" . $inner . ") t WHERE t.distance <= ?";
+                $params[] = $radius;
+            } else {
+                $sql = "SELECT COUNT(*) as total FROM (" . $inner . ") t";
+            }
         } else {
             $sql = "
                 SELECT COUNT(*) as total

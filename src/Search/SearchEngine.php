@@ -64,7 +64,9 @@ class SearchEngine implements SearchEngineInterface
             // distance_weight: 0.0..1.0, proportion of distance score in final score
             'distance_weight' => 0.0,
             // distance_decay_k: controls how fast distance score decays per km (higher = steeper)
-            'distance_decay_k' => 0.005
+            'distance_decay_k' => 0.005,
+            // Fuzzy/synonyms shaping
+            'fuzzy_total_max_variations' => 30
         ], $config);
         
         $this->logger = $logger ?? new NullLogger();
@@ -282,6 +284,7 @@ class SearchEngine implements SearchEngineInterface
         
         $processedTokens = [];
         $tokenCount = count($tokens);
+        $remainingFuzzy = (int)($this->config['fuzzy_total_max_variations'] ?? 30);
         foreach ($tokens as $idx => $token) {
             // For now, don't stem since FTS is not using porter
             $processedTokens[] = $token;
@@ -299,6 +302,9 @@ class SearchEngine implements SearchEngineInterface
                     'enable_fuzzy' => $this->config['enable_fuzzy']
                 ]);
                 $fuzzyTokens = $this->generateFuzzyVariations($token);
+                if ($remainingFuzzy > 0 && count($fuzzyTokens) > $remainingFuzzy) {
+                    $fuzzyTokens = array_slice($fuzzyTokens, 0, $remainingFuzzy);
+                }
                 $this->logger->debug('Generated fuzzy variations', [
                     'original' => $token,
                     'variations' => $fuzzyTokens
@@ -329,6 +335,8 @@ class SearchEngine implements SearchEngineInterface
                 }
                 
                 $processedTokens = array_merge($processedTokens, $fuzzyTokens);
+                // Budget down (exclude original token itself if present at [0])
+                $remainingFuzzy = max(0, $remainingFuzzy - max(0, count($fuzzyTokens) - 1));
             }
         }
         
