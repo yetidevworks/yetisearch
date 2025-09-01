@@ -9,7 +9,7 @@ flowchart LR
   YetiSearch --> SearchEngine
   Indexer --> Analyzer
   Analyzer --> Stemmer
-  Indexer --> Storage[(SQLite FTS5)]
+  Indexer --> Storage[(SQLite FTS5, external-content)]
   SearchEngine --> Storage
   SearchEngine --> Fuzzy[Utils: Trigram / Jaro-Winkler / Levenshtein]
   Storage --> Cache[FuzzyTermCache]
@@ -36,9 +36,11 @@ App -> YetiSearch -> { Indexer -> Analyzer -> Stemmer -> Storage(FTS5)
 - Models: Query and result DTOs (`src/Models/`).
 
 ## Data Flow
-- Indexing: documents -> Analyzer/Stemmer -> chunks -> FTS5 rows.
+- Indexing: documents -> Analyzer/Stemmer -> chunks -> stored in docs; FTS5 content stored by `rowid = doc_id` (external-content).
 - Searching: query -> analyzer -> FTS5 BM25 -> scoring/boosting -> optional fuzzy expansion -> results/Facets -> Models.
 
 Notes
-- Configuration controls field boosts, chunking, fuzzy behavior, and SQLite pragmas.
-- See `README.md` for advanced options and examples.
+- Default schema uses external-content FTS5 (`content='<index>', content_rowid='doc_id'`) and R-tree keyed by `doc_id`.
+- Legacy mode (string `id` as PK + `id_map`) remains supported for backward compatibility.
+- Configuration controls field boosts, chunking, fuzzy behavior, SQLite pragmas, and schema mode.
+- See `README.md` for migration commands and examples.

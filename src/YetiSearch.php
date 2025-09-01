@@ -24,7 +24,8 @@ class YetiSearch
     {
         $this->config = array_merge([
             'storage' => [
-                'path' => 'yetisearch.db'
+                'path' => 'yetisearch.db',
+                'external_content' => true
             ],
             'analyzer' => [
                 'min_word_length' => 2,

@@ -40,6 +40,8 @@ function usage(): void {
   out("  suggest --index=IDX --term=T [--limit=8]");
   out("  knn --index=IDX --lat=.. --lng=.. --k=5 [--units=m|km|mi] [--max-distance=N]");
   out("  facets-distance --index=IDX --lat=.. --lng=.. --ranges=1,5,10 [--units=m|km|mi]");
+  out("  migrate-external --index=IDX            Migrate a legacy index to external-content schema");
+  out("  create-index --index=IDX [--external=0|1]  Create index (optionally force external-content)");
   out("");
   out("Common options:");
   out("  --db=PATH             SQLite DB file (default: benchmarks/benchmark.db)");
@@ -67,6 +69,25 @@ if ($geoUnits) { $config['search']['geo_units'] = $geoUnits; }
 $ys = new YetiSearch($config);
 
 switch ($cmd) {
+  case 'create-index': {
+    $index = $opts['index'] ?? null; if (!$index) { err('Missing --index'); exit(1); }
+    $external = isset($opts['external']) ? (bool)(int)$opts['external'] : null;
+    if ($external !== null) { $config['storage']['external_content'] = $external; }
+    $ys2 = new YetiSearch($config);
+    $ys2->createIndex($index, [ 'external_content' => ($external ?? null) ]);
+    out("Index '$index' created.");
+    break;
+  }
+  case 'migrate-external': {
+    $index = $opts['index'] ?? null; if (!$index) { err('Missing --index'); exit(1); }
+    $ys2 = new YetiSearch($config);
+    $ref = new ReflectionClass($ys2);
+    $m = $ref->getMethod('getStorage'); $m->setAccessible(true);
+    $storage = $m->invoke($ys2);
+    $storage->migrateToExternalContent($index);
+    out("Index '$index' migrated to external-content.");
+    break;
+  }
   case 'search': {
     $index = $opts['index'] ?? null; $query = $opts['query'] ?? '';
     if (!$index) { err('Missing --index'); exit(1); }

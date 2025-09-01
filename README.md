@@ -441,6 +441,33 @@ $config = [
 $search = new YetiSearch($config);
 ```
 
+### Storage Schema: External-Content (Default)
+
+YetiSearch defaults to an efficient external-content FTS5 schema:
+
+- Main table `<index>`: `doc_id INTEGER PRIMARY KEY`, `id TEXT UNIQUE`, document `content` and `metadata`, with `language`, `type`, `timestamp`.
+- FTS5 table `<index>_fts`: multi-column virtual table, `content='<index>', content_rowid='doc_id'` (no document duplication in FTS).
+- Spatial table `<index>_spatial`: R-tree keyed by `doc_id` (no separate id_map).
+
+Legacy indices (string `id` primary key with `id_map`) continue to work. You can migrate any legacy index to the new schema:
+
+```bash
+# Using CLI
+bin/yetisearch migrate-external --db=benchmarks/benchmark.db --index=movies
+
+# Or standalone script
+php scripts/migrate_external_content.php --db=benchmarks/benchmark.db --index=movies
+```
+
+To explicitly create an index with/without external-content:
+
+```bash
+# Force external-content on or off
+bin/yetisearch create-index --db=benchmarks/benchmark.db --index=movies --external=1
+bin/yetisearch create-index --db=benchmarks/benchmark.db --index=legacy_idx --external=0
+```
+
+
 ## Advanced Features
 
 ### Document Chunking

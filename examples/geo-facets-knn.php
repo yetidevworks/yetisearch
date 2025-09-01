@@ -6,6 +6,10 @@ use YetiSearch\YetiSearch;
 use YetiSearch\Geo\GeoPoint;
 
 $ys = new YetiSearch([
+  'storage' => [
+    // Demonstrate external-content schema explicitly
+    'external_content' => true,
+  ],
   'search' => [
     'geo_units' => 'km',          // default units for convenience
     'distance_weight' => 0.4,     // blend text + distance
@@ -15,7 +19,8 @@ $ys = new YetiSearch([
 
 $index = 'geo_demo';
 try { $ys->dropIndex($index); } catch (Throwable $e) {}
-$ys->createIndex($index);
+// Force external-content on index creation
+$ys->createIndex($index, ['external_content' => true]);
 
 // Seed a few places around NYC
 $docs = [
@@ -63,4 +68,3 @@ foreach ($knn['results'] as $r) {
   $dist = $r['distance'] ?? 0;
   echo sprintf(" - %s (%.2f km)\n", $title, $dist / 1000.0);
 }
-

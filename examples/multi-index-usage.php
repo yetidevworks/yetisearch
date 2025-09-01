@@ -14,7 +14,9 @@ use YetiSearch\YetiSearch;
 // Initialize YetiSearch
 $config = [
     'storage' => [
-        'path' => __DIR__ . '/data/search.db'
+        'path' => __DIR__ . '/data/search.db',
+        // Explicitly opt into external-content FTS5 schema
+        'external_content' => true,
     ],
     'analyzer' => [
         'min_word_length' => 3,
@@ -29,14 +31,14 @@ $search = new YetiSearch($config);
 echo "=== Example 1: Creating Multiple Indexes ===\n";
 
 // Create separate indexes for different content types
-$search->createIndex('products');
-$search->createIndex('blog_posts');
-$search->createIndex('documentation');
+$search->createIndex('products', ['external_content' => true]);
+$search->createIndex('blog_posts', ['external_content' => true]);
+$search->createIndex('documentation', ['external_content' => true]);
 
 // Create language-specific indexes
-$search->createIndex('products_en');
-$search->createIndex('products_fr');
-$search->createIndex('products_de');
+$search->createIndex('products_en', ['external_content' => true]);
+$search->createIndex('products_fr', ['external_content' => true]);
+$search->createIndex('products_de', ['external_content' => true]);
 
 echo "Indexes created successfully.\n\n";
 

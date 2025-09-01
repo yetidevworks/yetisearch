@@ -19,6 +19,8 @@ $query = $interactive ? '' : (implode(' ', array_filter($args)) ?: 'skyw');
 $config = [
     'storage' => [
         'path' => __DIR__ . '/typeahead.db',
+        // Explicitly demonstrate external-content schema
+        'external_content' => true,
     ],
     'indexer' => [
         'fields' => [
@@ -42,7 +44,8 @@ $config = [
 
 $ys = new YetiSearch($config);
 $index = 'demo_typeahead';
-$ys->createIndex($index);
+// Explicitly create with external-content enabled (default is true)
+$ys->createIndex($index, ['external_content' => true]);
 
 // Seed a small dataset (idempotent)
 $docs = [

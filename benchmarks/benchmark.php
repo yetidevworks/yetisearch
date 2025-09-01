@@ -6,7 +6,7 @@
  * and performing search queries with and without fuzzy matching.
  *
  * Usage:
- * php benchmark.php [--skip-indexing]
+ * php benchmark.php [--skip-indexing] [--external=0|1]
  *
  * Options:
  * --skip-indexing: Skip the indexing step and only run searches on existing data.
@@ -19,6 +19,12 @@ use YetiSearch\YetiSearch;
 
 // Check command line arguments
 $skipIndexing = in_array('--skip-indexing', $argv);
+$external = null;
+foreach ($argv as $a) {
+    if (strpos($a, '--external=') === 0) {
+        $external = (int)substr($a, strlen('--external=')) === 1;
+    }
+}
 
 // Start timing
 $startTime = microtime(true);
@@ -103,6 +109,13 @@ $config = [
     // Note: Jaro-Winkler is 2.5x faster than Levenshtein and better for names/titles
 ];
 $search = new YetiSearch($config);
+
+// Allow overriding schema mode from CLI
+if ($external !== null) {
+    // Recreate with explicit storage mode
+    $config['storage']['external_content'] = $external;
+    $search = new YetiSearch($config);
+}
 echo "Done!\n";
 
 if (!$skipIndexing) {

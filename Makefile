@@ -1,4 +1,5 @@
 .PHONY: test test-verbose test-coverage test-watch help rg rg-files sd sd-preview sd-in
+ .PHONY: bench-after
 
 # Default target
 help:
@@ -18,6 +19,18 @@ help:
 	@echo "  make sd-preview FROM=... TO=... FILES=\"...\" [MODE=...]           # preview replace"
 	@echo "  make sd-in PATTERN=... FROM=... TO=... [PATHS=\"src tests\"] [MODE=...] # replace in files matching PATTERN"
 	@echo ""
+	@echo "Benchmarks:"
+	@echo "  make bench-after     Run benchmark and save to benchmarks/benchmark-after.txt"
+
+bench-after:
+	@echo "Running benchmark (external-content default) ..."
+	@rm -f benchmarks/benchmark.db benchmarks/benchmark.db-shm benchmarks/benchmark.db-wal
+	@php benchmarks/benchmark.php --external=1 | tee benchmarks/benchmark-after.txt
+
+bench-before:
+	@echo "Running benchmark (legacy schema) ..."
+	@rm -f benchmarks/benchmark.db benchmarks/benchmark.db-shm benchmarks/benchmark.db-wal
+	@php benchmarks/benchmark.php --external=0 | tee benchmarks/benchmark-before.txt
 
 # Run all tests
 test:

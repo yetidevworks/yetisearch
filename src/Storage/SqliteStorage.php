@@ -17,6 +17,7 @@ class SqliteStorage implements StorageInterface
     private bool $useTermsIndex = false;
     private ?bool $hasMathFunctions = null;
     private array $ftsColumnsCache = [];
+    private bool $externalContentDefault = false;
     
     public function connect(array $config): void
     {
@@ -29,6 +30,8 @@ class SqliteStorage implements StorageInterface
         // Only use terms index if Levenshtein fuzzy search is enabled
         $this->useTermsIndex = ($this->searchConfig['enable_fuzzy'] ?? false) && 
                                ($this->searchConfig['fuzzy_algorithm'] ?? 'basic') === 'levenshtein';
+        // External-content/doc_id mode (opt-in)
+        $this->externalContentDefault = (bool)($config['external_content'] ?? false);
         
         // Create directory if it doesn't exist and path is not :memory:
         if ($dbPath !== ':memory:') {
@@ -80,19 +83,39 @@ class SqliteStorage implements StorageInterface
         $this->ensureConnected();
         
         try {
-            $sql = "
-                CREATE TABLE IF NOT EXISTS {$name} (
-                    id TEXT PRIMARY KEY,
-                    content TEXT NOT NULL,
-                    metadata TEXT,
-                    language TEXT,
-                    type TEXT DEFAULT 'default',
-                    score REAL DEFAULT 0,
-                    timestamp INTEGER DEFAULT (strftime('%s', 'now')),
-                    indexed_at INTEGER DEFAULT (strftime('%s', 'now'))
-                )
-            ";
-            $this->connection->exec($sql);
+            $useExternal = (bool)($options['external_content'] ?? $this->externalContentDefault);
+            // Ensure per-index meta table exists
+            $this->connection->exec("CREATE TABLE IF NOT EXISTS {$name}_meta (key TEXT PRIMARY KEY, value TEXT)");
+            // Persist schema mode
+            $this->setIndexMeta($name, 'schema_mode', $useExternal ? 'external' : 'legacy');
+            if ($useExternal) {
+                $sql = "
+                    CREATE TABLE IF NOT EXISTS {$name} (
+                        doc_id INTEGER PRIMARY KEY,
+                        id TEXT UNIQUE,
+                        content TEXT NOT NULL,
+                        metadata TEXT,
+                        language TEXT,
+                        type TEXT DEFAULT 'default',
+                        timestamp INTEGER DEFAULT (strftime('%s', 'now'))
+                    )
+                ";
+                $this->connection->exec($sql);
+            } else {
+                $sql = "
+                    CREATE TABLE IF NOT EXISTS {$name} (
+                        id TEXT PRIMARY KEY,
+                        content TEXT NOT NULL,
+                        metadata TEXT,
+                        language TEXT,
+                        type TEXT DEFAULT 'default',
+                        score REAL DEFAULT 0,
+                        timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+                        indexed_at INTEGER DEFAULT (strftime('%s', 'now'))
+                    )
+                ";
+                $this->connection->exec($sql);
+            }
             
             $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_language ON {$name}(language)");
             $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_type ON {$name}(type)");
@@ -118,15 +141,20 @@ class SqliteStorage implements StorageInterface
             if (is_array($prefix) && !empty($prefix)) {
                 $prefixSql = ", prefix='" . implode(' ', array_map('intval', $prefix)) . "'";
             }
-            // Create per-index metadata table to store FTS columns
-            $this->connection->exec("CREATE TABLE IF NOT EXISTS {$name}_meta (key TEXT PRIMARY KEY, value TEXT)");
+            // Store FTS columns in meta
             $this->setIndexMeta($name, 'fts_columns', json_encode($ftsColumns));
 
             // Create FTS5 table with configured columns
             $cols = array_map(function($c){ return $c; }, $ftsColumns);
-            $ftsColsSql = 'id UNINDEXED, ' . implode(', ', $cols);
-            $sql = "CREATE VIRTUAL TABLE IF NOT EXISTS {$name}_fts USING fts5({$ftsColsSql}, tokenize='unicode61'{$prefixSql})";
-            $this->connection->exec($sql);
+            if ($useExternal) {
+                $ftsColsSql = implode(', ', $cols);
+                $sql = "CREATE VIRTUAL TABLE IF NOT EXISTS {$name}_fts USING fts5({$ftsColsSql}, content='{$name}', content_rowid='doc_id', tokenize='unicode61'{$prefixSql})";
+                $this->connection->exec($sql);
+            } else {
+                $ftsColsSql = 'id UNINDEXED, ' . implode(', ', $cols);
+                $sql = "CREATE VIRTUAL TABLE IF NOT EXISTS {$name}_fts USING fts5({$ftsColsSql}, tokenize='unicode61'{$prefixSql})";
+                $this->connection->exec($sql);
+            }
             
             // Only create terms table if Levenshtein fuzzy search is enabled
             if ($this->useTermsIndex) {
@@ -156,16 +184,17 @@ class SqliteStorage implements StorageInterface
                     )
                 ";
                 $this->connection->exec($spatialSql);
-                
-                // Create ID mapping table
-                $mappingSql = "
-                    CREATE TABLE IF NOT EXISTS {$name}_id_map (
-                        string_id TEXT PRIMARY KEY,
-                        numeric_id INTEGER
-                    )
-                ";
-                $this->connection->exec($mappingSql);
-                $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_id_map_numeric ON {$name}_id_map(numeric_id)");
+                // Legacy-only id_map
+                if (!$useExternal) {
+                    $mappingSql = "
+                        CREATE TABLE IF NOT EXISTS {$name}_id_map (
+                            string_id TEXT PRIMARY KEY,
+                            numeric_id INTEGER
+                        )
+                    ";
+                    $this->connection->exec($mappingSql);
+                    $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_id_map_numeric ON {$name}_id_map(numeric_id)");
+                }
             }
             
         } catch (\PDOException $e) {
@@ -215,25 +244,54 @@ class SqliteStorage implements StorageInterface
             $type = $document['type'] ?? 'default';
             $timestamp = $document['timestamp'] ?? time();
             
-            $sql = "
-                INSERT OR REPLACE INTO {$index} 
-                (id, content, metadata, language, type, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ";
-            $stmt = $this->connection->prepare($sql);
-            $stmt->execute([$id, $content, $metadata, $language, $type, $timestamp]);
+            $schema = $this->getSchemaMode($index);
+            if ($schema === 'external') {
+                $sql = "
+                    INSERT INTO {$index} (id, content, metadata, language, type, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        content=excluded.content,
+                        metadata=excluded.metadata,
+                        language=excluded.language,
+                        type=excluded.type,
+                        timestamp=excluded.timestamp
+                ";
+                $stmt = $this->connection->prepare($sql);
+                $stmt->execute([$id, $content, $metadata, $language, $type, $timestamp]);
+            } else {
+                $sql = "
+                    INSERT OR REPLACE INTO {$index} 
+                    (id, content, metadata, language, type, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ";
+                $stmt = $this->connection->prepare($sql);
+                $stmt->execute([$id, $content, $metadata, $language, $type, $timestamp]);
+            }
             
             // Insert into FTS with dynamic columns
             $ftsColumns = $this->getFtsColumns($index);
-            $placeholders = implode(', ', array_fill(0, count($ftsColumns) + 1, '?'));
-            $columnsSql = 'id, ' . implode(', ', $ftsColumns);
-            $ftsSql = "INSERT OR REPLACE INTO {$index}_fts ({$columnsSql}) VALUES ({$placeholders})";
-            $ftsStmt = $this->connection->prepare($ftsSql);
-            $values = [$id];
-            foreach ($ftsColumns as $col) {
-                $values[] = $this->getFieldText($document['content'], $col, $index);
+            if ($schema === 'external') {
+                $docId = $this->getDocId($index, $id);
+                $placeholders = implode(', ', array_fill(0, count($ftsColumns) + 1, '?'));
+                $columnsSql = 'rowid, ' . implode(', ', $ftsColumns);
+                $ftsSql = "INSERT OR REPLACE INTO {$index}_fts ({$columnsSql}) VALUES ({$placeholders})";
+                $ftsStmt = $this->connection->prepare($ftsSql);
+                $values = [$docId];
+                foreach ($ftsColumns as $col) {
+                    $values[] = $this->getFieldText($document['content'], $col, $index);
+                }
+                $ftsStmt->execute($values);
+            } else {
+                $placeholders = implode(', ', array_fill(0, count($ftsColumns) + 1, '?'));
+                $columnsSql = 'id, ' . implode(', ', $ftsColumns);
+                $ftsSql = "INSERT OR REPLACE INTO {$index}_fts ({$columnsSql}) VALUES ({$placeholders})";
+                $ftsStmt = $this->connection->prepare($ftsSql);
+                $values = [$id];
+                foreach ($ftsColumns as $col) {
+                    $values[] = $this->getFieldText($document['content'], $col, $index);
+                }
+                $ftsStmt->execute($values);
             }
-            $ftsStmt->execute($values);
             
             // Only index terms if Levenshtein fuzzy search is enabled
             if ($this->useTermsIndex) {
@@ -262,15 +320,33 @@ class SqliteStorage implements StorageInterface
             $this->connection->beginTransaction();
             
             // Prepare statements once
-            $docStmt = $this->connection->prepare("
-                INSERT OR REPLACE INTO {$index} 
-                (id, content, metadata, language, type, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ");
+            $schema = $this->getSchemaMode($index);
+            if ($schema === 'external') {
+                $docStmt = $this->connection->prepare("
+                    INSERT INTO {$index} (id, content, metadata, language, type, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        content=excluded.content,
+                        metadata=excluded.metadata,
+                        language=excluded.language,
+                        type=excluded.type,
+                        timestamp=excluded.timestamp
+                ");
+            } else {
+                $docStmt = $this->connection->prepare("
+                    INSERT OR REPLACE INTO {$index} 
+                    (id, content, metadata, language, type, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ");
+            }
             
             // Prepare FTS insert statement dynamically
             $ftsColumns = $this->getFtsColumns($index);
-            $columnsSql = 'id, ' . implode(', ', $ftsColumns);
+            if ($schema === 'external') {
+                $columnsSql = 'rowid, ' . implode(', ', $ftsColumns);
+            } else {
+                $columnsSql = 'id, ' . implode(', ', $ftsColumns);
+            }
             $placeholders = implode(', ', array_fill(0, count($ftsColumns) + 1, '?'));
             $ftsStmt = $this->connection->prepare("INSERT OR REPLACE INTO {$index}_fts ({$columnsSql}) VALUES ({$placeholders})");
             
@@ -296,7 +372,7 @@ class SqliteStorage implements StorageInterface
                 $docStmt->execute([$id, $content, $metadata, $language, $type, $timestamp]);
                 
                 // Insert FTS content
-                $values = [$id];
+                $values = [$schema === 'external' ? $this->getDocId($index, $id) : $id];
                 foreach ($ftsColumns as $col) {
                     $values[] = $this->getFieldText($document['content'], $col, $index);
                 }
@@ -355,7 +431,15 @@ class SqliteStorage implements StorageInterface
             $this->connection->beginTransaction();
             
             $this->connection->prepare("DELETE FROM {$index} WHERE id = ?")->execute([$id]);
-            $this->connection->prepare("DELETE FROM {$index}_fts WHERE id = ?")->execute([$id]);
+            $schema = $this->getSchemaMode($index);
+            if ($schema === 'external') {
+                $docId = $this->getDocId($index, $id);
+                if ($docId !== null) {
+                    $this->connection->prepare("DELETE FROM {$index}_fts WHERE rowid = ?")->execute([$docId]);
+                }
+            } else {
+                $this->connection->prepare("DELETE FROM {$index}_fts WHERE id = ?")->execute([$id]);
+            }
             
             // Only delete from terms table if it exists (Levenshtein enabled)
             if ($this->useTermsIndex) {
@@ -364,11 +448,18 @@ class SqliteStorage implements StorageInterface
             
             // Only delete from spatial-related tables if R-tree support is available
             if ($this->hasRTreeSupport()) {
-                $this->connection->prepare("DELETE FROM {$index}_id_map WHERE string_id = ?")->execute([$id]);
-                
-                // Delete from spatial index (use hash of string ID for R-tree integer ID)
-                $spatialId = $this->getNumericId($id);
-                $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?")->execute([$spatialId]);
+                $schema = $this->getSchemaMode($index);
+                if ($schema === 'external') {
+                    $docId = $this->getDocId($index, $id);
+                    if ($docId !== null) {
+                        $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?")->execute([$docId]);
+                    }
+                } else {
+                    $this->connection->prepare("DELETE FROM {$index}_id_map WHERE string_id = ?")->execute([$id]);
+                    // Delete from spatial index (use hash of string ID for R-tree integer ID)
+                    $spatialId = $this->getNumericId($id);
+                    $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?")->execute([$spatialId]);
+                }
             }
             
             $this->connection->commit();
@@ -422,7 +513,10 @@ class SqliteStorage implements StorageInterface
             if ($from && is_array($from)) { $from = new GeoPoint($from['lat'], $from['lng']); }
             if ($from instanceof GeoPoint) {
                 $lat = $from->getLatitude(); $lng = $from->getLongitude();
-                $join = " INNER JOIN {$index}_id_map m ON m.string_id = d.id INNER JOIN {$index}_spatial s ON s.id = m.numeric_id";
+                $schema = $this->getSchemaMode($index);
+                $join = $schema === 'external'
+                    ? " INNER JOIN {$index}_spatial s ON s.id = d.doc_id"
+                    : " INNER JOIN {$index}_id_map m ON m.string_id = d.id INNER JOIN {$index}_spatial s ON s.id = m.numeric_id";
                 $distanceExpr = $this->getDistanceExpression($lat, $lng);
                 $sql = "SELECT d.id, d.content, d.metadata, d.language, d.type, d.timestamp, " . $distanceExpr . " AS distance, ((s.minLat+s.maxLat)/2.0) AS _centroid_lat, ((s.minLng+s.maxLng)/2.0) AS _centroid_lng FROM {$index} d" . $join . " WHERE 1=1";
                 $params = [];
@@ -474,7 +568,12 @@ class SqliteStorage implements StorageInterface
             }
             // Use table name for bm25() (SQLite expects the FTS table name)
             $bm25 = 'bm25(' . $index . '_fts' . (count($weights) ? ', ' . implode(', ', $weights) : '') . ') as rank';
-            $inner = "SELECT d.*, {$bm25}" . $spatial['select'] . " FROM {$index} d INNER JOIN {$index}_fts f ON d.id = f.id" . $spatial['join'] . " WHERE {$index}_fts MATCH ?" . $spatial['where'];
+            $schema = $this->getSchemaMode($index);
+            if ($schema === 'external') {
+                $inner = "SELECT d.*, {$bm25}" . $spatial['select'] . " FROM {$index} d INNER JOIN {$index}_fts f ON f.rowid = d.doc_id" . $spatial['join'] . " WHERE {$index}_fts MATCH ?" . $spatial['where'];
+            } else {
+                $inner = "SELECT d.*, {$bm25}" . $spatial['select'] . " FROM {$index} d INNER JOIN {$index}_fts f ON d.id = f.id" . $spatial['join'] . " WHERE {$index}_fts MATCH ?" . $spatial['where'];
+            }
             $params = array_merge([$searchQuery], $spatial['params']);
             if (isset($geoFilters['near']) && !empty($spatial['select']) && strpos($spatial['select'], 'distance') !== false) {
                 $radius = (float)$geoFilters['near']['radius'];
@@ -711,7 +810,12 @@ class SqliteStorage implements StorageInterface
         $hasSearchQuery = !empty(trim($searchQuery));
         
         if ($hasSearchQuery) {
-            $inner = "SELECT d.id" . $spatial['select'] . " FROM {$index} d INNER JOIN {$index}_fts f ON d.id = f.id" . $spatial['join'] . " WHERE {$index}_fts MATCH ?" . $spatial['where'];
+            $schema = $this->getSchemaMode($index);
+            if ($schema === 'external') {
+                $inner = "SELECT d.id" . $spatial['select'] . " FROM {$index} d INNER JOIN {$index}_fts f ON f.rowid = d.doc_id" . $spatial['join'] . " WHERE {$index}_fts MATCH ?" . $spatial['where'];
+            } else {
+                $inner = "SELECT d.id" . $spatial['select'] . " FROM {$index} d INNER JOIN {$index}_fts f ON d.id = f.id" . $spatial['join'] . " WHERE {$index}_fts MATCH ?" . $spatial['where'];
+            }
             $params = array_merge([$searchQuery], $spatial['params']);
             if (isset($geoFilters['near']) && !empty($spatial['select']) && strpos($spatial['select'], 'distance') !== false) {
                 $radius = (float)$geoFilters['near']['radius'];
@@ -875,6 +979,46 @@ class SqliteStorage implements StorageInterface
         
         return $stats;
     }
+
+    /**
+     * Migrate a legacy index (string id PK) to external-content/doc_id schema.
+     * - Creates a docs2 table with INTEGER PRIMARY KEY doc_id and UNIQUE id
+     * - Copies all rows, swaps tables, sets schema_mode meta to 'external'
+     * - Recreates spatial table without id_map
+     * - Rebuilds FTS content
+     */
+    public function migrateToExternalContent(string $index): void
+    {
+        $this->ensureConnected();
+        try {
+            $this->connection->beginTransaction();
+
+            // Create new table with doc_id
+            $this->connection->exec("CREATE TABLE IF NOT EXISTS {$index}_docs2 (doc_id INTEGER PRIMARY KEY, id TEXT UNIQUE, content TEXT NOT NULL, metadata TEXT, language TEXT, type TEXT DEFAULT 'default', timestamp INTEGER)");
+            $this->connection->exec("INSERT INTO {$index}_docs2 (id, content, metadata, language, type, timestamp) SELECT id, content, metadata, language, type, timestamp FROM {$index}");
+
+            // Swap tables
+            $this->connection->exec("ALTER TABLE {$index} RENAME TO {$index}_old");
+            $this->connection->exec("ALTER TABLE {$index}_docs2 RENAME TO {$index}");
+
+            // Ensure meta table and set schema mode
+            $this->connection->exec("CREATE TABLE IF NOT EXISTS {$index}_meta (key TEXT PRIMARY KEY, value TEXT)");
+            $this->setIndexMeta($index, 'schema_mode', 'external');
+
+            // Recreate spatial; drop legacy id_map
+            $this->connection->exec("DROP TABLE IF EXISTS {$index}_spatial");
+            $this->connection->exec("DROP TABLE IF EXISTS {$index}_id_map");
+            $this->connection->exec("CREATE VIRTUAL TABLE {$index}_spatial USING rtree(id, minLat, maxLat, minLng, maxLng)");
+
+            $this->connection->commit();
+        } catch (\Throwable $e) {
+            $this->connection->rollBack();
+            throw new StorageException('Migration to external-content failed: ' . $e->getMessage());
+        }
+
+        // Rebuild FTS after structure change
+        $this->rebuildFts($index);
+    }
     
     public function listIndices(): array
     {
@@ -897,7 +1041,7 @@ class SqliteStorage implements StorageInterface
             while ($row = $stmt->fetch()) {
                 $tableName = $row['name'];
                 
-                // Verify this is a valid index by checking for corresponding FTS and terms tables
+                // Verify this is a valid index by checking for corresponding FTS table
                 $ftsExists = $this->connection->query("
                     SELECT COUNT(*) 
                     FROM sqlite_master 
@@ -905,14 +1049,7 @@ class SqliteStorage implements StorageInterface
                     AND name = '{$tableName}_fts'
                 ")->fetchColumn() > 0;
                 
-                $termsExists = $this->connection->query("
-                    SELECT COUNT(*) 
-                    FROM sqlite_master 
-                    WHERE type = 'table' 
-                    AND name = '{$tableName}_terms'
-                ")->fetchColumn() > 0;
-                
-                if ($ftsExists && $termsExists) {
+                if ($ftsExists) {
                     // Get additional metadata about the index
                     $stats = $this->getIndexStats($tableName);
                     $indices[] = [
@@ -1020,6 +1157,70 @@ class SqliteStorage implements StorageInterface
             return $row ? $row['value'] : null;
         } catch (\PDOException $e) {
             return null;
+        }
+    }
+
+    private function getSchemaMode(string $index): string
+    {
+        $mode = $this->getIndexMeta($index, 'schema_mode');
+        if ($mode === 'external' || $mode === 'legacy') {
+            return $mode;
+        }
+        return $this->externalContentDefault ? 'external' : 'legacy';
+    }
+
+    private function getDocId(string $index, string $stringId): ?int
+    {
+        try {
+            $stmt = $this->connection->prepare("SELECT doc_id FROM {$index} WHERE id = ?");
+            $stmt->execute([$stringId]);
+            $val = $stmt->fetchColumn();
+            if ($val === false || $val === null) { return null; }
+            return (int)$val;
+        } catch (\PDOException $e) {
+            return null;
+        }
+    }
+
+    public function rebuildFts(string $index): void
+    {
+        $this->ensureConnected();
+        $schema = $this->getSchemaMode($index);
+        $ftsColumns = $this->getFtsColumns($index);
+        $prefix = $this->searchConfig['fts_prefix'] ?? null;
+        $prefixSql = '';
+        if (is_array($prefix) && !empty($prefix)) {
+            $prefixSql = ", prefix='" . implode(' ', array_map('intval', $prefix)) . "'";
+        }
+        $cols = implode(', ', array_map(fn($c) => $c, $ftsColumns));
+        $this->connection->exec("DROP TABLE IF EXISTS {$index}_fts");
+        if ($schema === 'external') {
+            $sql = "CREATE VIRTUAL TABLE {$index}_fts USING fts5({$cols}, content='{$index}', content_rowid='doc_id', tokenize='unicode61'{$prefixSql})";
+        } else {
+            $sql = "CREATE VIRTUAL TABLE {$index}_fts USING fts5(id UNINDEXED, {$cols}, tokenize='unicode61'{$prefixSql})";
+        }
+        $this->connection->exec($sql);
+
+        // Repopulate from stored docs
+        $stmt = $this->connection->query("SELECT id, content FROM {$index}");
+        $insCols = ($schema === 'external' ? 'rowid, ' : 'id, ') . implode(', ', $ftsColumns);
+        $placeholders = implode(', ', array_fill(0, count($ftsColumns) + 1, '?'));
+        $ins = $this->connection->prepare("INSERT INTO {$index}_fts ({$insCols}) VALUES ({$placeholders})");
+        while ($row = $stmt->fetch(\PDO::FETCH_ASSOC)) {
+            $id = $row['id'];
+            $doc = json_decode($row['content'], true) ?: [];
+            $vals = [];
+            if ($schema === 'external') {
+                $docId = $this->getDocId($index, $id);
+                if ($docId === null) { continue; }
+                $vals[] = $docId;
+            } else {
+                $vals[] = $id;
+            }
+            foreach ($ftsColumns as $col) {
+                $vals[] = $this->getFieldText($doc, $col, $index);
+            }
+            $ins->execute($vals);
         }
     }
 
@@ -1134,8 +1335,16 @@ class SqliteStorage implements StorageInterface
             return;
         }
         
-        // R-tree requires integer IDs, so we create a numeric hash of the string ID
-        $spatialId = $this->getNumericId($id);
+        // Determine spatial key
+        $schema = $this->getSchemaMode($index);
+        if ($schema === 'external') {
+            $docId = $this->getDocId($index, $id);
+            if ($docId === null) { return; }
+            $spatialId = (int)$docId;
+        } else {
+            // R-tree requires integer IDs, so we create a numeric hash of the string ID
+            $spatialId = $this->getNumericId($id);
+        }
         
         // First, delete any existing spatial data
         $deleteStmt = $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?");
@@ -1174,12 +1383,14 @@ class SqliteStorage implements StorageInterface
         // Insert into spatial index if we have valid coordinates
         if ($minLat !== null && $maxLat !== null && $minLng !== null && $maxLng !== null) {
             
-            // Store the ID mapping
-            $mapStmt = $this->connection->prepare("
-                INSERT OR REPLACE INTO {$index}_id_map (string_id, numeric_id)
-                VALUES (?, ?)
-            ");
-            $mapStmt->execute([$id, $spatialId]);
+            // Store the ID mapping (legacy schema only)
+            if ($schema !== 'external') {
+                $mapStmt = $this->connection->prepare("
+                    INSERT OR REPLACE INTO {$index}_id_map (string_id, numeric_id)
+                    VALUES (?, ?)
+                ");
+                $mapStmt->execute([$id, $spatialId]);
+            }
             
             // Insert spatial data
             $spatialStmt = $this->connection->prepare("
@@ -1230,8 +1441,12 @@ class SqliteStorage implements StorageInterface
                 $lat = $from->lat ?? $from->getLatitude();
                 $lng = $from->lng ?? $from->getLongitude();
             }
-            $spatialJoin = " LEFT JOIN {$index}_id_map m ON m.string_id = d.id " .
-                           "LEFT JOIN {$index}_spatial s ON s.id = m.numeric_id";
+            $schema = $this->getSchemaMode($index);
+            if ($schema === 'external') {
+                $spatialJoin = " LEFT JOIN {$index}_spatial s ON s.id = d.doc_id";
+            } else {
+                $spatialJoin = " LEFT JOIN {$index}_id_map m ON m.string_id = d.id LEFT JOIN {$index}_spatial s ON s.id = m.numeric_id";
+            }
             $distanceSelect = ", " . $this->getDistanceExpression($lat, $lng) . " as distance";
             $centroidSelect = ", ((s.minLat+s.maxLat)/2.0) AS _centroid_lat, ((s.minLng+s.maxLng)/2.0) AS _centroid_lng";
 
@@ -1266,8 +1481,12 @@ class SqliteStorage implements StorageInterface
             // Calculate bounding box for initial R-tree filtering
             $bounds = $point->getBoundingBox($radius);
             
-            $spatialJoin = " INNER JOIN {$index}_id_map m ON m.string_id = d.id " .
-                           "INNER JOIN {$index}_spatial s ON s.id = m.numeric_id";
+            $schema = $this->getSchemaMode($index);
+            if ($schema === 'external') {
+                $spatialJoin = " INNER JOIN {$index}_spatial s ON s.id = d.doc_id";
+            } else {
+                $spatialJoin = " INNER JOIN {$index}_id_map m ON m.string_id = d.id INNER JOIN {$index}_spatial s ON s.id = m.numeric_id";
+            }
             
             // R-tree bounding box filter with dateline handling
             $north = $bounds->getNorth();
@@ -1298,8 +1517,12 @@ class SqliteStorage implements StorageInterface
             $boundsData = $geoFilters['within']['bounds'];
             $bounds = is_array($boundsData) ? GeoBounds::fromArray($boundsData) : $boundsData;
             
-            $spatialJoin = " INNER JOIN {$index}_id_map m ON m.string_id = d.id " .
-                           "INNER JOIN {$index}_spatial s ON s.id = m.numeric_id";
+            $schema = $this->getSchemaMode($index);
+            if ($schema === 'external') {
+                $spatialJoin = " INNER JOIN {$index}_spatial s ON s.id = d.doc_id";
+            } else {
+                $spatialJoin = " INNER JOIN {$index}_id_map m ON m.string_id = d.id INNER JOIN {$index}_spatial s ON s.id = m.numeric_id";
+            }
             $centroidSelect = ", ((s.minLat+s.maxLat)/2.0) AS _centroid_lat, ((s.minLng+s.maxLng)/2.0) AS _centroid_lng";
             
             // R-tree intersection query with dateline handling
@@ -1399,17 +1622,19 @@ class SqliteStorage implements StorageInterface
                 $this->connection->exec($spatialSql);
             }
             
-            // Also ensure ID mapping table exists
-            $stmt->execute(["{$name}_id_map"]);
-            if ($stmt->fetch() === false) {
-                $mappingSql = "
-                    CREATE TABLE IF NOT EXISTS {$name}_id_map (
-                        string_id TEXT PRIMARY KEY,
-                        numeric_id INTEGER
-                    )
-                ";
-                $this->connection->exec($mappingSql);
-                $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_id_map_numeric ON {$name}_id_map(numeric_id)");
+            // Also ensure ID mapping table exists (legacy mode only)
+            if ($this->getSchemaMode($name) !== 'external') {
+                $stmt->execute(["{$name}_id_map"]);
+                if ($stmt->fetch() === false) {
+                    $mappingSql = "
+                        CREATE TABLE IF NOT EXISTS {$name}_id_map (
+                            string_id TEXT PRIMARY KEY,
+                            numeric_id INTEGER
+                        )
+                    ";
+                    $this->connection->exec($mappingSql);
+                    $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_id_map_numeric ON {$name}_id_map(numeric_id)");
+                }
             }
         } catch (\PDOException $e) {
             throw new StorageException("Failed to ensure spatial table exists for '{$name}': " . $e->getMessage());

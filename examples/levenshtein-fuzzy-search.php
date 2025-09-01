@@ -13,7 +13,9 @@ use YetiSearch\YetiSearch;
 // Initialize YetiSearch with Levenshtein fuzzy search enabled
 $config = [
     'storage' => [
-        'path' => '/tmp/movies-levenshtein.db'
+        'path' => '/tmp/movies-levenshtein.db',
+        // Explicitly use external-content schema
+        'external_content' => true,
     ],
     'search' => [
         'enable_fuzzy' => true,
@@ -28,7 +30,7 @@ $config = [
 $search = new YetiSearch($config);
 
 // Create the movies index
-$indexer = $search->createIndex('movies');
+$indexer = $search->createIndex('movies', ['external_content' => true]);
 
 // Example: Index some movie data with character names
 $movies = [
@@ -108,7 +110,7 @@ $basicConfig['storage']['path'] = '/tmp/movies-basic.db';
 $basicConfig['search']['fuzzy_algorithm'] = 'basic';
 
 $basicSearch = new YetiSearch($basicConfig);
-$basicIndexer = $basicSearch->createIndex('movies');
+$basicIndexer = $basicSearch->createIndex('movies', ['external_content' => true]);
 
 // Index the same data
 foreach ($movies as $movie) {
