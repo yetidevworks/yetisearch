@@ -1543,18 +1543,15 @@ class SqliteStorage implements StorageInterface
             $where = '';
             $params = [];
             $select = '';
-
-            // JSON metadata columns for geo. Use point if available, fallback to centroid of bounds.
-            $geoLat = "CAST(json_extract(d.metadata, '$._geo.lat') AS REAL)";
-            $geoLng = "CAST(json_extract(d.metadata, '$._geo.lng') AS REAL)";
-            $bNorth = "CAST(json_extract(d.metadata, '$._geo_bounds.north') AS REAL)";
-            $bSouth = "CAST(json_extract(d.metadata, '$._geo_bounds.south') AS REAL)";
-            $bEast  = "CAST(json_extract(d.metadata, '$._geo_bounds.east') AS REAL)";
-            $bWest  = "CAST(json_extract(d.metadata, '$._geo_bounds.west') AS REAL)";
-            $centLat = "(({$bNorth}+{$bSouth})/2.0)";
-            $centLng = "(({$bEast}+{$bWest})/2.0)";
-            $latCol = "COALESCE({$geoLat}, {$centLat})";
-            $lngCol = "COALESCE({$geoLng}, {$centLng})";
+            // Prefer using the spatial table we maintain (regular table when no RTree)
+            $schema = $this->getSchemaMode($index);
+            if ($schema === 'external') {
+                $spatialJoin = " LEFT JOIN {$index}_spatial s ON s.id = d.doc_id";
+            } else {
+                $spatialJoin = " LEFT JOIN {$index}_id_map m ON m.string_id = d.id LEFT JOIN {$index}_spatial s ON s.id = m.numeric_id";
+            }
+            // Centroid from stored bbox
+            $select .= ", ((s.minLat+s.maxLat)/2.0) AS _centroid_lat, ((s.minLng+s.maxLng)/2.0) AS _centroid_lng";
 
             if (isset($geoFilters['near'])) {
                 $near = $geoFilters['near'];
@@ -1567,41 +1564,31 @@ class SqliteStorage implements StorageInterface
                 $latRad = deg2rad($point->getLatitude());
                 $cosLat = max(0.000001, cos($latRad));
                 $degLon = $radius / (111000.0 * $cosLat);
-                $where .= " AND {$latCol} BETWEEN ? AND ? AND {$lngCol} BETWEEN ? AND ?";
+                $where .= " AND ((s.minLat+s.maxLat)/2.0) BETWEEN ? AND ? AND ((s.minLng+s.maxLng)/2.0) BETWEEN ? AND ?";
                 $params[] = $point->getLatitude() - $degLat;
                 $params[] = $point->getLatitude() + $degLat;
                 $params[] = $point->getLongitude() - $degLon;
                 $params[] = $point->getLongitude() + $degLon;
-                // Provide centroid columns so PHP can compute accurate distance
-                $select .= ", {$latCol} AS _centroid_lat, {$lngCol} AS _centroid_lng";
             }
 
             if (isset($geoFilters['within'])) {
                 $b = $geoFilters['within']['bounds'];
                 $bounds = is_array($b) ? GeoBounds::fromArray($b) : $b;
                 $north=$bounds->getNorth(); $south=$bounds->getSouth(); $east=$bounds->getEast(); $west=$bounds->getWest();
-                // Match either bounds intersection or point-in-rect
+                // Intersection test using stored bbox
                 if ($west > $east) {
-                    $boundsCond = "(({$bSouth} IS NOT NULL AND {$bNorth} IS NOT NULL AND {$bWest} IS NOT NULL AND {$bEast} IS NOT NULL AND " .
-                        "{$bNorth} >= ? AND {$bSouth} <= ? AND (({$bWest} <= ? AND {$bEast} >= -180) OR ({$bWest} <= 180 AND {$bEast} >= ?)))" .
-                        " OR ({$latCol} <= ? AND {$latCol} >= ? AND (({$lngCol} <= ? AND {$lngCol} >= -180) OR ({$lngCol} <= 180 AND {$lngCol} >= ?))))";
-                    $where .= " AND " . $boundsCond;
-                    array_push($params, $south, $north, $east, $west, $north, $south, $east, $west);
+                    $where .= " AND ((s.maxLat >= ? AND s.minLat <= ?) AND ((s.minLng <= ? AND s.maxLng >= -180) OR (s.minLng <= 180 AND s.maxLng >= ?)))";
+                    array_push($params, $south, $north, $east, $west);
                 } else {
-                    $boundsCond = "(({$bSouth} IS NOT NULL AND {$bNorth} IS NOT NULL AND {$bWest} IS NOT NULL AND {$bEast} IS NOT NULL AND " .
-                        "{$bNorth} >= ? AND {$bSouth} <= ? AND {$bEast} >= ? AND {$bWest} <= ?)" .
-                        " OR ({$latCol} <= ? AND {$latCol} >= ? AND {$lngCol} <= ? AND {$lngCol} >= ?))";
-                    $where .= " AND " . $boundsCond;
-                    array_push($params, $south, $north, $east, $west, $north, $south, $east, $west);
+                    $where .= " AND (s.maxLat >= ? AND s.minLat <= ? AND s.maxLng >= ? AND s.minLng <= ?)";
+                    array_push($params, $south, $north, $east, $west);
                 }
-                $select .= ", {$centLat} AS _centroid_lat, {$centLng} AS _centroid_lng";
             }
 
             if (isset($geoFilters['distance_sort']) && isset($geoFilters['distance_sort']['from'])) {
                 $from = $geoFilters['distance_sort']['from'];
                 if (is_array($from)) { $from = new GeoPoint($from['lat'], $from['lng']); }
-                // Add centroid for PHP-side distance computation and sorting
-                $select .= ", {$latCol} AS _centroid_lat, {$lngCol} AS _centroid_lng";
+                // Centroid already selected
                 if (isset($geoFilters['max_distance'])) {
                     $maxD = (float)$geoFilters['max_distance'];
                     $u = strtolower($geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? 'm'));
@@ -1610,7 +1597,7 @@ class SqliteStorage implements StorageInterface
                     $latRad = deg2rad($from->getLatitude());
                     $cosLat = max(0.000001, cos($latRad));
                     $degLon = $maxD / (111000.0 * $cosLat);
-                    $where .= " AND {$latCol} BETWEEN ? AND ? AND {$lngCol} BETWEEN ? AND ?";
+                    $where .= " AND ((s.minLat+s.maxLat)/2.0) BETWEEN ? AND ? AND ((s.minLng+s.maxLng)/2.0) BETWEEN ? AND ?";
                     $params[] = $from->getLatitude() - $degLat;
                     $params[] = $from->getLatitude() + $degLat;
                     $params[] = $from->getLongitude() - $degLon;
@@ -1618,7 +1605,7 @@ class SqliteStorage implements StorageInterface
                 }
             }
 
-            return [ 'join' => '', 'where' => $where, 'params' => $params, 'select' => $select ];
+            return [ 'join' => $spatialJoin, 'where' => $where, 'params' => $params, 'select' => $select ];
         }
         
         // Check if we need distance calculation for sorting
