@@ -424,7 +424,7 @@ class SqliteStorage implements StorageInterface
                 $lat = $from->getLatitude(); $lng = $from->getLongitude();
                 $join = " INNER JOIN {$index}_id_map m ON m.string_id = d.id INNER JOIN {$index}_spatial s ON s.id = m.numeric_id";
                 $distanceExpr = $this->getDistanceExpression($lat, $lng);
-                $sql = "SELECT d.*, " . $distanceExpr . " AS distance FROM {$index} d" . $join . " WHERE 1=1";
+                $sql = "SELECT d.id, d.content, d.metadata, d.language, d.type, d.timestamp, " . $distanceExpr . " AS distance, ((s.minLat+s.maxLat)/2.0) AS _centroid_lat, ((s.minLng+s.maxLng)/2.0) AS _centroid_lng FROM {$index} d" . $join . " WHERE 1=1";
                 $params = [];
                 if (isset($geoFilters['max_distance'])) {
                     $maxD = (float)$geoFilters['max_distance'];
@@ -489,7 +489,7 @@ class SqliteStorage implements StorageInterface
             // No text search, only filters and/or spatial search
             $sql = "
                 SELECT 
-                    d.*,
+                    d.id, d.content, d.metadata, d.language, d.type, d.timestamp,
                     0 as rank" . $spatial['select'] . "
                 FROM {$index} d" . 
                 (!empty($spatial['join']) ? $spatial['join'] : "") . "
