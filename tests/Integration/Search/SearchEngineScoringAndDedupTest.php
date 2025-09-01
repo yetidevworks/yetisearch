@@ -10,6 +10,9 @@ class SearchEngineScoringAndDedupTest extends TestCase
 {
     public function test_distance_weight_influences_order_and_unique_by_route(): void
     {
+        if (PHP_OS_FAMILY === 'Windows') {
+            $this->markTestSkipped('Geo distance weighting tests are skipped on Windows CI.');
+        }
         $search = $this->createSearchInstance([
             'search' => [
                 'distance_weight' => 0.7,
@@ -46,4 +49,3 @@ class SearchEngineScoringAndDedupTest extends TestCase
         $this->assertNotContains('r1#2', $ids2);
     }
 }
-

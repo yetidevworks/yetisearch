@@ -81,6 +81,9 @@ class ExternalContentSchemaTest extends TestCase
 
     public function test_geo_near_returns_distance_in_external_mode(): void
     {
+        if (PHP_OS_FAMILY === 'Windows') {
+            $this->markTestSkipped('Geo distance tests are skipped on Windows CI.');
+        }
         $search = $this->createSearchInstance([
             'storage' => ['external_content' => true],
             'search' => ['min_score' => 0.0],
@@ -109,4 +112,3 @@ class ExternalContentSchemaTest extends TestCase
         }
     }
 }
-

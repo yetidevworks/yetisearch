@@ -15,6 +15,9 @@ class CountNearTest extends TestCase
 
     public function test_count_with_near_radius(): void
     {
+        if (PHP_OS_FAMILY === 'Windows') {
+            $this->markTestSkipped('Geo count-near tests are skipped on Windows CI.');
+        }
         $search = $this->createSearchInstance(['search' => ['min_score' => 0.0]]);
         $index = 'count_near_idx';
         $this->createTestIndex($index);

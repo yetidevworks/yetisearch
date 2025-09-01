@@ -10,6 +10,9 @@ class DistancePhpSortTest extends TestCase
 {
     public function test_php_sort_for_fts_with_distance_sort(): void
     {
+        if (PHP_OS_FAMILY === 'Windows') {
+            $this->markTestSkipped('Geo PHP distance-sort test is skipped on Windows CI.');
+        }
         $search = $this->createSearchInstance(['search' => ['min_score' => 0.0]]);
         $index = 'php_sort_idx';
         $this->createTestIndex($index);

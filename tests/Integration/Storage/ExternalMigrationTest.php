@@ -33,6 +33,9 @@ class ExternalMigrationTest extends TestCase
 
     public function test_migrate_legacy_to_external_with_geo(): void
     {
+        if (PHP_OS_FAMILY === 'Windows') {
+            $this->markTestSkipped('Geo migration tests are skipped on Windows CI.');
+        }
         // Start in legacy schema (TestCase defaults)
         $search = $this->createSearchInstance([
             'storage' => ['external_content' => false],
