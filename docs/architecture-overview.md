@@ -44,3 +44,12 @@ Notes
 - Legacy mode (string `id` as PK + `id_map`) remains supported for backward compatibility.
 - Configuration controls field boosts, chunking, fuzzy behavior, SQLite pragmas, and schema mode.
 - See `README.md` for migration commands and examples.
+
+### Why we don’t use SQLite triggers for FTS5
+- External-content FTS5 is kept in sync explicitly by application code (insert/update/delete write both the `{index}` row and `{index}_fts` row with `rowid = doc_id`). We also provide a full rebuild path.
+- Triggers are possible, but we avoid them for these reasons:
+  - Performance: bulk indexing would pay per-row trigger costs (multiple `json_extract` and FTS writes) vs our prepared, batched path.
+  - Flexibility: FTS columns are dynamic per index; triggers would need regeneration on any field set change and complicate migrations.
+  - Double-write hazards: app code and triggers could conflict unless guarded by additional config and branches.
+  - Portability: relying on JSON1 in triggers isn’t guaranteed in all SQLite builds; our code path doesn’t require it.
+- Net result: explicit, code-driven sync is faster, easier to evolve, and simpler to debug for this project’s needs.

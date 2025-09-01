@@ -23,6 +23,7 @@ if (!file_exists($before) || !file_exists($after)) {
     exit(1);
 }
 
+// Parse indexing metrics
 $bt = (float)getMetric($before, 'Total time');
 $at = (float)getMetric($after,  'Total time');
 $bi = (float)getMetric($before, 'Indexing time');
@@ -41,6 +42,94 @@ printf("Indexing rate: %.2f -> %.2f docs/s (Δ %+0.2f docs/s)\n", $br, $ar, $ar 
 printf("Memory used: %.2f MB -> %.2f MB (Δ %+0.2f MB)\n", $bm, $am, $am - $bm);
 printf("Peak memory: %.2f MB -> %.2f MB (Δ %+0.2f MB)\n", $bp, $ap, $ap - $bp);
 echo "\nFiles:\n - $before\n - $after\n";
+
+// ---- Search results comparison ----
+function parseSearchResults(string $path): array {
+    $lines = @file($path, FILE_IGNORE_NEW_LINES) ?: [];
+    $mode = null; // 'standard' | 'fuzzy' | null
+    $data = [
+        'standard' => [],
+        'fuzzy' => [],
+    ];
+    $currentQuery = null;
+
+    $pushResult = function(string $mode, ?string $q, array &$acc, array $curr) {
+        if ($mode && $q !== null) {
+            if (!isset($acc[$mode][$q])) { $acc[$mode][$q] = $curr; }
+        }
+    };
+
+    $currBlock = [
+        'time_ms' => 0.0,
+        'results_found' => 0,
+        'total_hits' => 0,
+        'titles' => [],
+    ];
+
+    foreach ($lines as $line) {
+        if (strpos($line, '--- Standard Search') === 0) { $mode = 'standard'; $currentQuery = null; $currBlock = ['time_ms'=>0.0,'results_found'=>0,'total_hits'=>0,'titles'=>[]]; continue; }
+        if (strpos($line, '--- Fuzzy Search') === 0)    { $mode = 'fuzzy';    $currentQuery = null; $currBlock = ['time_ms'=>0.0,'results_found'=>0,'total_hits'=>0,'titles'=>[]]; continue; }
+        // End of sections
+        if ($mode !== 'standard' && $mode !== 'fuzzy') { continue; }
+
+        if (preg_match("/^Query: '(.+)' \(took ([0-9.]+) ms\)/", $line, $m)) {
+            // Push previous if any
+            $pushResult($mode, $currentQuery, $data, $currBlock);
+            // Start new block
+            $currentQuery = $m[1];
+            $currBlock = ['time_ms' => (float)$m[2], 'results_found'=>0, 'total_hits'=>0, 'titles'=>[]];
+            continue;
+        }
+        if (preg_match('/^Results found: (\d+) \(Total hits: (\d+)\)/', $line, $m)) {
+            $currBlock['results_found'] = (int)$m[1];
+            $currBlock['total_hits'] = (int)$m[2];
+            continue;
+        }
+        if (preg_match('/^\s+\d+\.\s+(.+?)\s+\(Score:/', $line, $m)) {
+            $currBlock['titles'][] = $m[1];
+            continue;
+        }
+    }
+    // Push last block
+    $pushResult($mode ?? '', $currentQuery, $data, $currBlock);
+    return $data;
+}
+
+$beforeSearch = parseSearchResults($before);
+$afterSearch  = parseSearchResults($after);
+
+// Helper to pretty print a comparison line
+function printQueryCompare(string $label, string $query, array $b, array $a): void {
+    $bTime = $b['time_ms'] ?? 0.0; $aTime = $a['time_ms'] ?? 0.0;
+    $bHits = $b['total_hits'] ?? 0; $aHits = $a['total_hits'] ?? 0;
+    $deltaMs = $aTime - $bTime; $deltaHits = $aHits - $bHits;
+    printf("- %s | '%s': %.2fms -> %.2fms (Δ %+0.2fms); hits %d -> %d (Δ %+d)\n",
+        $label, $query, $bTime, $aTime, $deltaMs, $bHits, $aHits, $deltaHits
+    );
+    $bt = array_slice($b['titles'] ?? [], 0, 3);
+    $at = array_slice($a['titles'] ?? [], 0, 3);
+    if ($bt || $at) {
+        echo "  before: ".($bt ? implode(' | ', $bt) : '(no results)')."\n";
+        echo "  after : ".($at ? implode(' | ', $at) : '(no results)')."\n";
+    }
+}
+
+echo "\nSearch comparison (same queries)\n";
+echo "--------------------------------\n";
+
+foreach (['standard' => 'Standard (fuzzy OFF)', 'fuzzy' => 'Fuzzy (fuzzy ON)'] as $sectionKey => $sectionLabel) {
+    $bq = array_keys($beforeSearch[$sectionKey] ?? []);
+    $aq = array_keys($afterSearch[$sectionKey] ?? []);
+    $allQueries = array_values(array_unique(array_merge($bq, $aq)));
+    if (!$allQueries) { continue; }
+    echo "$sectionLabel\n";
+    foreach ($allQueries as $q) {
+        $b = $beforeSearch[$sectionKey][$q] ?? [];
+        $a = $afterSearch[$sectionKey][$q] ?? [];
+        printQueryCompare('Query', $q, $b, $a);
+    }
+    echo "\n";
+}
 
 // Append a dated row to benchmarks/benchmark-results.md under a Run History table
 $resultsMd = __DIR__ . '/../benchmarks/benchmark-results.md';
