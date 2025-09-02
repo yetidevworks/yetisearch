@@ -814,7 +814,10 @@ class SqliteStorage implements StorageInterface
             while ($row = $stmt->fetch()) {
                 $rowCount++;
                 $content = json_decode($row['content'], true);
-                $baseScore = abs($row['rank']);
+                // Convert FTS5 bm25 rank (lower is better) into a higher-is-better base score.
+                // Using inverse transform stabilizes normalization and avoids 0.0 plateaus.
+                $rank = (float)($row['rank'] ?? 0.0);
+                $baseScore = 1.0 / (1.0 + max(0.0, $rank));
                 
                 // Apply field weights if provided
                 if (!empty($fieldWeights) && $hasSearchQuery) {
