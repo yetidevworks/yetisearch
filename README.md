@@ -15,6 +15,7 @@ A powerful, pure-PHP search engine library with advanced full-text search capabi
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
+- [Example Applications](#example-applications)
 - [Usage Examples](#usage-examples)
   - [Basic Indexing](#basic-indexing)
   - [Advanced Indexing](#advanced-indexing)
@@ -134,6 +135,33 @@ foreach ($results['results'] as $result) {
     echo $result['excerpt'] . "\n\n";
 }
 ```
+
+## Example Applications
+
+The `examples/` directory contains fully working demonstrations of YetiSearch features:
+
+### 🏢 Apartment Search Tutorial
+Complete real-world example of a property search application:
+- **File**: [`examples/apartment-search-simple.php`](examples/apartment-search-simple.php)
+- **Features demonstrated**:
+  - Structured content indexing (title, description)
+  - Metadata fields (price, bedrooms, bathrooms, sqft, location)
+  - Geo-spatial search with radius filtering
+  - Price range and feature filtering
+  - DSL queries with natural language syntax
+  - Fluent query builder interface
+  - Distance calculations and sorting
+
+Run it:
+```bash
+php examples/apartment-search-simple.php
+```
+
+### 🔍 Other Examples
+- **Type-ahead search**: [`examples/type-ahead.php`](examples/type-ahead.php) - Interactive as-you-type search
+- **Geo facets and k-NN**: [`examples/geo-facets-knn.php`](examples/geo-facets-knn.php) - Distance faceting and nearest neighbors
+- **DSL examples**: [`examples/dsl-examples.php`](examples/dsl-examples.php) - Query builder demonstrations
+- **Custom fields**: [`examples/apartment-search-tutorial.php`](examples/apartment-search-tutorial.php) - Extended version with amenities
 
 ## Usage Examples
 
@@ -1739,7 +1767,7 @@ Behavior
 
 ## DSL (Domain Specific Language)
 
-YetiSearch now supports a powerful DSL for building complex queries with multiple syntaxes:
+YetiSearch now supports a powerful DSL for building complex queries with multiple syntaxes. For comprehensive documentation with migration guide and advanced examples, see [`docs/DSL.md`](docs/DSL.md).
 
 ### Natural Language Query Syntax
 

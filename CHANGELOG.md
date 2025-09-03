@@ -21,6 +21,11 @@
   - Support for geo queries: `nearPoint()`, `withinBounds()`, `sortByDistance()`
   - Get results, first item, or count with `get()`, `first()`, `count()` methods
   
+- **Metadata fields configuration**: Configurable metadata field recognition for DSL
+  - Auto-prefixing of recognized metadata fields with 'metadata.' in queries
+  - Customizable field lists for third-party applications
+  - Support for both content fields and metadata fields in queries
+  
 - **Field aliasing**: Map user-friendly names to actual database field names
 - **CLI integration**: New commands `search-dsl` and `search-url` for testing DSL queries
 
@@ -30,10 +35,22 @@
 - `src/DSL/QueryBuilder.php` - Main DSL interface with three query methods
 - `tests/DSL/QueryParserTest.php` - Comprehensive test coverage for all parsers
 - `docs/DSL.md` - Complete documentation with examples and migration guide
+- `examples/apartment-search-simple.php` - Comprehensive tutorial demonstrating all YetiSearch features
+- `examples/apartment-search-tutorial.php` - Extended version with custom fields configuration
+
+### Bug Fixes
+- **FTS5 external content deletion**: Fixed critical bug where deleting documents with external content tables failed
+  - Now uses FTS5 'rebuild' command to properly sync deletions
+  - Automatically disables multi-column FTS when using external content with JSON storage
+- **DSL filter parsing**: Fixed IN operator being incorrectly parsed as field name
+- **Metadata sorting**: Fixed ORDER BY for metadata fields using proper JSON extraction
+- **insertBatch validation**: Added column name sanitization to prevent SQL errors with invalid field names
+- **Search result structure**: Fixed content field access in search results
 
 ### Improvements
 - **Enhanced CLI**: Added examples for DSL usage in help output
-- **Documentation**: Updated README with DSL section and examples
+- **Documentation**: Updated README with DSL section and links to example files
+- **Geo search display**: Fixed distance units conversion from meters to miles in examples
 
 ## [2.1.0] - 2024-01-04
 
