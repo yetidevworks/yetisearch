@@ -1819,9 +1819,43 @@ $count = $builder->query('golang')
 - **Keywords**: `FIELDS`, `SORT`, `PAGE`, `LIMIT`, `OFFSET`, `FUZZY`, `NEAR`, `WITHIN`
 - **Geo Queries**: Support for location-based filtering and sorting
 - **Field Aliases**: Map user-friendly names to actual field names
+- **Metadata Fields**: Automatic handling of filterable/sortable attributes
 - **Negation**: Use `-` prefix to negate conditions
 
-For complete DSL documentation with examples, see [docs/DSL.md](docs/DSL.md).
+### Metadata Fields
+
+YetiSearch distinguishes between content (searchable text) and metadata (filterable attributes):
+
+```php
+// Index documents with proper structure
+$yetiSearch->index('products', [
+    'id' => 'prod-123',
+    'content' => [
+        // Full-text searchable fields
+        'title' => 'Wireless Headphones',
+        'description' => 'Premium audio quality'
+    ],
+    'metadata' => [
+        // Filterable/sortable fields
+        'price' => 299.99,
+        'brand' => 'AudioTech',
+        'rating' => 4.5,
+        'in_stock' => true
+    ]
+]);
+
+// Configure custom metadata fields for your application
+$builder = new QueryBuilder($yetiSearch, [
+    'metadata_fields' => ['price', 'brand', 'rating', 'in_stock']
+]);
+
+// Use metadata fields naturally in queries
+$results = $builder->searchWithDSL('products', 
+    'headphones AND price < 300 AND rating >= 4 SORT -rating'
+);
+```
+
+Common metadata fields like `author`, `status`, `price`, `views`, etc. are automatically recognized. See [docs/DSL.md](docs/DSL.md) for complete documentation.
 
 ## CLI
 

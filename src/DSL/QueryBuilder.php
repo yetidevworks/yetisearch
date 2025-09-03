@@ -6,6 +6,14 @@ use YetiSearch\Models\SearchQuery;
 use YetiSearch\YetiSearch;
 use YetiSearch\Exceptions\InvalidArgumentException;
 
+/**
+ * QueryBuilder provides multiple query interfaces for YetiSearch
+ * 
+ * Supports three query styles:
+ * - Natural language DSL: 'author = "John" AND status = "published" SORT -created_at'
+ * - URL parameters: 'filter[author][eq]=John&sort=-created_at'
+ * - Fluent PHP interface: ->where('author', 'John')->orderBy('created_at', 'desc')
+ */
 class QueryBuilder
 {
     private YetiSearch $yetiSearch;
@@ -13,6 +21,20 @@ class QueryBuilder
     private URLQueryParser $urlParser;
     private array $config;
     
+    /**
+     * Constructor
+     * 
+     * @param YetiSearch $yetiSearch YetiSearch instance
+     * @param array $config Configuration options:
+     *   - field_aliases: Map of field aliases (e.g., ['writer' => 'author'])
+     *   - default_limit: Default result limit (default: 20)
+     *   - max_limit: Maximum allowed limit (default: 1000)
+     *   - default_fuzzy: Enable fuzzy search by default (default: false)
+     *   - default_highlight: Enable highlighting by default (default: true)
+     *   - metadata_fields: Fields to treat as metadata (auto-prefixed with 'metadata.')
+     *     Common fields like 'author', 'status', 'price' are included by default.
+     *     These fields are stored in the metadata array and used for filtering/sorting.
+     */
     public function __construct(YetiSearch $yetiSearch, array $config = [])
     {
         $this->yetiSearch = $yetiSearch;
@@ -21,7 +43,16 @@ class QueryBuilder
             'default_limit' => 20,
             'max_limit' => 1000,
             'default_fuzzy' => false,
-            'default_highlight' => true
+            'default_highlight' => true,
+            // Fields that should be treated as metadata (not content)
+            // These are automatically prefixed with 'metadata.' in filters and sorts
+            'metadata_fields' => [
+                'author', 'status', 'category', 'tags', 'date', 'published', 'draft', 'type',
+                'created_at', 'updated_at', 'views', 'likes', 'rating', 'score', 'priority',
+                'user', 'owner', 'assignee', 'reviewer', 'editor', 'price', 'cost', 'quantity',
+                'stock', 'sku', 'id', 'uuid', 'slug', 'url', 'email', 'phone', 'address',
+                'city', 'state', 'country', 'zip', 'lat', 'lng', 'latitude', 'longitude'
+            ]
         ], $config);
         
         $this->queryParser = new QueryParser($this->config['field_aliases']);
@@ -69,6 +100,30 @@ class QueryBuilder
         // Apply limits
         $limit = min($searchQuery->getLimit(), $this->config['max_limit']);
         
+        // Process filters to add metadata prefix where needed
+        $filters = $searchQuery->getFilters();
+        $processedFilters = [];
+        foreach ($filters as $filter) {
+            $field = $filter['field'];
+            // Check if this field should be treated as metadata
+            if (in_array($field, $this->config['metadata_fields']) && strpos($field, 'metadata.') !== 0) {
+                $filter['field'] = 'metadata.' . $field;
+            }
+            $processedFilters[] = $filter;
+        }
+        
+        // Process sort fields to add metadata prefix where needed
+        $sort = $searchQuery->getSort();
+        $processedSort = [];
+        foreach ($sort as $field => $direction) {
+            // Check if this field should be treated as metadata
+            if (in_array($field, $this->config['metadata_fields']) && strpos($field, 'metadata.') !== 0) {
+                $processedSort['metadata.' . $field] = $direction;
+            } else {
+                $processedSort[$field] = $direction;
+            }
+        }
+        
         // Build options array for YetiSearch
         $searchOptions = array_merge([
             'limit' => $limit,
@@ -81,8 +136,8 @@ class QueryBuilder
             'fields' => $searchQuery->getFields(),
             'boost' => $searchQuery->getBoost(),
             'facets' => $searchQuery->getFacets(),
-            'sort' => $searchQuery->getSort(),
-            'filters' => $searchQuery->getFilters()
+            'sort' => $processedSort,
+            'filters' => $processedFilters
         ], $options);
         
         // Add geo filters if present
@@ -136,6 +191,46 @@ class QueryBuilder
         $this->queryParser = new QueryParser($aliases);
         $this->urlParser = new URLQueryParser($aliases);
         
+        return $this;
+    }
+    
+    /**
+     * Set which fields should be treated as metadata fields
+     * 
+     * Metadata fields are automatically prefixed with 'metadata.' when used in
+     * filters and sorts. This allows natural query syntax like 'price > 100'
+     * instead of requiring 'metadata.price > 100'.
+     * 
+     * @param array $fields List of field names to treat as metadata
+     * @return self For method chaining
+     * 
+     * @example
+     * $builder->setMetadataFields(['company', 'department', 'employee_id']);
+     */
+    public function setMetadataFields(array $fields): self
+    {
+        $this->config['metadata_fields'] = $fields;
+        return $this;
+    }
+    
+    /**
+     * Add a field to the metadata fields list
+     * 
+     * Adds a single field to the existing metadata fields list without
+     * replacing the entire list.
+     * 
+     * @param string $field Field name to add to metadata fields
+     * @return self For method chaining
+     * 
+     * @example
+     * $builder->addMetadataField('custom_score')
+     *         ->addMetadataField('priority_level');
+     */
+    public function addMetadataField(string $field): self
+    {
+        if (!in_array($field, $this->config['metadata_fields'])) {
+            $this->config['metadata_fields'][] = $field;
+        }
         return $this;
     }
 }

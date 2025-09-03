@@ -233,9 +233,145 @@ $results = $builder->query('')
     ->get();
 ```
 
+### Metadata Fields Configuration
+
+YetiSearch distinguishes between content fields (searchable text) and metadata fields (filterable/sortable attributes). Understanding this distinction is crucial for proper query construction.
+
+#### What are Metadata Fields?
+
+Metadata fields are document attributes stored separately from the searchable content. They are:
+- Used for filtering (e.g., `author = "John"`)
+- Used for sorting (e.g., `SORT -views`)
+- Stored in the `metadata` array when indexing documents
+- Accessed via JSON extraction in SQL queries
+
+#### Default Metadata Fields
+
+YetiSearch comes with a predefined list of common metadata fields that are automatically recognized:
+
+```php
+// Default metadata fields (automatically prefixed with 'metadata.')
+$defaultFields = [
+    'author', 'status', 'category', 'tags', 'date', 'published', 'draft', 'type',
+    'created_at', 'updated_at', 'views', 'likes', 'rating', 'score', 'priority',
+    'user', 'owner', 'assignee', 'reviewer', 'editor', 'price', 'cost', 'quantity',
+    'stock', 'sku', 'id', 'uuid', 'slug', 'url', 'email', 'phone', 'address',
+    'city', 'state', 'country', 'zip', 'lat', 'lng', 'latitude', 'longitude'
+];
+```
+
+#### Configuring Custom Metadata Fields
+
+You can customize which fields are treated as metadata in three ways:
+
+##### 1. During QueryBuilder Construction
+
+```php
+$builder = new QueryBuilder($yetiSearch, [
+    'metadata_fields' => [
+        // Your custom fields
+        'company', 'department', 'priority_level', 
+        'custom_score', 'internal_id', 'workflow_state'
+    ]
+]);
+```
+
+##### 2. Using the setMetadataFields Method
+
+```php
+// Replace the entire metadata fields list
+$builder->setMetadataFields([
+    'author', 'status', 'company', 'department', 'custom_field'
+]);
+```
+
+##### 3. Adding Individual Fields
+
+```php
+// Add fields one at a time (keeps existing fields)
+$builder->addMetadataField('company');
+$builder->addMetadataField('department');
+$builder->addMetadataField('custom_score');
+```
+
+#### Indexing Documents with Metadata
+
+When indexing documents, always place filterable/sortable attributes in the `metadata` array:
+
+```php
+$yetiSearch->index('products', [
+    'id' => 'prod-123',
+    'content' => [
+        // Searchable text content
+        'title' => 'Premium Wireless Headphones',
+        'description' => 'High-quality audio with noise cancellation',
+        'features' => 'Bluetooth 5.0, 30-hour battery life'
+    ],
+    'metadata' => [
+        // Filterable/sortable attributes
+        'price' => 299.99,
+        'category' => 'electronics',
+        'brand' => 'AudioTech',
+        'stock' => 50,
+        'rating' => 4.5,
+        'release_date' => '2024-01-15',
+        'on_sale' => true
+    ]
+]);
+```
+
+#### Using Metadata Fields in Queries
+
+Once configured, metadata fields can be used naturally in DSL queries without the `metadata.` prefix:
+
+```php
+// DSL automatically adds metadata. prefix for recognized fields
+$results = $builder->searchWithDSL('products',
+    'headphones AND price < 300 AND rating >= 4 SORT -rating'
+);
+
+// URL parameters work the same way
+$results = $builder->searchWithURL('products',
+    'q=headphones&filter[price][lt]=300&filter[rating][gte]=4&sort=-rating'
+);
+
+// Fluent interface
+$results = $builder->query('headphones')
+    ->in('products')
+    ->where('price', 300, '<')
+    ->where('rating', 4, '>=')
+    ->orderBy('rating', 'desc')
+    ->get();
+```
+
+#### Manual Metadata Prefix
+
+If a field isn't in your configured metadata fields list, you can still access it by using the explicit prefix:
+
+```php
+// For non-configured metadata fields, use explicit prefix
+$results = $builder->searchWithDSL('products',
+    'metadata.custom_attribute = "special"'
+);
+```
+
+#### Important Notes
+
+1. **Performance**: Metadata fields are extracted from JSON at query time, which may be slower than indexed columns for very large datasets.
+
+2. **Type Casting**: Numeric comparisons (>, <, >=, <=) automatically cast values to REAL in SQL. Ensure your metadata values are stored as numbers, not strings.
+
+3. **Content vs Metadata**: 
+   - Content fields are indexed for full-text search
+   - Metadata fields are for filtering and sorting
+   - Don't duplicate data between content and metadata
+
+4. **Direct Columns**: The following fields are always treated as direct database columns (not metadata):
+   - `type`, `language`, `id`, `timestamp`
+
 ### Field Aliases
 
-You can configure field aliases to map user-friendly names to actual field names:
+In addition to metadata field configuration, you can create aliases for field names:
 
 ```php
 $builder->setFieldAliases([
@@ -249,6 +385,8 @@ $results = $builder->searchWithDSL('articles',
     'writer = "John" AND published > "2024-01-01"'
 );
 ```
+
+Field aliases work in combination with metadata field configuration. If an aliased field maps to a metadata field, it will be properly prefixed.
 
 ### Integration with YetiSearch
 

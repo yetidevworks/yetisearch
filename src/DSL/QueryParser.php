@@ -57,13 +57,13 @@ class QueryParser
         $tokens = [];
         $pattern = '/
             (?P<string>"[^"]*"|\'[^\']*\')           | # Quoted strings
+            (?P<operator>=|!=|>=|<=|>|<|LIKE|IN|NOT\s+IN|AND|OR) | # Operators (check before field)
+            (?P<keyword>FIELDS|SORT|PAGE|LIMIT|OFFSET|FUZZY|HIGHLIGHT|NEAR|WITHIN) | # Keywords
             (?P<field>\w+(?:\.\w+)*)                 | # Field names (with dots for nested)
-            (?P<operator>=|!=|>|<|>=|<=|LIKE|IN|NOT\s+IN|AND|OR) | # Operators
             (?P<bracket>\[|\])                       | # Array brackets
             (?P<paren>\(|\))                         | # Parentheses
             (?P<comma>,)                              | # Comma
             (?P<colon>:)                              | # Colon
-            (?P<keyword>FIELDS|SORT|PAGE|LIMIT|OFFSET|FUZZY|HIGHLIGHT|NEAR|WITHIN) | # Keywords
             (?P<number>-?\d+\.?\d*)                  | # Numbers
             (?P<wildcard>%\w*%)                      | # Wildcards
             (?P<whitespace>\s+)                      # Whitespace
