@@ -6,3 +6,5 @@
 /benchmarks/movies.json
 /.claude
 /AGENTS.md
+*.db-shm
+*.db-wal
