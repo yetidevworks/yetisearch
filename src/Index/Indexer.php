@@ -388,10 +388,16 @@ class Indexer implements IndexerInterface
             // Pass field names from config if available
             $storageOptions = $this->config;
             if (isset($this->config['fields']) && is_array($this->config['fields'])) {
-                // Extract field names for FTS columns
-                $fieldNames = array_keys($this->config['fields']);
-                // Only set fields if we have more than just 'content'
-                if ($fieldNames !== ['content']) {
+                // Extract only indexed field names for FTS columns
+                $fieldNames = [];
+                foreach ($this->config['fields'] as $fieldName => $fieldConfig) {
+                    // Only include fields that should be indexed (default is true)
+                    if ($fieldConfig['index'] ?? true) {
+                        $fieldNames[] = $fieldName;
+                    }
+                }
+                // Only set fields if we have indexed fields other than just 'content'
+                if (!empty($fieldNames) && $fieldNames !== ['content']) {
                     $storageOptions['fields'] = $fieldNames;
                 }
             }

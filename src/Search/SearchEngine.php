@@ -599,8 +599,10 @@ class SearchEngine implements SearchEngineInterface
             
             $highlights = [];
             if ($query->shouldHighlight()) {
+                // Extract content fields for highlighting (exclude metadata and system fields)
+                $contentFields = array_diff_key($result, array_flip(['id', 'score', 'metadata', 'language', 'type', 'timestamp', 'distance']));
                 $highlights = $this->generateHighlights(
-                    $result['document'],
+                    $contentFields,
                     $originalQuery ?? $query->getQuery(),
                     $query->getHighlightLength()
                 );
@@ -620,13 +622,15 @@ class SearchEngine implements SearchEngineInterface
                 $finalScore = round((1.0 - $dw) * $normalizedScore + $dw * $distanceScore, 1);
             }
             
-            $filteredDocument = $this->filterResultFields($result['document']);
+            // Extract content fields (exclude metadata and system fields)
+            $contentFields = array_diff_key($result, array_flip(['id', 'score', 'metadata', 'language', 'type', 'timestamp', 'distance']));
+            $filteredDocument = $this->filterResultFields($contentFields);
             
             // Log first result to see structure
             static $logged = false;
             if (!$logged) {
                 $this->logger->debug('Result document fields', [
-                    'raw_fields' => array_keys($result['document']),
+                    'raw_fields' => array_keys($contentFields),
                     'filtered_fields' => array_keys($filteredDocument),
                     'has_route' => isset($filteredDocument['route']),
                     'route_value' => $filteredDocument['route'] ?? 'NOT SET'
@@ -704,8 +708,10 @@ class SearchEngine implements SearchEngineInterface
         // Try to determine which terms matched in this result
         // This is a simplified approach - ideally we'd parse the FTS match info
         $documentText = '';
-        if (isset($result['document'])) {
-            foreach ($result['document'] as $field => $value) {
+        // Extract content fields for scoring
+        $contentFields = array_diff_key($result, array_flip(['id', 'score', 'metadata', 'language', 'type', 'timestamp', 'distance']));
+        if (!empty($contentFields)) {
+            foreach ($contentFields as $field => $value) {
                 if (is_string($value)) {
                     $documentText .= ' ' . strtolower($value);
                 }
@@ -1039,7 +1045,8 @@ class SearchEngine implements SearchEngineInterface
                 
                 $facetValues = [];
                 foreach ($results as $result) {
-                    $value = $result['document'][$field] ?? null;
+                    // Extract value from content fields or metadata
+                    $value = $result[$field] ?? ($result['metadata'][$field] ?? null);
                     if ($value !== null) {
                         if (!isset($facetValues[$value])) {
                             $facetValues[$value] = 0;

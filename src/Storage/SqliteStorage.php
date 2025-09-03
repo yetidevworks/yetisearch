@@ -90,7 +90,14 @@ class SqliteStorage implements StorageInterface
             $useExternal = (bool)($options['external_content'] ?? $this->externalContentDefault);
             
             // Check if we should use multi-column FTS mode (default: true for better performance)
+            // NOTE: Multi-column FTS is incompatible with external content when using JSON storage
             $useMultiColumnFts = $options['multi_column_fts'] ?? $this->searchConfig['multi_column_fts'] ?? true;
+            
+            // Force single-column mode for external content with JSON storage
+            if ($useExternal) {
+                $useMultiColumnFts = false;
+            }
+            
             $ftsColumns = $options['fields'] ?? ['content'];
             
             
@@ -329,15 +336,13 @@ class SqliteStorage implements StorageInterface
             $ftsColumns = $this->getFtsColumns($index);
             if ($schema === 'external') {
                 $docId = $this->getDocId($index, $id);
-                $placeholders = implode(', ', array_fill(0, count($ftsColumns) + 1, '?'));
-                $columnsSql = 'rowid, ' . implode(', ', $ftsColumns);
-                $ftsSql = "INSERT OR REPLACE INTO {$index}_fts ({$columnsSql}) VALUES ({$placeholders})";
+                // For external content, FTS5 reads from the content table
+                // We only need to insert the rowid to trigger indexing
+                $ftsSql = "INSERT OR REPLACE INTO {$index}_fts (rowid, content) VALUES (?, ?)";
                 $ftsStmt = $this->connection->prepare($ftsSql);
-                $values = [$docId];
-                foreach ($ftsColumns as $col) {
-                    $values[] = $this->getFieldText($document['content'], $col, $index);
-                }
-                $ftsStmt->execute($values);
+                // Combine all content into a single text value for FTS
+                $contentText = $this->getFieldText($document['content'], 'content', $index);
+                $ftsStmt->execute([$docId, $contentText]);
             } else {
                 $placeholders = implode(', ', array_fill(0, count($ftsColumns) + 1, '?'));
                 $columnsSql = 'id, ' . implode(', ', $ftsColumns);
@@ -400,12 +405,30 @@ class SqliteStorage implements StorageInterface
             // Prepare FTS insert statement dynamically
             $ftsColumns = $this->getFtsColumns($index);
             if ($schema === 'external') {
-                $columnsSql = 'rowid, ' . implode(', ', $ftsColumns);
+                // External content with JSON storage only supports single-column FTS
+                $ftsStmt = $this->connection->prepare("INSERT OR REPLACE INTO {$index}_fts (rowid, content) VALUES (?, ?)");
             } else {
-                $columnsSql = 'id, ' . implode(', ', $ftsColumns);
+                // Sanitize column names to ensure they're valid SQL identifiers
+                $validColumns = [];
+                foreach ($ftsColumns as $col) {
+                    // Only keep valid column names (letters, numbers, underscores)
+                    if (preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*$/', $col)) {
+                        $validColumns[] = $col;
+                    }
+                }
+                
+                // Fallback to 'content' if no valid columns
+                if (empty($validColumns)) {
+                    $validColumns = ['content'];
+                }
+                
+                $columnsSql = 'id, ' . implode(', ', $validColumns);
+                $placeholders = implode(', ', array_fill(0, count($validColumns) + 1, '?'));
+                $ftsStmt = $this->connection->prepare("INSERT OR REPLACE INTO {$index}_fts ({$columnsSql}) VALUES ({$placeholders})");
+                
+                // Update ftsColumns to use validated columns
+                $ftsColumns = $validColumns;
             }
-            $placeholders = implode(', ', array_fill(0, count($ftsColumns) + 1, '?'));
-            $ftsStmt = $this->connection->prepare("INSERT OR REPLACE INTO {$index}_fts ({$columnsSql}) VALUES ({$placeholders})");
             
             $termsStmt = null;
             if ($this->useTermsIndex) {
@@ -453,11 +476,20 @@ class SqliteStorage implements StorageInterface
                 $docStmt->execute([$id, $content, $metadata, $language, $type, $timestamp]);
                 
                 // Insert FTS content
-                $values = [$schema === 'external' ? $this->getDocId($index, $id) : $id];
-                foreach ($ftsColumns as $col) {
-                    $values[] = $this->getFieldText($document['content'], $col, $index);
+                if ($schema === 'external') {
+                    // For external content, just insert rowid and combined content
+                    $docId = $this->getDocId($index, $id);
+                    $contentText = $this->getFieldText($document['content'], 'content', $index);
+                    $ftsStmt->execute([$docId, $contentText]);
+                } else {
+                    // For non-external, insert with all columns
+                    $values = [$id];
+                    // Use the validated columns from earlier
+                    foreach ($ftsColumns as $col) {
+                        $values[] = $this->getFieldText($document['content'], $col, $index);
+                    }
+                    $ftsStmt->execute($values);
                 }
-                $ftsStmt->execute($values);
                 
                 // Only index terms if Levenshtein fuzzy search is enabled
                 if ($this->useTermsIndex && $termsStmt) {
@@ -517,15 +549,16 @@ class SqliteStorage implements StorageInterface
                 $savedDocId = $this->getDocId($index, $id);
             }
 
-            // Original order: delete main row first
+            // Delete from main table first
             $this->connection->prepare("DELETE FROM {$index} WHERE id = ?")->execute([$id]);
 
-            // Delete from FTS
+            // Handle FTS deletion based on schema
             if ($schema === 'external') {
-                if ($savedDocId !== null) {
-                    $this->connection->prepare("DELETE FROM {$index}_fts WHERE rowid = ?")->execute([$savedDocId]);
-                }
+                // For external content tables, we need to rebuild the FTS to sync with content table
+                // The 'rebuild' command rebuilds the FTS index from the content table
+                $this->connection->exec("INSERT INTO {$index}_fts({$index}_fts) VALUES('rebuild')");
             } else {
+                // For non-external content, regular DELETE works
                 $this->connection->prepare("DELETE FROM {$index}_fts WHERE id = ?")->execute([$id]);
             }
 
@@ -783,7 +816,15 @@ class SqliteStorage implements StorageInterface
                         $orderClauses[] = "rank {$dir}";
                     } elseif ($field === 'distance' && !empty($spatial['select'])) {
                         $orderClauses[] = "distance {$dir}";
+                    } elseif (in_array($field, ['type', 'language', 'id', 'timestamp'])) {
+                        // Direct columns
+                        $orderClauses[] = "d.{$field} {$dir}";
+                    } elseif (strpos($field, 'metadata.') === 0) {
+                        // Metadata field - use JSON extraction
+                        $metaField = substr($field, 9);
+                        $orderClauses[] = "CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) {$dir}";
                     } else {
+                        // Assume it's a direct column (for backward compatibility)
                         $orderClauses[] = "d.{$field} {$dir}";
                     }
                 }
@@ -811,6 +852,9 @@ class SqliteStorage implements StorageInterface
             
             $results = [];
             $radiusFilter = null;
+            
+            // Check if we're using multi-column FTS
+            $isMultiColumn = $this->getIndexMeta($index, 'multi_column_fts') === '1';
             
             // Check if we need to do radius post-filtering (ensure meters)
             if (isset($geoFilters['near'])) {
@@ -840,7 +884,6 @@ class SqliteStorage implements StorageInterface
                 $baseScore = abs($row['rank']);
                 
                 // Apply field weights if provided (only in single-column mode)
-                $isMultiColumn = $this->getIndexMeta($index, 'multi_column_fts') === '1';
                 if (!$isMultiColumn && !empty($fieldWeights) && $hasSearchQuery) {
                     // In single-column mode, apply post-processing field weights
                     $weightedScore = $this->calculateFieldWeightedScore($searchQuery, $content, $fieldWeights, $baseScore);
@@ -851,15 +894,15 @@ class SqliteStorage implements StorageInterface
                     $finalScore = $baseScore;
                 }
                 
-                $result = [
+                // Merge content fields directly into result
+                $result = array_merge($content, [
                     'id' => $row['id'],
                     'score' => $finalScore,
-                    'document' => $content,
                     'metadata' => json_decode($row['metadata'], true),
                     'language' => $row['language'],
                     'type' => $row['type'],
                     'timestamp' => $row['timestamp']
-                ];
+                ]);
                 
                 // Add or compute distance
                 $distance = null;
