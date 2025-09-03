@@ -1,5 +1,40 @@
 # Changelog
 
+## [2.2.0] - 2025-01-XX
+
+### New Features
+
+#### DSL (Domain Specific Language) Support
+- **Natural language query syntax**: Write queries using SQL-like syntax for intuitive query construction
+  - Example: `author = "John" AND status IN [published] SORT -created_at LIMIT 10`
+  - Supports complex conditions with AND/OR logic, grouped conditions, and negation
+  - Keywords: FIELDS, SORT, PAGE, LIMIT, OFFSET, FUZZY, NEAR, WITHIN
+  
+- **JSON API-compliant URL parameters**: Parse standard REST API query patterns
+  - Filter syntax: `filter[field][operator]=value`
+  - Pagination: `page[limit]=10&page[offset]=20` or `page[number]=2&page[size]=10`
+  - Sorting: `sort=-created_at,title` with `-` prefix for descending
+  - Full compliance with JSON API specification
+  
+- **Fluent query builder interface**: Build queries programmatically with chainable methods
+  - Methods like `where()`, `whereIn()`, `whereBetween()`, `orderBy()`, `fuzzy()`, etc.
+  - Support for geo queries: `nearPoint()`, `withinBounds()`, `sortByDistance()`
+  - Get results, first item, or count with `get()`, `first()`, `count()` methods
+  
+- **Field aliasing**: Map user-friendly names to actual database field names
+- **CLI integration**: New commands `search-dsl` and `search-url` for testing DSL queries
+
+### Components Added
+- `src/DSL/QueryParser.php` - Natural language DSL parser with tokenization and AST building
+- `src/DSL/URLQueryParser.php` - JSON API-compliant URL parameter parser
+- `src/DSL/QueryBuilder.php` - Main DSL interface with three query methods
+- `tests/DSL/QueryParserTest.php` - Comprehensive test coverage for all parsers
+- `docs/DSL.md` - Complete documentation with examples and migration guide
+
+### Improvements
+- **Enhanced CLI**: Added examples for DSL usage in help output
+- **Documentation**: Updated README with DSL section and examples
+
 ## [2.1.0] - 2024-01-04
 
 ### Major Improvements

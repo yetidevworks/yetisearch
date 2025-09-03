@@ -7,6 +7,7 @@ require_once __DIR__ . '/../vendor/autoload.php';
 use YetiSearch\YetiSearch;
 use YetiSearch\Geo\GeoPoint;
 use YetiSearch\Models\SearchQuery;
+use YetiSearch\DSL\QueryBuilder;
 
 function out($s = "") { fwrite(STDOUT, $s . PHP_EOL); }
 function err($s) { fwrite(STDERR, $s . PHP_EOL); }
@@ -37,6 +38,8 @@ function usage(): void {
   out("Commands:");
   out("  help                             Show this help");
   out("  search --index=IDX --query=Q [--limit=10] [--fuzzy=0|1] [--prefix=0|1] [--fuzzy-last=0|1] [--lat=.. --lng=.. --radius=.. --units=m|km|mi]");
+  out("  search-dsl --index=IDX --dsl=DSL      Search using DSL syntax");
+  out("  search-url --index=IDX --url=PARAMS   Search using URL query params");
   out("  suggest --index=IDX --term=T [--limit=8]");
   out("  index:rebuild --index=IDX             Rebuild FTS for index from stored docs");
   out("  index:verify --index=IDX              Verify index tables and counts");
@@ -50,6 +53,10 @@ function usage(): void {
   out("  --db=PATH             SQLite DB file (default: benchmarks/benchmark.db)");
   out("  --synonyms=PATH       Synonyms JSON file (default: examples/synonyms.json)");
   out("  --geo-units=m|km|mi   Default geo units");
+  out("");
+  out("DSL Examples:");
+  out('  search-dsl --index=articles --dsl=\'author = "John" AND status = "published" SORT -created_at LIMIT 10\'');
+  out('  search-url --index=articles --url=\'filter[author][eq]=John&sort=-created_at&page[limit]=10\'');
 }
 
 if ($cmd === 'help' || in_array($cmd, ['-h','--help'])) { usage(); exit(0); }
@@ -207,6 +214,34 @@ switch ($cmd) {
       'geoFilters' => [ 'distance_sort' => ['from' => ['lat'=>(float)$opts['lat'],'lng'=>(float)$opts['lng']], 'direction' => 'asc'] ]
     ]);
     out(json_encode($res['facets']['distance'] ?? [], JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES));
+    break;
+  }
+  case 'search-dsl': {
+    $index = $opts['index'] ?? null; $dsl = $opts['dsl'] ?? '';
+    if (!$index) { err('Missing --index'); exit(1); }
+    
+    $builder = new QueryBuilder($ys);
+    try {
+      $res = $builder->searchWithDSL($index, $dsl);
+      out(json_encode($res, JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES));
+    } catch (Exception $e) {
+      err('DSL parse error: ' . $e->getMessage());
+      exit(1);
+    }
+    break;
+  }
+  case 'search-url': {
+    $index = $opts['index'] ?? null; $url = $opts['url'] ?? '';
+    if (!$index) { err('Missing --index'); exit(1); }
+    
+    $builder = new QueryBuilder($ys);
+    try {
+      $res = $builder->searchWithURL($index, $url);
+      out(json_encode($res, JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES));
+    } catch (Exception $e) {
+      err('URL parse error: ' . $e->getMessage());
+      exit(1);
+    }
     break;
   }
   default:

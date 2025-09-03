@@ -48,6 +48,7 @@ A powerful, pure-PHP search engine library with advanced full-text search capabi
 - [Weighted FTS and Prefix (Optional)](#weighted-fts-and-prefix-optional)
 - [Suggestions](#suggestions)
 - [Synonyms](#synonyms)
+- [DSL (Domain Specific Language)](#dsl-domain-specific-language)
 - [CLI](#cli)
 
 ## Features
@@ -71,6 +72,7 @@ A powerful, pure-PHP search engine library with advanced full-text search capabi
 - ✨ **NEW: Multi-column FTS** with native BM25 field weighting (enabled by default)
 - ✨ **NEW: Two-pass search** for enhanced primary field prioritization (optional)
 - ✨ **NEW: Improved fuzzy consistency** - exact matches always rank higher
+- ✨ **NEW: DSL Support** - Natural language query syntax and JSON API-compliant URL parameters
 
 ## Requirements
 
@@ -1735,6 +1737,92 @@ Behavior
 - Exact phrase is built from the original tokens; synonyms are ORed in. Fuzzy still works independently.
 - Use a small, targeted list to avoid noise; adjust `synonyms_max_expansions` if needed.
 
+## DSL (Domain Specific Language)
+
+YetiSearch now supports a powerful DSL for building complex queries with multiple syntaxes:
+
+### Natural Language Query Syntax
+
+Write queries using SQL-like syntax:
+
+```php
+use YetiSearch\DSL\QueryBuilder;
+
+$builder = new QueryBuilder($yetiSearch);
+
+// Natural language DSL
+$results = $builder->searchWithDSL('articles',
+    'author = "John" AND status IN [published] SORT -created_at LIMIT 10'
+);
+
+// Complex query with multiple conditions
+$results = $builder->searchWithDSL('products',
+    'category = "electronics" AND price > 100 AND price < 500 ' .
+    'FIELDS name,price,brand SORT -rating PAGE 1,20'
+);
+```
+
+### JSON API-Compliant URL Parameters
+
+Support for standard REST API query patterns:
+
+```php
+// Parse URL query parameters
+$results = $builder->searchWithURL('articles', $_SERVER['QUERY_STRING']);
+
+// Or use array format
+$results = $builder->searchWithURL('articles', [
+    'q' => 'search term',
+    'filter' => [
+        'author' => ['eq' => 'John'],
+        'status' => ['in' => 'published,featured']
+    ],
+    'sort' => '-created_at',
+    'page' => ['limit' => 10, 'offset' => 20]
+]);
+```
+
+Example URL: `?filter[category][eq]=tech&filter[tags][in]=go,php&sort=-date&page[limit]=10`
+
+### Fluent PHP Interface
+
+Build queries programmatically:
+
+```php
+$results = $builder->query('search term')
+    ->in('articles')
+    ->where('status', 'published')
+    ->whereIn('category', ['tech', 'programming'])
+    ->whereBetween('price', 10, 100)
+    ->orderBy('created_at', 'desc')
+    ->fuzzy(true, 0.8)
+    ->limit(20)
+    ->get();
+
+// Get just the first result
+$first = $builder->query('specific term')
+    ->in('articles')
+    ->where('id', 123)
+    ->first();
+
+// Get count only
+$count = $builder->query('golang')
+    ->in('articles')
+    ->where('status', 'published')
+    ->count();
+```
+
+### DSL Features
+
+- **Operators**: `=`, `!=`, `>`, `<`, `>=`, `<=`, `LIKE`, `IN`, `NOT IN`
+- **Logical**: `AND`, `OR`, grouped conditions with parentheses
+- **Keywords**: `FIELDS`, `SORT`, `PAGE`, `LIMIT`, `OFFSET`, `FUZZY`, `NEAR`, `WITHIN`
+- **Geo Queries**: Support for location-based filtering and sorting
+- **Field Aliases**: Map user-friendly names to actual field names
+- **Negation**: Use `-` prefix to negate conditions
+
+For complete DSL documentation with examples, see [docs/DSL.md](docs/DSL.md).
+
 ## CLI
 
 A simple CLI is included for quick testing of search, suggestions, geo nearest, and distance facets.
@@ -1751,6 +1839,18 @@ Examples
 bin/yetisearch search \
   --index=movies --query="star wrs" --limit=5 \
   --fuzzy=1 --fuzzy-last=1 --prefix=1
+```
+
+- DSL Search:
+```bash
+bin/yetisearch search-dsl \
+  --index=articles --dsl='author = "John" AND category = "tech" SORT -created_at LIMIT 10'
+```
+
+- URL Parameter Search:
+```bash
+bin/yetisearch search-url \
+  --index=articles --url='filter[author][eq]=John&sort=-created_at&page[limit]=10'
 ```
 
 - Suggestions:
