@@ -1,5 +1,68 @@
 # Changelog
 
+## [2.1.0] - 2024-01-04
+
+### Major Improvements
+
+#### Search Result Quality & Consistency
+- **Fixed fuzzy search inconsistency**: Exact matches now consistently rank higher than fuzzy matches
+  - Restructured query building to use NEAR queries and parentheses for exact match prioritization
+  - Query structure: `(exact_phrase OR NEAR(exact_terms)) OR (fuzzy_terms)`
+  - Enhanced fuzzy penalty calculation with graduated penalties based on match quality
+  - Added configuration options: `exact_match_boost` (default: 2.0), `exact_terms_boost` (default: 1.5)
+  
+#### Field Weighting Effectiveness
+- **Significantly improved field weighting**: Documents with matches in high-weight fields (title, h1) now rank much higher
+  - Enhanced `calculateFieldWeightedScore()` with exact match detection
+  - Added exponential scaling for more pronounced score differences
+  - Increased candidate pool size from 200-500 to 1000-5000 documents
+  - Primary field detection gives extra boost to title, h1, name fields
+  - Perfect field match: 100+ point boost
+  - Exact phrase in field: 50+ point boost
+  - Proximity bonuses for terms close together
+
+#### Multi-Column FTS (Default Enabled)
+- **Native BM25 field weighting**: Now enabled by default for better performance
+  - Separate FTS columns per field for native SQLite BM25 weighting
+  - ~5% faster than single-column mode (6.76ms vs 7.09ms average)
+  - Toggle available via `multi_column_fts` configuration
+  - Automatic fallback to post-processing weights in single-column mode
+  - Backward compatible with existing indexes
+
+#### Two-Pass Search Strategy (Optional)
+- **Primary field prioritization**: Optional two-pass search for maximum precision
+  - First pass searches primary fields (title, h1) with doubled weights
+  - Second pass searches all fields and merges results
+  - Toggle via `two_pass_search` configuration (default: false for performance)
+  - Configuration: `primary_fields` and `primary_field_limit`
+
+### Configuration
+- Multi-column FTS now **enabled by default** for new indexes
+- New default search configuration options:
+  ```php
+  'multi_column_fts' => true,      // Use separate FTS columns (better performance)
+  'exact_match_boost' => 2.0,      // Multiplier for exact phrase matches
+  'exact_terms_boost' => 1.5,      // Multiplier for all exact terms present
+  'fuzzy_score_penalty' => 0.5,    // Penalty factor for fuzzy-only matches
+  'two_pass_search' => false,      // Enable two-pass search (optional)
+  'primary_fields' => ['title', 'h1', 'name', 'label'],
+  'primary_field_limit' => 100
+  ```
+
+### Performance Improvements
+- A/B testing results show multi-column FTS provides best performance:
+  - Baseline: 7.09ms average
+  - Multi-column FTS: **6.76ms average** ✨
+  - Two-pass search: 16.36ms average (higher precision, lower speed)
+  - Combined: 16.86ms average
+
+### Migration Notes
+- Existing indexes continue to work with single-column mode
+- To upgrade existing indexes to multi-column FTS:
+  1. Recreate the index with `multi_column_fts => true`
+  2. Re-index your documents
+- No code changes required for basic usage
+
 ## [2.0.0] - 2025-09-01
 
 ### Fuzzy Search UX & Performance

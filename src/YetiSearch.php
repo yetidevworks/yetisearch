@@ -54,6 +54,7 @@ class YetiSearch
                 'enable_fuzzy' => true,
                 'fuzzy_last_token_only' => false,
                 'enable_suggestions' => true,
+                'multi_column_fts' => true,  // Default to multi-column FTS for better performance
                 'cache_ttl' => 300,
                 'trigram_size' => 3,
                 'trigram_threshold' => 0.5
@@ -198,7 +199,13 @@ class YetiSearch
             'max_indexed_terms',
             'indexed_terms_cache_ttl',
             'fuzzy_last_token_only',
-            'prefix_last_token'
+            'prefix_last_token',
+            // Two-pass search options
+            'two_pass_search',
+            'primary_fields',
+            'primary_field_limit',
+            // Multi-column FTS option (for index creation)
+            'multi_column_fts'
         ];
         
         foreach ($fuzzyConfigKeys as $key) {

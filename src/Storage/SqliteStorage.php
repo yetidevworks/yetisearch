@@ -88,10 +88,27 @@ class SqliteStorage implements StorageInterface
         
         try {
             $useExternal = (bool)($options['external_content'] ?? $this->externalContentDefault);
+            
+            // Check if we should use multi-column FTS mode (default: true for better performance)
+            $useMultiColumnFts = $options['multi_column_fts'] ?? $this->searchConfig['multi_column_fts'] ?? true;
+            $ftsColumns = $options['fields'] ?? ['content'];
+            
+            
+            // If multi-column mode is disabled, use single content column
+            if (!$useMultiColumnFts) {
+                $ftsColumns = ['content'];
+            } else if (count($ftsColumns) <= 1 && $ftsColumns[0] === 'content' && !isset($options['fields'])) {
+                // If only default 'content' field and no explicit fields provided, keep single-column mode
+                $useMultiColumnFts = false;
+            }
+            // Otherwise keep the provided fields for multi-column mode
+            
             // Ensure per-index meta table exists
             $this->connection->exec("CREATE TABLE IF NOT EXISTS {$name}_meta (key TEXT PRIMARY KEY, value TEXT)");
-            // Persist schema mode
+            // Persist schema mode and FTS configuration
             $this->setIndexMeta($name, 'schema_mode', $useExternal ? 'external' : 'legacy');
+            $this->setIndexMeta($name, 'multi_column_fts', $useMultiColumnFts ? '1' : '0');
+            $this->setIndexMeta($name, 'fts_columns', json_encode($ftsColumns));
             if ($useExternal) {
                 $sql = "
                     CREATE TABLE IF NOT EXISTS {$name} (
@@ -126,19 +143,9 @@ class SqliteStorage implements StorageInterface
             $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_timestamp ON {$name}(timestamp)");
             
             // Determine FTS configuration
-            $ftsColumns = ['content'];
-            if (!empty($options['fields']) && !empty(($options['fts']['multi_column'] ?? $options['fts_multi'] ?? false))) {
-                $ftsColumns = [];
-                foreach ($options['fields'] as $field => $cfg) {
-                    $indexable = $cfg['index'] ?? true;
-                    if ($indexable) {
-                        $ftsColumns[] = $field;
-                    }
-                }
-                if (empty($ftsColumns)) {
-                    $ftsColumns = ['content'];
-                }
-            }
+            // Note: $ftsColumns and $useMultiColumnFts were already set above
+            // We only need to process them here if they weren't already configured
+            // This section is kept for backward compatibility with old option format
             // Build optional prefix config
             $prefix = $options['fts']['prefix'] ?? $options['fts_prefix'] ?? $this->searchConfig['fts_prefix'] ?? null;
             $prefixSql = '';
@@ -578,7 +585,8 @@ class SqliteStorage implements StorageInterface
         }
         
         // When using field weights, we need to fetch more results to ensure proper scoring
-        $effectiveLimit = (!empty($fieldWeights) && $hasSearchQuery) ? min(max($limit * 20, 200), 500) : $limit;
+        // Increase the candidate pool significantly to catch documents that might rank high after field weighting
+        $effectiveLimit = (!empty($fieldWeights) && $hasSearchQuery) ? min(max($limit * 50, 1000), 5000) : $limit;
         
         
         // Nearest-neighbor mode (k-NN): ignore text, order by distance asc, limit k
@@ -638,10 +646,25 @@ class SqliteStorage implements StorageInterface
             // Full text search with optional spatial filters
             // Compute bm25 weights per FTS column (if available)
             $ftsColumns = $this->getFtsColumns($index);
+            $isMultiColumn = $this->getIndexMeta($index, 'multi_column_fts') === '1';
+            
             $weights = [];
-            foreach ($ftsColumns as $col) {
-                $weights[] = (float)($fieldWeights[$col] ?? 1.0);
+            if ($isMultiColumn && !empty($fieldWeights)) {
+                // In multi-column mode, apply weights to actual FTS columns
+                foreach ($ftsColumns as $col) {
+                    $weights[] = (float)($fieldWeights[$col] ?? 1.0);
+                }
+            } else if (!$isMultiColumn && !empty($fieldWeights)) {
+                // In single-column mode, BM25 weights don't apply per field
+                // We'll use post-processing field weighting
+                $weights = [1.0];
+            } else {
+                // No field weights specified
+                foreach ($ftsColumns as $col) {
+                    $weights[] = 1.0;
+                }
             }
+            
             // Use table name for bm25() (SQLite expects the FTS table name)
             $bm25 = 'bm25(' . $index . '_fts' . (count($weights) ? ', ' . implode(', ', $weights) : '') . ') as rank';
             $schema = $this->getSchemaMode($index);
@@ -816,12 +839,15 @@ class SqliteStorage implements StorageInterface
                 $content = json_decode($row['content'], true);
                 $baseScore = abs($row['rank']);
                 
-                // Apply field weights if provided
-                if (!empty($fieldWeights) && $hasSearchQuery) {
+                // Apply field weights if provided (only in single-column mode)
+                $isMultiColumn = $this->getIndexMeta($index, 'multi_column_fts') === '1';
+                if (!$isMultiColumn && !empty($fieldWeights) && $hasSearchQuery) {
+                    // In single-column mode, apply post-processing field weights
                     $weightedScore = $this->calculateFieldWeightedScore($searchQuery, $content, $fieldWeights, $baseScore);
                     $finalScore = $weightedScore;
                     
                 } else {
+                    // In multi-column mode, BM25 already applied the weights natively
                     $finalScore = $baseScore;
                 }
                 
@@ -851,8 +877,8 @@ class SqliteStorage implements StorageInterface
                 $results[] = $result;
             }
             
-            // Re-sort results if field weights were applied
-            if (!empty($fieldWeights) && $hasSearchQuery) {
+            // Re-sort results if field weights were applied (only in single-column mode)
+            if (!$isMultiColumn && !empty($fieldWeights) && $hasSearchQuery) {
                 usort($results, function($a, $b) {
                     // Sort by score descending (highest score first)
                     return $b['score'] <=> $a['score'];
@@ -1357,18 +1383,24 @@ class SqliteStorage implements StorageInterface
 
     private function getFieldText(array $content, string $field, string $index): string
     {
-        // If in single-column mode (['content']), aggregate all fields
+        // Check if we're in multi-column mode
+        $isMultiColumn = $this->getIndexMeta($index, 'multi_column_fts') === '1';
         $cols = $this->getFtsColumns($index);
-        if (count($cols) === 1 && $cols[0] === 'content' && $field === 'content') {
+        
+        // If in single-column mode (['content']), aggregate all fields
+        if (!$isMultiColumn && count($cols) === 1 && $cols[0] === 'content' && $field === 'content') {
             return $this->extractSearchableContent($content);
         }
 
+        // In multi-column mode, return the specific field value
         if (isset($content[$field])) {
             $v = $content[$field];
             if (is_string($v)) return $v;
             if (is_array($v)) return $this->extractSearchableContent($v);
             return (string)$v;
         }
+        
+        // If field doesn't exist in content, return empty string
         return '';
     }
     
@@ -2006,22 +2038,26 @@ class SqliteStorage implements StorageInterface
             }
         }
         
-        // Remove quoted phrases and parentheses from query to get individual terms
-        $cleanQuery = preg_replace('/["\(\)]/', ' ', $searchQuery);
+        // Clean up query to extract base terms (remove NEAR, OR, parentheses, etc.)
+        $cleanQuery = preg_replace('/NEAR\([^)]+\)/', '', $searchQuery);
+        $cleanQuery = preg_replace('/["\(\)]/', ' ', $cleanQuery);
         $allTerms = array_map('trim', explode(' ', strtolower($cleanQuery)));
         
-        // Filter out OR operators and empty terms
+        // Filter out operators, wildcards and empty terms
         $searchTerms = array_filter($allTerms, function($term) {
-            return $term !== 'or' && !empty($term);
+            return $term !== 'or' && $term !== 'and' && !empty($term) && strpos($term, '*') === false;
         });
         
-        // If no exact phrases were found but we have multiple terms, treat them as a phrase too
+        // Remove duplicates
+        $searchTerms = array_unique(array_values($searchTerms));
+        
+        // If no exact phrases were found but we have multiple terms, check for them as phrase
         if (empty($exactPhrases) && count($searchTerms) > 1) {
             $exactPhrases[] = implode(' ', $searchTerms);
         }
         
-        $maxFieldScore = 0.0;
-        $totalWeight = 0.0;
+        $bestFieldScore = 0.0;
+        $fieldScores = [];
         
         // Check each field for search terms
         foreach ($fieldWeights as $field => $weight) {
@@ -2029,74 +2065,128 @@ class SqliteStorage implements StorageInterface
                 continue;
             }
             
-            $fieldText = strtolower($content[$field]);
+            $fieldText = strtolower(trim($content[$field]));
+            if (empty($fieldText)) {
+                continue;
+            }
+            
             $fieldScore = 0.0;
-            $matchCount = 0;
-            $hasExactPhrase = false;
+            $matchType = 'none';
             
-            // First check for exact phrase matches (highest boost)
+            // Check for exact full field match (highest priority)
+            $cleanFieldText = trim(preg_replace('/[^\w\s]/', '', $fieldText));
             foreach ($exactPhrases as $phrase) {
-                if (strpos($fieldText, $phrase) !== false) {
-                    $fieldScore += 15.0; // Massive boost for exact phrase
-                    $matchCount = count(explode(' ', $phrase)); // Count words in phrase
-                    $hasExactPhrase = true;
-                    
-                    // Extra boost for high-weight fields (likely primary fields like title, name, etc)
-                    // Use boost threshold to determine if this is a "primary" field
-                    if ($weight >= 2.5) {
-                        // Exact match gets huge bonus
-                        if ($fieldText === $phrase) {
-                            $fieldScore += 50.0;
-                        } 
-                        // Near-exact match (just punctuation differences) gets good bonus
-                        else if (trim(preg_replace('/[^\w\s]/', '', $fieldText)) === $phrase) {
-                            $fieldScore += 30.0;
-                        }
-                        // For high-boost fields, apply length penalty to prefer shorter exact matches
-                        else {
-                            $phraseLen = strlen($phrase);
-                            $fieldLen = strlen($fieldText);
-                            if ($fieldLen > $phraseLen) {
-                                // Penalize longer values - the longer, the less score
-                                $lengthPenalty = 1.0 - min(0.5, ($fieldLen - $phraseLen) / 100.0);
-                                $fieldScore *= $lengthPenalty;
-                            }
-                        }
-                    }
-                    break; // One exact phrase match is enough
+                $cleanPhrase = trim(preg_replace('/[^\w\s]/', '', $phrase));
+                if ($cleanFieldText === $cleanPhrase) {
+                    // Perfect match - massive boost
+                    $fieldScore = 100.0;
+                    $matchType = 'exact_field';
+                    break;
                 }
             }
             
-            // If no exact phrase match, check individual terms
-            if (!$hasExactPhrase) {
+            // Check for exact phrase match within field
+            if ($matchType === 'none') {
+                foreach ($exactPhrases as $phrase) {
+                    if (strpos($fieldText, $phrase) !== false) {
+                        // Exact phrase found - high boost
+                        $fieldScore = 50.0;
+                        $matchType = 'exact_phrase';
+                        
+                        // Additional boost for shorter fields (more relevant)
+                        $phraseRatio = strlen($phrase) / strlen($fieldText);
+                        if ($phraseRatio > 0.8) {
+                            $fieldScore += 20.0; // Phrase is most of the field
+                        } elseif ($phraseRatio > 0.5) {
+                            $fieldScore += 10.0; // Phrase is significant part of field
+                        }
+                        break;
+                    }
+                }
+            }
+            
+            // Check for all individual terms present
+            if ($matchType === 'none' && !empty($searchTerms)) {
+                $termMatches = 0;
+                $termPositions = [];
+                
                 foreach ($searchTerms as $term) {
-                    if (strpos($fieldText, $term) !== false) {
-                        $matchCount++;
-                        // Give extra weight for exact matches in high-boost fields
-                        if ($weight >= 2.5 && $fieldText === $term) {
-                            $fieldScore += 2.0;
-                        } else {
-                            $fieldScore += 1.0;
+                    $pos = strpos($fieldText, $term);
+                    if ($pos !== false) {
+                        $termMatches++;
+                        $termPositions[] = $pos;
+                    }
+                }
+                
+                if ($termMatches === count($searchTerms)) {
+                    // All terms present
+                    $fieldScore = 20.0;
+                    $matchType = 'all_terms';
+                    
+                    // Boost if terms are close together (proximity bonus)
+                    if (count($termPositions) > 1) {
+                        sort($termPositions);
+                        $maxGap = 0;
+                        for ($i = 1; $i < count($termPositions); $i++) {
+                            $gap = $termPositions[$i] - $termPositions[$i-1];
+                            $maxGap = max($maxGap, $gap);
+                        }
+                        // If all terms within 50 characters, add proximity bonus
+                        if ($maxGap < 50) {
+                            $fieldScore += 10.0 * (1.0 - $maxGap / 50.0);
                         }
                     }
+                    
+                    // Check if field is just the terms (nothing else)
+                    $termsOnly = implode(' ', $searchTerms);
+                    if ($cleanFieldText === $termsOnly) {
+                        $fieldScore += 30.0;
+                    }
+                } elseif ($termMatches > 0) {
+                    // Partial term matches
+                    $fieldScore = 5.0 * ($termMatches / count($searchTerms));
+                    $matchType = 'partial_terms';
                 }
             }
             
-            // Apply field weight
-            if ($matchCount > 0) {
-                // Bonus for matching multiple terms in the same field
-                $multiTermBonus = ($matchCount > 1) ? pow($matchCount, 1.5) : 1.0;
-                $weightedFieldScore = $fieldScore * $weight * $multiTermBonus;
-                $maxFieldScore = max($maxFieldScore, $weightedFieldScore);
-                $totalWeight += $weight;
+            // Apply field weight and store
+            if ($fieldScore > 0) {
+                // Primary fields (title, h1, name, etc.) get extra weight multiplier
+                $isPrimaryField = in_array($field, ['title', 'h1', 'name', 'label']) || $weight >= 5.0;
+                $primaryMultiplier = $isPrimaryField ? 2.0 : 1.0;
+                
+                $weightedScore = $fieldScore * $weight * $primaryMultiplier;
+                
+                $fieldScores[$field] = [
+                    'score' => $weightedScore,
+                    'match_type' => $matchType,
+                    'weight' => $weight
+                ];
+                
+                if ($weightedScore > $bestFieldScore) {
+                    $bestFieldScore = $weightedScore;
+                }
             }
         }
         
-        // If we found matches in weighted fields, use the weighted score
-        if ($maxFieldScore > 0) {
-            // Combine base BM25 score with field-weighted score
-            // Give more importance to field weights
-            return $baseScore * (0.3 + $maxFieldScore);
+        // Calculate final score
+        if ($bestFieldScore > 0) {
+            // Use exponential scaling for field scores to make differences more pronounced
+            // This ensures high-scoring field matches significantly outrank lower ones
+            $scaledFieldScore = pow($bestFieldScore / 10.0, 1.5);
+            
+            // Combine with base BM25 score, but give much more weight to field scores
+            // when we have strong field matches
+            if ($bestFieldScore >= 100.0) {
+                // Exact field match - field score dominates
+                return $baseScore * (1.0 + $scaledFieldScore * 10.0);
+            } elseif ($bestFieldScore >= 50.0) {
+                // Exact phrase match - strong field score influence
+                return $baseScore * (1.0 + $scaledFieldScore * 5.0);
+            } else {
+                // Partial matches - moderate field score influence
+                return $baseScore * (1.0 + $scaledFieldScore * 2.0);
+            }
         }
         
         // Fallback to base score if no matches in weighted fields

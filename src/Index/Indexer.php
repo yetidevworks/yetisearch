@@ -385,7 +385,17 @@ class Indexer implements IndexerInterface
     private function ensureIndexExists(): void
     {
         if (!$this->storage->indexExists($this->indexName)) {
-            $this->storage->createIndex($this->indexName, $this->config);
+            // Pass field names from config if available
+            $storageOptions = $this->config;
+            if (isset($this->config['fields']) && is_array($this->config['fields'])) {
+                // Extract field names for FTS columns
+                $fieldNames = array_keys($this->config['fields']);
+                // Only set fields if we have more than just 'content'
+                if ($fieldNames !== ['content']) {
+                    $storageOptions['fields'] = $fieldNames;
+                }
+            }
+            $this->storage->createIndex($this->indexName, $storageOptions);
         } else {
             // Ensure all required tables exist, including spatial table
             $this->storage->ensureSpatialTableExists($this->indexName);

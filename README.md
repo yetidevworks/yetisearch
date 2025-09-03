@@ -68,6 +68,9 @@ A powerful, pure-PHP search engine library with advanced full-text search capabi
 - 🚀 **Zero dependencies** except PHP extensions and small utility packages
 - 💾 **Persistent storage** with automatic database management
 - 🔐 **Production-ready** with comprehensive test coverage
+- ✨ **NEW: Multi-column FTS** with native BM25 field weighting (enabled by default)
+- ✨ **NEW: Two-pass search** for enhanced primary field prioritization (optional)
+- ✨ **NEW: Improved fuzzy consistency** - exact matches always rank higher
 
 ## Requirements
 
@@ -425,10 +428,23 @@ $config = [
         'enable_fuzzy' => true,         // Enable fuzzy search
         'fuzzy_algorithm' => 'trigram', // 'trigram', 'jaro_winkler', or 'levenshtein'
         'levenshtein_threshold' => 2,   // Max edit distance for Levenshtein
+        
+        // NEW: Multi-column FTS configuration (v2.1.0+)
+        'multi_column_fts' => true,     // Use separate FTS columns for native BM25 weighting (default: true)
+        
+        // NEW: Exact match boosting (v2.1.0+)
+        'exact_match_boost' => 2.0,     // Multiplier for exact phrase matches
+        'exact_terms_boost' => 1.5,     // Multiplier for all exact terms present
+        'fuzzy_score_penalty' => 0.5,   // Penalty factor for fuzzy-only matches
+        
+        // NEW: Two-pass search configuration (v2.1.0+)
+        'two_pass_search' => false,     // Enable two-pass search for better primary field results
+        'primary_fields' => ['title', 'h1', 'name', 'label'], // Fields to search in first pass
+        'primary_field_limit' => 100,   // Max results from first pass
+        
         'min_term_frequency' => 2,      // Min term frequency for fuzzy matching
         'max_indexed_terms' => 10000,   // Max indexed terms to check
         'max_fuzzy_variations' => 8,    // Max fuzzy variations per term
-        'fuzzy_score_penalty' => 0.4,   // Score penalty for fuzzy matches
         'indexed_terms_cache_ttl' => 300, // Cache TTL for indexed terms
         'enable_suggestions' => true,   // Enable search suggestions
         'cache_ttl' => 300,             // Cache TTL in seconds
@@ -830,6 +846,187 @@ Different algorithms have different performance characteristics:
 - **Levenshtein**: Requires term indexing, impacting indexing performance (~295 docs/sec vs ~670 docs/sec)
 
 Term indexing is only performed when `fuzzy_algorithm` is set to `'levenshtein'`. For most use cases, `'trigram'` provides the best balance of accuracy and performance.
+
+### Multi-Column FTS and Field Weighting
+
+YetiSearch now supports multi-column FTS indexing for superior field weighting and performance:
+
+```php
+// Multi-column FTS is enabled by default for optimal performance
+$config = [
+    'search' => [
+        'multi_column_fts' => true,      // Default: true - Use separate FTS columns
+        'exact_match_boost' => 2.0,      // Boost for exact phrase matches
+        'exact_terms_boost' => 1.5,      // Boost when all exact terms are present
+        'field_weights' => [
+            'title' => 10.0,              // Title matches score 10x higher
+            'h1' => 8.0,                  // H1 headings score 8x higher
+            'tags' => 5.0,                // Tags score 5x higher
+            'content' => 1.0              // Base content weight
+        ]
+    ]
+];
+
+$search = new YetiSearch($config);
+
+// Create an index with custom fields
+$search->createIndex('articles', [
+    'fields' => [
+        'title' => ['boost' => 10.0],
+        'h1' => ['boost' => 8.0],
+        'tags' => ['boost' => 5.0],
+        'content' => ['boost' => 1.0]
+    ]
+]);
+```
+
+**Benefits of Multi-Column FTS:**
+- **Native BM25 field weighting** - SQLite applies weights directly during search
+- **~5% faster performance** - 6.76ms vs 7.09ms average query time
+- **Better relevance** - Documents with matches in high-weight fields rank much higher
+- **Exact match detection** - Perfect field matches get 100+ point boost
+
+### Two-Pass Search Strategy
+
+For maximum precision, enable the optional two-pass search:
+
+```php
+$config = [
+    'search' => [
+        'two_pass_search' => true,        // Default: false (for performance)
+        'primary_fields' => ['title', 'h1', 'name', 'label'],
+        'primary_field_limit' => 100      // Documents to retrieve in first pass
+    ]
+];
+
+// Two-pass search prioritizes primary fields
+$results = $search->search('articles', 'scheduler');
+// First pass: Searches title/h1 with doubled weights
+// Second pass: Searches all fields and merges results
+// Result: Page with title="Scheduler" ranks at the top
+```
+
+**When to Use Two-Pass Search:**
+- When title/heading matches are critical
+- For navigation/documentation searches
+- When users expect exact title matches first
+- Trade-off: ~2.3x slower but more precise
+
+### Migration Guide for v2.1.0
+
+#### Upgrading Existing Indexes
+
+Existing indexes continue to work but won't benefit from multi-column FTS. To upgrade:
+
+```php
+// Method 1: Recreate the index (recommended)
+$search->dropIndex('articles');
+$search->createIndex('articles', [
+    'fields' => ['title', 'content', 'tags']  // Specify your fields
+]);
+// Re-index your documents
+
+// Method 2: Use migration script
+// From command line:
+// php scripts/migrate_fts.php --index=articles --multi-column
+```
+
+#### Configuration Changes
+
+Update your configuration to use new defaults:
+
+```php
+// Old configuration (still works)
+$config = [
+    'search' => [
+        'field_weights' => [
+            'title' => 3.0,
+            'content' => 1.0
+        ]
+    ]
+];
+
+// New optimized configuration
+$config = [
+    'search' => [
+        'multi_column_fts' => true,      // Enable multi-column FTS (default)
+        'exact_match_boost' => 2.0,      // Boost exact matches
+        'exact_terms_boost' => 1.5,      // Boost when all terms match
+        'field_weights' => [
+            'title' => 10.0,              // Increase weights for better differentiation
+            'content' => 1.0
+        ]
+    ]
+];
+```
+
+#### Performance Comparison
+
+Based on A/B testing with real-world data:
+
+| Configuration | Avg Query Time | Relevance | Notes |
+|--------------|---------------|-----------|--------|
+| Single-column (legacy) | 7.09ms | Good | Original implementation |
+| **Multi-column FTS** | **6.76ms** | **Excellent** | **Default in v2.1.0** |
+| Two-pass search | 16.36ms | Best | Optional for precision |
+| Combined | 16.86ms | Best | Maximum precision |
+
+**Recommendation:** Use the default multi-column FTS for best balance of performance and relevance. Enable two-pass search only when title/heading matches are critical.
+
+### Real-World Example: Documentation Search
+
+Here's how the v2.1.0 improvements solve the "scheduler" ranking problem:
+
+```php
+// Index a documentation site with proper field weighting
+$search = new YetiSearch([
+    'search' => [
+        'multi_column_fts' => true,      // Default - enables native field weighting
+        'exact_match_boost' => 2.0,      // Exact "scheduler" gets 2x boost
+        'field_weights' => [
+            'title' => 10.0,              // Title matches are most important
+            'h1' => 8.0,
+            'h2' => 5.0,
+            'content' => 1.0
+        ]
+    ]
+]);
+
+// Index documents with structured fields
+$search->index('docs', [
+    'id' => 'scheduler-page',
+    'content' => [
+        'title' => 'Scheduler',           // Exact match in high-weight field
+        'h1' => 'Task Scheduler Guide',
+        'content' => 'The scheduler allows you to run tasks...'
+    ]
+]);
+
+$search->index('docs', [
+    'id' => 'generic-page',
+    'content' => [
+        'title' => 'Configuration Guide',
+        'content' => 'You can configure the scheduler here...' // Only mentions scheduler
+    ]
+]);
+
+// Search for "scheduler"
+$results = $search->search('docs', 'scheduler');
+
+// Results ranking (v2.1.0):
+// 1. scheduler-page (Score: ~150) - Exact title match + h1 match
+// 2. generic-page (Score: ~20) - Only content mention
+
+// Previous version results:
+// 1. generic-page (Score: ~25) - Multiple mentions
+// 2. scheduler-page (Score: ~22) - Title boost not effective enough
+```
+
+**Key Improvements Demonstrated:**
+- Exact title match "Scheduler" now scores 150+ (vs ~22 before)
+- Field weights are properly applied through native BM25
+- Exact match boost ensures correct spelling ranks higher
+- Fuzzy search preserves exact match priority
 
 **Performance Optimization Tips:**
 

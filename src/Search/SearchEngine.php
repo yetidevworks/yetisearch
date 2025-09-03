@@ -66,7 +66,17 @@ class SearchEngine implements SearchEngineInterface
             // distance_decay_k: controls how fast distance score decays per km (higher = steeper)
             'distance_decay_k' => 0.005,
             // Fuzzy/synonyms shaping
-            'fuzzy_total_max_variations' => 30
+            'fuzzy_total_max_variations' => 30,
+            // Exact match boosting
+            'exact_match_boost' => 2.0,     // Multiplier for exact phrase matches
+            'exact_terms_boost' => 1.5,     // Multiplier for all exact terms present
+            'fuzzy_score_penalty' => 0.5,   // Penalty factor for fuzzy-only matches
+            // Two-pass search strategy (disabled by default for performance)
+            'two_pass_search' => false,     // Enable two-pass search for better field weighting
+            'primary_fields' => ['title', 'h1', 'name', 'label'], // Fields to search in first pass
+            'primary_field_limit' => 100,   // Max results from first pass
+            // Multi-column FTS (enabled by default for better performance)
+            'multi_column_fts' => true      // Use separate FTS columns for native BM25 weighting
         ], $config);
         
         $this->logger = $logger ?? new NullLogger();
@@ -108,8 +118,77 @@ class SearchEngine implements SearchEngineInterface
                 $storageQuery['offset'] = 0;
             }
             
-            $results = $this->storage->search($this->indexName, $storageQuery);
-            $totalCount = $this->storage->count($this->indexName, $storageQuery);
+            // Two-pass search strategy if enabled and field weights are configured
+            $results = [];
+            $totalCount = 0;
+            
+            if ($this->config['two_pass_search'] && !empty($this->config['field_weights'])) {
+                $this->logger->debug('Executing two-pass search strategy');
+                
+                // First pass: Search only primary fields with high weights
+                $primaryFields = $this->config['primary_fields'];
+                $primaryFieldWeights = [];
+                foreach ($primaryFields as $field) {
+                    if (isset($this->config['field_weights'][$field])) {
+                        $primaryFieldWeights[$field] = $this->config['field_weights'][$field] * 2.0; // Double weights for primary pass
+                    }
+                }
+                
+                if (!empty($primaryFieldWeights)) {
+                    $firstPassQuery = $storageQuery;
+                    $firstPassQuery['field_weights'] = $primaryFieldWeights;
+                    $firstPassQuery['fields'] = $primaryFields; // Restrict to primary fields
+                    $firstPassQuery['limit'] = $this->config['primary_field_limit'];
+                    $firstPassQuery['offset'] = 0;
+                    
+                    try {
+                        $primaryResults = $this->storage->search($this->indexName, $firstPassQuery);
+                        $this->logger->debug('First pass results', ['count' => count($primaryResults)]);
+                    } catch (\Exception $e) {
+                        $this->logger->warning('First pass search failed', ['error' => $e->getMessage()]);
+                        $primaryResults = [];
+                    }
+                } else {
+                    $primaryResults = [];
+                }
+                
+                // Second pass: Full search with all fields
+                $secondPassQuery = $storageQuery;
+                $secondPassResults = $this->storage->search($this->indexName, $secondPassQuery);
+                
+                // Merge results, prioritizing primary field matches
+                $mergedResults = [];
+                $seenIds = [];
+                
+                // Add primary results first (with boosted scores)
+                foreach ($primaryResults as $result) {
+                    $result['score'] = ($result['score'] ?? 0) * 1.5; // Boost primary field matches
+                    $mergedResults[] = $result;
+                    $seenIds[$result['id']] = true;
+                }
+                
+                // Add remaining results from second pass
+                foreach ($secondPassResults as $result) {
+                    if (!isset($seenIds[$result['id']])) {
+                        $mergedResults[] = $result;
+                        $seenIds[$result['id']] = true;
+                    }
+                }
+                
+                // Sort merged results by score
+                usort($mergedResults, function($a, $b) {
+                    return ($b['score'] ?? 0) <=> ($a['score'] ?? 0);
+                });
+                
+                // Apply original limit/offset
+                $results = array_slice($mergedResults, $originalOffset, $originalLimit);
+                $totalCount = count($mergedResults);
+                
+            } else {
+                // Single-pass search (standard mode)
+                $results = $this->storage->search($this->indexName, $storageQuery);
+                $totalCount = $this->storage->count($this->indexName, $storageQuery);
+            }
             
             // Pass original query for highlighting
             $searchResults = $this->processResults($results, $processedQuery, $originalQuery);
@@ -372,19 +451,43 @@ class SearchEngine implements SearchEngineInterface
             }
         }
         if ($query->isFuzzy() && !empty($fuzzyTokens)) {
-            // Put exact terms first, then fuzzy variations
-            // This should give higher scores to exact matches due to BM25 scoring
+            // Build structured query that strongly prioritizes exact matches
+            // Use parentheses to group exact matches with higher priority
             // Optional prefix on last token
             if (($this->config['prefix_last_token'] ?? false) && !empty($exactTokens)) {
                 $lastIdx = count($exactTokens) - 1;
                 $exactTokens[$lastIdx] .= '*';
             }
-            $allTokens = array_unique(array_merge($exactTokens, $fuzzyTokens));
+            
+            // Build exact match component with boost
+            $exactComponents = [];
             if (count($tokens) > 1) {
-                $exactPhrase = '"' . implode(' ', $tokens) . '"';
-                $processedQuery = $exactPhrase . ' OR ' . implode(' OR ', $allTokens);
+                // Exact phrase gets highest priority
+                $exactComponents[] = '"' . implode(' ', $tokens) . '"';
+            }
+            // Add individual exact tokens with NEAR proximity (if multiple tokens)
+            if (count($exactTokens) > 1) {
+                // Use NEAR operator to boost documents with terms close together
+                $exactComponents[] = 'NEAR(' . implode(' ', $exactTokens) . ', 10)';
+            } else if (!empty($exactTokens)) {
+                // Single token - just add it
+                foreach ($exactTokens as $token) {
+                    $exactComponents[] = $token;
+                }
+            }
+            
+            // Build fuzzy component - group them with lower priority
+            $fuzzyComponent = !empty($fuzzyTokens) ? '(' . implode(' OR ', $fuzzyTokens) . ')' : '';
+            
+            // Combine with exact matches having priority
+            // Structure: (exact_phrase OR NEAR(exact_terms)) OR (fuzzy_terms)
+            // This ensures exact matches score higher than fuzzy ones
+            if (!empty($exactComponents) && !empty($fuzzyComponent)) {
+                $processedQuery = '(' . implode(' OR ', $exactComponents) . ') OR ' . $fuzzyComponent;
+            } elseif (!empty($exactComponents)) {
+                $processedQuery = implode(' OR ', $exactComponents);
             } else {
-                $processedQuery = implode(' OR ', $allTokens);
+                $processedQuery = $fuzzyComponent;
             }
         } else {
             // No fuzzy search - use exact tokens (+ synonyms), but build phrase from original tokens only
@@ -392,12 +495,20 @@ class SearchEngine implements SearchEngineInterface
                 $lastIdx = count($exactTokens) - 1;
                 $exactTokens[$lastIdx] .= '*';
             }
+            
+            $exactComponents = [];
             if (count($tokens) > 1) {
-                $basePhrase = '"' . implode(' ', $tokens) . '"';
-                $processedQuery = $basePhrase . ' OR ' . implode(' OR ', $exactTokens);
-            } else {
-                $processedQuery = implode(' ', $exactTokens);
+                // Add exact phrase
+                $exactComponents[] = '"' . implode(' ', $tokens) . '"';
+                // Add NEAR query for proximity boost
+                $exactComponents[] = 'NEAR(' . implode(' ', $exactTokens) . ', 10)';
             }
+            // Add individual tokens
+            foreach ($exactTokens as $token) {
+                $exactComponents[] = $token;
+            }
+            
+            $processedQuery = implode(' OR ', array_unique($exactComponents));
         }
         
         // Debug: Log the processed query
@@ -587,8 +698,8 @@ class SearchEngine implements SearchEngineInterface
     
     private function calculateFuzzyPenalty(array $result, SearchQuery $query): float
     {
-        // Get the configured fuzzy penalty (default 0.3 = 30% penalty)
-        $basePenalty = $this->config['fuzzy_score_penalty'] ?? 0.3;
+        // Get the configured fuzzy penalty (default 0.5 = 50% penalty for fuzzy matches)
+        $basePenalty = $this->config['fuzzy_score_penalty'] ?? 0.5;
         
         // Try to determine which terms matched in this result
         // This is a simplified approach - ideally we'd parse the FTS match info
@@ -601,50 +712,98 @@ class SearchEngine implements SearchEngineInterface
             }
         }
         
+        // Get original query tokens for exact match detection
+        $queryText = $query->getQuery();
+        $originalTokens = $this->analyzer->tokenize($queryText);
+        $originalTokens = array_map('strtolower', $originalTokens);
+        
+        // Check for exact phrase match
+        $hasExactPhrase = false;
+        if (count($originalTokens) > 1) {
+            $exactPhrase = implode(' ', $originalTokens);
+            if (stripos($documentText, $exactPhrase) !== false) {
+                $hasExactPhrase = true;
+            }
+        }
+        
         // Check if any exact terms match
-        $hasExactMatch = false;
+        $exactMatchCount = 0;
+        $totalExactTerms = count($originalTokens);
         $hasFuzzyMatch = false;
         $minDistance = PHP_INT_MAX;
         $maxSimilarity = 0.0;
         
+        // Count exact token matches
+        foreach ($originalTokens as $token) {
+            if (stripos($documentText, $token) !== false) {
+                $exactMatchCount++;
+            }
+        }
+        
+        // Check fuzzy matches
         foreach ($this->fuzzyTermMap as $term => $info) {
-            if (stripos($documentText, $term) !== false) {
-                if ($info['type'] === 'exact') {
-                    $hasExactMatch = true;
-                } else {
-                    $hasFuzzyMatch = true;
-                    if (isset($info['distance'])) {
-                        $minDistance = min($minDistance, $info['distance']);
-                    }
-                    if (isset($info['similarity'])) {
-                        $maxSimilarity = max($maxSimilarity, $info['similarity']);
-                    }
+            if ($info['type'] === 'fuzzy' && stripos($documentText, $term) !== false) {
+                $hasFuzzyMatch = true;
+                if (isset($info['distance'])) {
+                    $minDistance = min($minDistance, $info['distance']);
+                }
+                if (isset($info['similarity'])) {
+                    $maxSimilarity = max($maxSimilarity, $info['similarity']);
                 }
             }
         }
         
-        // If document has exact matches, reduce or eliminate penalty
-        if ($hasExactMatch && !$hasFuzzyMatch) {
-            return 0.0; // No penalty for exact matches only
+        // Calculate exact match ratio
+        $exactMatchRatio = $totalExactTerms > 0 ? $exactMatchCount / $totalExactTerms : 0;
+        
+        // If document has exact phrase match, minimal penalty
+        if ($hasExactPhrase) {
+            return 0.05; // 5% penalty - still prioritize over non-matches but below perfect
         }
         
-        if ($hasExactMatch && $hasFuzzyMatch) {
-            // Mixed matches - apply half penalty
-            return $basePenalty * 0.5;
+        // If all exact terms match, very small penalty
+        if ($exactMatchRatio >= 1.0 && !$hasFuzzyMatch) {
+            return 0.1; // 10% penalty for all terms matching but not as phrase
         }
         
-        // Only fuzzy matches - apply penalty based on similarity/distance
-        if ($maxSimilarity > 0) {
-            // For Jaro-Winkler: higher similarity = less penalty
-            // similarity of 1.0 = no penalty, 0.7 = full penalty
-            $similarityFactor = max(0, 1.0 - $maxSimilarity) / 0.3; // normalize to 0-1 range
-            return $basePenalty * $similarityFactor;
-        } else if ($minDistance !== PHP_INT_MAX && $minDistance > 0) {
-            // For Levenshtein: smaller distance = less penalty
-            $distanceFactor = min(1.0, $minDistance / 3.0);
-            return $basePenalty * $distanceFactor;
+        // If most exact terms match
+        if ($exactMatchRatio >= 0.75 && !$hasFuzzyMatch) {
+            return 0.2; // 20% penalty
         }
         
+        // Mixed exact and fuzzy matches
+        if ($exactMatchRatio > 0 && $hasFuzzyMatch) {
+            // Scale penalty based on how many exact matches we have
+            // More exact matches = less penalty
+            $mixedPenalty = $basePenalty * (1.0 - $exactMatchRatio * 0.5);
+            return $mixedPenalty;
+        }
+        
+        // Only fuzzy matches - apply stronger penalty based on similarity/distance
+        if ($hasFuzzyMatch) {
+            if ($maxSimilarity > 0) {
+                // For Jaro-Winkler: higher similarity = less penalty
+                // But still apply significant penalty for fuzzy-only matches
+                if ($maxSimilarity >= 0.95) {
+                    return $basePenalty * 0.7; // Very close match
+                } else if ($maxSimilarity >= 0.85) {
+                    return $basePenalty * 0.85; // Good match
+                } else {
+                    return $basePenalty; // Full penalty for poor matches
+                }
+            } else if ($minDistance !== PHP_INT_MAX && $minDistance > 0) {
+                // For Levenshtein: smaller distance = less penalty
+                if ($minDistance === 1) {
+                    return $basePenalty * 0.7; // Single character difference
+                } else if ($minDistance === 2) {
+                    return $basePenalty * 0.85; // Two character difference
+                } else {
+                    return $basePenalty; // Full penalty for larger distances
+                }
+            }
+        }
+        
+        // No matches at all or unknown case - apply full penalty
         return $basePenalty;
     }
     
