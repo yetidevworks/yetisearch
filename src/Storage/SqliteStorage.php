@@ -945,6 +945,50 @@ class SqliteStorage implements StorageInterface
                 $inner = "SELECT d.id" . $spatial['select'] . " FROM {$index} d INNER JOIN {$index}_fts f ON d.id = f.id" . $spatial['join'] . " WHERE {$index}_fts MATCH ?" . $spatial['where'];
             }
             $params = array_merge([$searchQuery], $spatial['params']);
+
+            // Apply language and filters inside the inner query (so columns/JSON are available)
+            if ($language) {
+                $inner .= " AND d.language = ?";
+                $params[] = $language;
+            }
+            foreach ($filters as $filter) {
+                $field = $filter['field'];
+                $operator = $filter['operator'] ?? '=';
+                $value = $filter['value'];
+                if (in_array($field, ['type','language','id','timestamp'])) {
+                    $inner .= " AND d.{$field} {$operator} ?";
+                    $params[] = $value;
+                } elseif (strpos($field, 'metadata.') === 0) {
+                    $metaField = substr($field, 9);
+                    switch ($operator) {
+                        case '=':     $inner .= " AND json_extract(d.metadata, '$.{$metaField}') = ?"; break;
+                        case '!=':    $inner .= " AND json_extract(d.metadata, '$.{$metaField}') != ?"; break;
+                        case '>':     $inner .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) > ?"; break;
+                        case '<':     $inner .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) < ?"; break;
+                        case '>=':    $inner .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) >= ?"; break;
+                        case '<=':    $inner .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) <= ?"; break;
+                        case 'in':
+                            if (is_array($value)) {
+                                $placeholders = implode(',', array_fill(0, count($value), '?'));
+                                $inner .= " AND json_extract(d.metadata, '$.{$metaField}') IN ({$placeholders})";
+                                $params = array_merge($params, $value);
+                                continue 2;
+                            }
+                            break;
+                        case 'contains':
+                            $inner .= " AND json_extract(d.metadata, '$.{$metaField}') LIKE ?";
+                            $value = '%' . $value . '%';
+                            break;
+                        case 'exists':
+                            $inner .= " AND json_extract(d.metadata, '$.{$metaField}') IS NOT NULL";
+                            $value = null; // will be skipped by continue 2
+                            $params = $params; // no-op to keep style
+                            continue 2;
+                    }
+                    $params[] = $value;
+                }
+            }
+
             if (isset($geoFilters['near']) && !empty($spatial['select']) && strpos($spatial['select'], 'distance') !== false) {
                 $radius = (float)$geoFilters['near']['radius'];
                 $units = $geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? null);
@@ -962,63 +1006,44 @@ class SqliteStorage implements StorageInterface
                 WHERE 1=1" . $spatial['where'] . "
             ";
             $params = $spatial['params'];
-        }
-        
-        if ($language) {
-            $sql .= " AND d.language = ?";
-            $params[] = $language;
-        }
-        
-        foreach ($filters as $filter) {
-            $field = $filter['field'];
-            $operator = $filter['operator'] ?? '=';
-            $value = $filter['value'];
-            
-            if (in_array($field, ['type', 'language', 'id', 'timestamp'])) {
-                // Direct column filtering
-                $sql .= " AND d.{$field} {$operator} ?";
-                $params[] = $value;
-            } elseif (strpos($field, 'metadata.') === 0) {
-                // Metadata field filtering using JSON extraction
-                $metaField = substr($field, 9); // Remove 'metadata.' prefix
-                
-                // Use SQLite's JSON extraction
-                switch ($operator) {
-                    case '=':
-                        $sql .= " AND json_extract(d.metadata, '$.{$metaField}') = ?";
-                        break;
-                    case '!=':
-                        $sql .= " AND json_extract(d.metadata, '$.{$metaField}') != ?";
-                        break;
-                    case '>':
-                        $sql .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) > ?";
-                        break;
-                    case '<':
-                        $sql .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) < ?";
-                        break;
-                    case '>=':
-                        $sql .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) >= ?";
-                        break;
-                    case '<=':
-                        $sql .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) <= ?";
-                        break;
-                    case 'in':
-                        if (is_array($value)) {
-                            $placeholders = implode(',', array_fill(0, count($value), '?'));
-                            $sql .= " AND json_extract(d.metadata, '$.{$metaField}') IN ({$placeholders})";
-                            $params = array_merge($params, $value);
-                            continue 2; // Skip adding single value to params
-                        }
-                        break;
-                    case 'contains':
-                        $sql .= " AND json_extract(d.metadata, '$.{$metaField}') LIKE ?";
-                        $value = '%' . $value . '%';
-                        break;
-                    case 'exists':
-                        $sql .= " AND json_extract(d.metadata, '$.{$metaField}') IS NOT NULL";
-                        continue 2; // No value needed
+            if ($language) {
+                $sql .= " AND d.language = ?";
+                $params[] = $language;
+            }
+            foreach ($filters as $filter) {
+                $field = $filter['field'];
+                $operator = $filter['operator'] ?? '=';
+                $value = $filter['value'];
+                if (in_array($field, ['type','language','id','timestamp'])) {
+                    $sql .= " AND d.{$field} {$operator} ?";
+                    $params[] = $value;
+                } elseif (strpos($field, 'metadata.') === 0) {
+                    $metaField = substr($field, 9);
+                    switch ($operator) {
+                        case '=':     $sql .= " AND json_extract(d.metadata, '$.{$metaField}') = ?"; break;
+                        case '!=':    $sql .= " AND json_extract(d.metadata, '$.{$metaField}') != ?"; break;
+                        case '>':     $sql .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) > ?"; break;
+                        case '<':     $sql .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) < ?"; break;
+                        case '>=':    $sql .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) >= ?"; break;
+                        case '<=':    $sql .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) <= ?"; break;
+                        case 'in':
+                            if (is_array($value)) {
+                                $placeholders = implode(',', array_fill(0, count($value), '?'));
+                                $sql .= " AND json_extract(d.metadata, '$.{$metaField}') IN ({$placeholders})";
+                                $params = array_merge($params, $value);
+                                continue 2;
+                            }
+                            break;
+                        case 'contains':
+                            $sql .= " AND json_extract(d.metadata, '$.{$metaField}') LIKE ?";
+                            $value = '%' . $value . '%';
+                            break;
+                        case 'exists':
+                            $sql .= " AND json_extract(d.metadata, '$.{$metaField}') IS NOT NULL";
+                            continue 2;
+                    }
+                    $params[] = $value;
                 }
-                $params[] = $value;
             }
         }
         
