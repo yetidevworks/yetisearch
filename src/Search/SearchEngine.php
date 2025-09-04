@@ -919,42 +919,51 @@ class SearchEngine implements SearchEngineInterface
     
     private function deduplicateByRoute(array $results): array
     {
-        $routeMap = [];
-        $deduplicated = [];
-        
-        $this->logger->debug('Deduplicating results', ['total' => count($results)]);
-        
+        // Aggregate all chunk scores per route and rank by the composite score
+        $routeAgg = [];
+        $noRoute = [];
+
         foreach ($results as $result) {
-            $route = $result->get('route', '');
-            
-            // Skip if no route
-            if (empty($route)) {
-                $deduplicated[] = $result;
-                continue;
+            $route = (string)$result->get('route', '');
+            if ($route === '') { $noRoute[] = $result; continue; }
+            if (!isset($routeAgg[$route])) {
+                $routeAgg[$route] = [
+                    'sum' => 0.0,
+                    'count' => 0,
+                    'best' => $result,
+                    'bestScore' => $result->getScore(),
+                ];
             }
-            
-            // Keep only the highest scoring result for each route
-            if (!isset($routeMap[$route]) || $result->getScore() > $routeMap[$route]->getScore()) {
-                $routeMap[$route] = $result;
+            $routeAgg[$route]['sum'] += (float)$result->getScore();
+            $routeAgg[$route]['count'] += 1;
+            if ($result->getScore() > $routeAgg[$route]['bestScore']) {
+                $routeAgg[$route]['best'] = $result;
+                $routeAgg[$route]['bestScore'] = $result->getScore();
             }
         }
-        
-        // Add all unique results
-        foreach ($routeMap as $result) {
-            $deduplicated[] = $result;
+
+        $deduplicated = [];
+        foreach ($routeAgg as $route => $agg) {
+            $best = $agg['best'];
+            // Re-emit a representative result using the best document but composite score
+            $doc = $best->getDocument();
+            $meta = $best->getMetadata();
+            $meta['chunk_aggregate_score'] = $agg['sum'];
+            $meta['chunk_count'] = $agg['count'];
+            $data = [
+                'id' => $best->getId(),
+                'score' => (float)$agg['sum'],
+                'document' => $doc,
+                'highlights' => $best->getHighlights(),
+                'metadata' => $meta
+            ];
+            if ($best->hasDistance()) { $data['distance'] = $best->getDistance(); }
+            $deduplicated[] = new \YetiSearch\Models\SearchResult($data);
         }
-        
-        // Sort by score descending
-        usort($deduplicated, function($a, $b) {
-            return $b->getScore() <=> $a->getScore();
-        });
-        
-        $this->logger->debug('Deduplication complete', [
-            'unique_routes' => count($routeMap),
-            'results_without_route' => count($deduplicated) - count($routeMap),
-            'final_count' => count($deduplicated)
-        ]);
-        
+
+        foreach ($noRoute as $r) { $deduplicated[] = $r; }
+
+        usort($deduplicated, function($a, $b) { return $b->getScore() <=> $a->getScore(); });
         return $deduplicated;
     }
     

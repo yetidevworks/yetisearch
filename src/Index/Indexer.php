@@ -308,9 +308,7 @@ class Indexer implements IndexerInterface
             }
             
             // Insert all chunks in batch
-            if (!empty($chunkDocs)) {
-                $this->storage->insertBatch($this->indexName, $chunkDocs);
-            }
+            $this->storage->insertBatch($this->indexName, $chunkDocs);
         } elseif ($this->shouldChunkContent($processedContent)) {
             // Use automatic chunking if no pre-chunks provided
             $chunks = $this->chunkContent($processedContent);
@@ -346,9 +344,7 @@ class Indexer implements IndexerInterface
             }
             
             // Insert all chunks in batch
-            if (!empty($chunkDocs)) {
-                $this->storage->insertBatch($this->indexName, $chunkDocs);
-            }
+            $this->storage->insertBatch($this->indexName, $chunkDocs);
         }
         
         $data = [
