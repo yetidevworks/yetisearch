@@ -23,7 +23,8 @@ class SqliteStorage implements StorageInterface
     public function connect(array $config): void
     {
         $this->config = $config;
-        $dbPath = $config['path'] ?? ':memory:';
+        // Support both 'database' and 'path' keys for database location
+        $dbPath = $config['database'] ?? $config['path'] ?? ':memory:';
         
         // Extract search config if available
         $this->searchConfig = $config['search'] ?? [];

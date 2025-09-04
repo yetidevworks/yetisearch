@@ -274,11 +274,38 @@ class StandardAnalyzer implements AnalyzerInterface
             "'ve" => " have",
             "'ll" => " will",
             "'d" => " would",
-            "'m" => " am",
-            "'s" => " is"
+            "'m" => " am"
+            // Removed "'s" => " is" as it incorrectly expands possessives like "Grav's"
+            // This needs more sophisticated handling to differentiate between
+            // possessive (Grav's) and contractions (it's, that's)
         ];
         
-        return str_ireplace(array_keys($contractions), array_values($contractions), $text);
+        // Handle specific contractions with 's more carefully
+        // Only expand common contractions, not possessives
+        $specificContractions = [
+            "/\bit's\b/i" => "it is",
+            "/\bthat's\b/i" => "that is", 
+            "/\bwhat's\b/i" => "what is",
+            "/\bthere's\b/i" => "there is",
+            "/\bhere's\b/i" => "here is",
+            "/\bhe's\b/i" => "he is",
+            "/\bshe's\b/i" => "she is",
+            "/\bwho's\b/i" => "who is",
+            "/\bhow's\b/i" => "how is",
+            "/\bwhere's\b/i" => "where is",
+            "/\bwhen's\b/i" => "when is",
+            "/\bwhy's\b/i" => "why is"
+        ];
+        
+        // First apply simple replacements
+        $text = str_ireplace(array_keys($contractions), array_values($contractions), $text);
+        
+        // Then apply regex-based replacements for 's contractions
+        foreach ($specificContractions as $pattern => $replacement) {
+            $text = preg_replace($pattern, $replacement, $text);
+        }
+        
+        return $text;
     }
     
     private function isValidToken(string $token): bool

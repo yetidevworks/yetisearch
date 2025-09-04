@@ -351,6 +351,22 @@ class SearchEngine implements SearchEngineInterface
         $this->indexedTermsCacheTime = 0;
     }
     
+    private function escapeFtsToken(string $token, bool $inPhrase = false): string
+    {
+        // FTS5 handles apostrophes differently in phrases vs bare terms
+        if ($inPhrase) {
+            // In phrases, double the apostrophes
+            return str_replace("'", "''", $token);
+        } else {
+            // For bare terms, if it contains an apostrophe, wrap it in quotes
+            if (strpos($token, "'") !== false) {
+                $escaped = str_replace("'", "''", $token);
+                return '"' . $escaped . '"';
+            }
+            return $token;
+        }
+    }
+    
     private function processQuery(SearchQuery $query): SearchQuery
     {
         $queryText = $query->getQuery();
@@ -462,22 +478,29 @@ class SearchEngine implements SearchEngineInterface
             // Build exact match component with boost
             $exactComponents = [];
             if (count($tokens) > 1) {
+                // Escape tokens for FTS phrase
+                $escapedTokens = array_map(function($t) { return $this->escapeFtsToken($t, true); }, $tokens);
                 // Exact phrase gets highest priority
-                $exactComponents[] = '"' . implode(' ', $tokens) . '"';
+                $exactComponents[] = '"' . implode(' ', $escapedTokens) . '"';
             }
+            
+            // Escape exact tokens for FTS (as bare terms)
+            $escapedExactTokens = array_map(function($t) { return $this->escapeFtsToken($t, false); }, $exactTokens);
+            
             // Add individual exact tokens with NEAR proximity (if multiple tokens)
-            if (count($exactTokens) > 1) {
+            if (count($escapedExactTokens) > 1) {
                 // Use NEAR operator to boost documents with terms close together
-                $exactComponents[] = 'NEAR(' . implode(' ', $exactTokens) . ', 10)';
-            } else if (!empty($exactTokens)) {
+                $exactComponents[] = 'NEAR(' . implode(' ', $escapedExactTokens) . ', 10)';
+            } else if (!empty($escapedExactTokens)) {
                 // Single token - just add it
-                foreach ($exactTokens as $token) {
+                foreach ($escapedExactTokens as $token) {
                     $exactComponents[] = $token;
                 }
             }
             
             // Build fuzzy component - group them with lower priority
-            $fuzzyComponent = count($fuzzyTokens) > 0 ? '(' . implode(' OR ', $fuzzyTokens) . ')' : '';
+            $escapedFuzzyTokens = array_map(function($t) { return $this->escapeFtsToken($t, false); }, $fuzzyTokens);
+            $fuzzyComponent = count($escapedFuzzyTokens) > 0 ? '(' . implode(' OR ', $escapedFuzzyTokens) . ')' : '';
             
             // Combine with exact matches having priority
             // Structure: (exact_phrase OR NEAR(exact_terms)) OR (fuzzy_terms)
@@ -498,14 +521,18 @@ class SearchEngine implements SearchEngineInterface
             
             $exactComponents = [];
             if (count($tokens) > 1) {
+                // Escape tokens for FTS phrase
+                $escapedTokens = array_map(function($t) { return $this->escapeFtsToken($t, true); }, $tokens);
+                $escapedExactTokens = array_map(function($t) { return $this->escapeFtsToken($t, false); }, $exactTokens);
+                
                 // Add exact phrase
-                $exactComponents[] = '"' . implode(' ', $tokens) . '"';
+                $exactComponents[] = '"' . implode(' ', $escapedTokens) . '"';
                 // Add NEAR query for proximity boost
-                $exactComponents[] = 'NEAR(' . implode(' ', $exactTokens) . ', 10)';
+                $exactComponents[] = 'NEAR(' . implode(' ', $escapedExactTokens) . ', 10)';
             }
             // Add individual tokens
             foreach ($exactTokens as $token) {
-                $exactComponents[] = $token;
+                $exactComponents[] = $this->escapeFtsToken($token, false);
             }
             
             $processedQuery = implode(' OR ', array_unique($exactComponents));
