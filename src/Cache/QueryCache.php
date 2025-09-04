@@ -339,8 +339,10 @@ class QueryCache
     
     private function calculateHitRate(): float
     {
-        $total = $this->stats['hits'] + $this->stats['misses'];
-        return $total > 0 ? round($this->stats['hits'] / $total * 100, 2) : 0.0;
+        $hits = is_numeric($this->stats['hits']) ? (float)$this->stats['hits'] : 0.0;
+        $misses = is_numeric($this->stats['misses']) ? (float)$this->stats['misses'] : 0.0;
+        $total = $hits + $misses;
+        return $total > 0 ? round($hits / $total * 100, 2) : 0.0;
     }
     
     public function warmUp(string $indexName, array $popularQueries): int

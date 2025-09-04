@@ -554,7 +554,12 @@ class YetiSearch
                     $geo['bounds']['max_lat'],
                     $geo['bounds']['max_lng']
                 );
-                $searchQuery->withinBounds($bounds);
+                $searchQuery->withinBounds(
+                    $bounds->getNorth(),
+                    $bounds->getSouth(),
+                    $bounds->getEast(),
+                    $bounds->getWest()
+                );
             }
             
             if (isset($geo['near'])) {
@@ -572,7 +577,8 @@ class YetiSearch
     public function execute(SearchQuery $query, string $index): array
     {
         $engine = $this->getSearchEngine($index);
-        return $engine->execute($query);
+        $results = $engine->search($query);
+        return $results->toArray();
     }
     
     private function getStorage(): SqliteStorage

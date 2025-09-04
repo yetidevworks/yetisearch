@@ -22,8 +22,9 @@ class SearchQuery
     private array $facets = [];
     private array $aggregations = [];
     private array $geoFilters = [];
+    private array $options = [];
     
-    public function __construct(string $query, array $options = [])
+    public function __construct(string $query = '', array $options = [])
     {
         $this->query = $query;
         
@@ -77,6 +78,12 @@ class SearchQuery
     {
         $this->fields = $fields;
         return $this;
+    }
+    
+    // Alias for backward compatibility
+    public function fields(array $fields): self
+    {
+        return $this->inFields($fields);
     }
     
     public function getFields(): array
@@ -247,6 +254,38 @@ class SearchQuery
     public function hasGeoFilters(): bool
     {
         return !empty($this->geoFilters);
+    }
+    
+    public function setOptions(array $options): self
+    {
+        $this->options = array_merge($this->options, $options);
+        return $this;
+    }
+    
+    public function getOptions(): array
+    {
+        return $this->options;
+    }
+    
+    public function snippetLength(int $length): self
+    {
+        $this->highlightLength = $length;
+        return $this;
+    }
+    
+    public function weight(string $field, float $weight): self
+    {
+        $this->boost[$field] = $weight;
+        return $this;
+    }
+    
+    public function nearPoint(GeoPoint $point, float $radius): self
+    {
+        $this->geoFilters['near'] = [
+            'point' => $point,
+            'radius' => $radius
+        ];
+        return $this;
     }
     
     public function toArray(): array

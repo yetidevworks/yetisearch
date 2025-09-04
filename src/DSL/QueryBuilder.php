@@ -409,11 +409,13 @@ class FluentQuery
         }
         
         $yetiSearch = $this->builder->getYetiSearch();
-        return $yetiSearch->count($this->index, $this->searchQuery->getQuery(), [
+        $results = $yetiSearch->search($this->index, $this->searchQuery->getQuery(), [
             'filters' => $this->searchQuery->getFilters(),
             'fields' => $this->searchQuery->getFields(),
-            'language' => $this->searchQuery->getLanguage()
+            'language' => $this->searchQuery->getLanguage(),
+            'limit' => 0  // Only get the count
         ]);
+        return $results['total'] ?? 0;
     }
     
     public function toSearchQuery(): SearchQuery
