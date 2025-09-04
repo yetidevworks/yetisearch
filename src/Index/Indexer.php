@@ -260,7 +260,59 @@ class Indexer implements IndexerInterface
             }
         }
         
-        if ($this->shouldChunkContent($processedContent)) {
+        // Check if pre-chunked documents were provided
+        if (isset($document['chunks']) && is_array($document['chunks']) && !empty($document['chunks'])) {
+            // Use provided chunks instead of automatic chunking
+            $chunks = $document['chunks'];
+            $metadata['chunks'] = count($chunks);
+            $metadata['chunked'] = true;
+            $metadata['pre_chunked'] = true;
+            
+            $chunkDocs = [];
+            foreach ($chunks as $index => $chunkData) {
+                // Support both simple string chunks and structured chunks
+                if (is_string($chunkData)) {
+                    // Simple string chunk
+                    $chunkContent = $chunkData;
+                    $chunkMetadata = [];
+                } else {
+                    // Structured chunk with content and optional metadata
+                    $chunkContent = $chunkData['content'] ?? '';
+                    $chunkMetadata = $chunkData['metadata'] ?? [];
+                }
+                
+                $chunkId = $id . '#chunk' . $index;
+                $chunkDoc = [
+                    'id' => $chunkId,
+                    'parent_id' => $id,
+                    'content' => array_merge($processedContent, ['content' => $chunkContent]),
+                    'metadata' => array_merge($metadata, $chunkMetadata, [
+                        'chunk_index' => $index,
+                        'is_chunk' => true,
+                        'parent_route' => $processedContent['route'] ?? ''
+                    ]),
+                    'language' => $language,
+                    'type' => $type,
+                    'timestamp' => $timestamp
+                ];
+                
+                // Include geo data in chunks
+                if (isset($document['geo'])) {
+                    $chunkDoc['geo'] = $document['geo'];
+                }
+                if (isset($document['geo_bounds'])) {
+                    $chunkDoc['geo_bounds'] = $document['geo_bounds'];
+                }
+                
+                $chunkDocs[] = $chunkDoc;
+            }
+            
+            // Insert all chunks in batch
+            if (!empty($chunkDocs)) {
+                $this->storage->insertBatch($this->indexName, $chunkDocs);
+            }
+        } elseif ($this->shouldChunkContent($processedContent)) {
+            // Use automatic chunking if no pre-chunks provided
             $chunks = $this->chunkContent($processedContent);
             $metadata['chunks'] = count($chunks);
             $metadata['chunked'] = true;

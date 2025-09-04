@@ -158,6 +158,7 @@ php examples/apartment-search-simple.php
 ```
 
 ### 🔍 Other Examples
+- **Pre-chunked indexing**: [`examples/pre-chunked-indexing.php`](examples/pre-chunked-indexing.php) - Custom document chunking with semantic boundaries
 - **Type-ahead search**: [`examples/type-ahead.php`](examples/type-ahead.php) - Interactive as-you-type search
 - **Geo facets and k-NN**: [`examples/geo-facets-knn.php`](examples/geo-facets-knn.php) - Distance faceting and nearest neighbors
 - **DSL examples**: [`examples/dsl-examples.php`](examples/dsl-examples.php) - Query builder demonstrations
@@ -518,7 +519,10 @@ bin/yetisearch create-index --db=benchmarks/benchmark.db --index=legacy_idx --ex
 
 ### Document Chunking
 
-YetiSearch automatically splits large documents into smaller chunks for better search performance and relevance:
+YetiSearch supports both automatic and manual (pre-chunked) document chunking:
+
+#### Automatic Chunking
+Large documents are automatically split into smaller chunks for better search performance:
 
 ```php
 $indexer = $search->createIndex('books', [
@@ -542,6 +546,46 @@ $allChunks = $search->search('books', 'Napoleon', [
     'unique_by_route' => false
 ]);
 ```
+
+#### Pre-chunked Documents (Custom Chunking)
+**NEW:** You can provide your own chunks for better semantic boundaries:
+
+```php
+// Simple string chunks
+$indexer->insert([
+    'id' => 'doc-1',
+    'content' => ['title' => 'My Document'],
+    'chunks' => [
+        'Chapter 1: Introduction paragraph...',
+        'Chapter 2: Main content paragraph...',
+        'Chapter 3: Conclusion paragraph...'
+    ]
+]);
+
+// Structured chunks with metadata
+$indexer->insert([
+    'id' => 'doc-2',
+    'content' => ['title' => 'Technical Guide'],
+    'chunks' => [
+        [
+            'content' => '## Getting Started\nFirst steps...',
+            'metadata' => ['section' => 'intro', 'heading_level' => 2]
+        ],
+        [
+            'content' => '### Installation\nHow to install...',
+            'metadata' => ['section' => 'setup', 'heading_level' => 3]
+        ]
+    ]
+]);
+```
+
+Benefits of pre-chunked documents:
+- Control chunk boundaries at semantic breakpoints (paragraphs, sections)
+- Preserve document structure (headings, subsections)
+- Add custom metadata to each chunk
+- Better search relevance by keeping related content together
+
+See [`examples/pre-chunked-indexing.php`](examples/pre-chunked-indexing.php) for a complete example.
 
 ### Field Boosting and Exact Match Scoring
 

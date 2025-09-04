@@ -4,6 +4,16 @@
 
 ### New Features
 
+#### Pre-chunked Document Support
+- **Custom document chunking**: Documents can now provide their own chunks instead of relying on automatic chunking
+  - Simple mode: Provide an array of string chunks
+  - Structured mode: Provide chunks with content and custom metadata
+  - Enables semantic chunking at paragraph/section boundaries
+  - Preserves document structure (headings, subsections)
+  - Each chunk can have its own metadata (section, heading level, etc.)
+- **Mixed chunking modes**: Pre-chunked and auto-chunked documents can coexist in the same index
+- **Better search relevance**: Keep related content together for improved search accuracy
+
 #### DSL (Domain Specific Language) Support
 - **Natural language query syntax**: Write queries using SQL-like syntax for intuitive query construction
   - Example: `author = "John" AND status IN [published] SORT -created_at LIMIT 10`
