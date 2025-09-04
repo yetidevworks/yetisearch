@@ -845,7 +845,14 @@ class SearchEngine implements SearchEngineInterface
         $highlights = [];
         
         // Build a token list from the raw query and any fuzzy variants
-        $tokens = array_filter(array_map('trim', explode(' ', mb_strtolower($query))));
+        // Clean up FTS syntax: remove quotes, un-escape apostrophes, remove operators
+        $cleanQuery = $query;
+        $cleanQuery = str_replace("''", "'", $cleanQuery);  // Un-escape apostrophes
+        $cleanQuery = preg_replace('/["()]/', ' ', $cleanQuery);  // Remove quotes and parens
+        $cleanQuery = preg_replace('/\b(OR|AND|NEAR|NOT)\b/i', ' ', $cleanQuery);  // Remove FTS operators
+        $cleanQuery = preg_replace('/\s+/', ' ', $cleanQuery);  // Normalize spaces
+        
+        $tokens = array_filter(array_map('trim', explode(' ', mb_strtolower($cleanQuery))));
         
         // If fuzzy processing generated variants, include those for highlighting
         if (!empty($this->fuzzyTermMap)) {
@@ -854,7 +861,9 @@ class SearchEngine implements SearchEngineInterface
                 if ($term === '' || strpos($term, '*') !== false || strpos($term, '"') !== false) {
                     continue;
                 }
-                $tokens[] = $term;
+                // Un-escape apostrophes in fuzzy terms too
+                $cleanTerm = str_replace("''", "'", $term);
+                $tokens[] = $cleanTerm;
             }
         }
         
@@ -863,11 +872,27 @@ class SearchEngine implements SearchEngineInterface
         usort($tokens, function($a, $b) { return mb_strlen($b) <=> mb_strlen($a); });
         
         foreach ($document as $field => $value) {
-            if (!is_string($value) || $value === '') { continue; }
-            
-            $snippet = $this->extractSnippet($value, $tokens, $length);
-            if ($snippet !== '') {
-                $highlights[$field] = $this->highlightTerms($snippet, $tokens);
+            // Handle nested content structure (for chunks)
+            if ($field === 'content' && is_array($value)) {
+                // Process nested fields like content.title, content.content, etc.
+                foreach ($value as $subfield => $subvalue) {
+                    if (!is_string($subvalue) || $subvalue === '') { continue; }
+                    
+                    $snippet = $this->extractSnippet($subvalue, $tokens, $length);
+                    if ($snippet !== '') {
+                        // For important fields like title, use them directly
+                        if ($subfield === 'title' && !isset($highlights['title'])) {
+                            $highlights['title'] = $this->highlightTerms($snippet, $tokens);
+                        } else {
+                            $highlights[$field . '.' . $subfield] = $this->highlightTerms($snippet, $tokens);
+                        }
+                    }
+                }
+            } elseif (is_string($value) && $value !== '') {
+                $snippet = $this->extractSnippet($value, $tokens, $length);
+                if ($snippet !== '') {
+                    $highlights[$field] = $this->highlightTerms($snippet, $tokens);
+                }
             }
         }
         
