@@ -44,9 +44,11 @@
 - `src/DSL/URLQueryParser.php` - JSON API-compliant URL parameter parser
 - `src/DSL/QueryBuilder.php` - Main DSL interface with three query methods
 - `tests/DSL/QueryParserTest.php` - Comprehensive test coverage for all parsers
+- `tests/PreChunkedDocumentTest.php` - Tests for pre-chunked document indexing
 - `docs/DSL.md` - Complete documentation with examples and migration guide
 - `examples/apartment-search-simple.php` - Comprehensive tutorial demonstrating all YetiSearch features
 - `examples/apartment-search-tutorial.php` - Extended version with custom fields configuration
+- `examples/pre-chunked-indexing.php` - Demonstrates custom document chunking with semantic boundaries
 
 ### Bug Fixes
 - **FTS5 external content deletion**: Fixed critical bug where deleting documents with external content tables failed
