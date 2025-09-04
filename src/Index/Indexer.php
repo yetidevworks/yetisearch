@@ -115,6 +115,12 @@ class Indexer implements IndexerInterface
         ]);
     }
     
+    // Add indexBatch method for backward compatibility
+    public function indexBatch(array $documents): void
+    {
+        $this->insert($documents);
+    }
+    
     public function update(array $document): void
     {
         if (!isset($document['id'])) {

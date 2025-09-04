@@ -1,23 +1,23 @@
 {
     "indexing": {
         "before": {
-            "total_time": 7.0108,
-            "index_time": 6.9683,
-            "rate": 4584.18,
-            "memory": 58.8,
-            "peak": 60.28
+            "total_time": 7.5003,
+            "index_time": 7.4557,
+            "rate": 4284.52,
+            "memory": 58.92,
+            "peak": 60.4
         },
         "after": {
-            "total_time": 7.2371,
-            "index_time": 7.1963,
-            "rate": 4438.96,
-            "memory": 58.8,
-            "peak": 60.28
+            "total_time": 7.5372,
+            "index_time": 7.4969,
+            "rate": 4260.98,
+            "memory": 58.92,
+            "peak": 60.4
         },
         "delta": {
-            "total_time": 0.22630000000000017,
-            "index_time": 0.22799999999999976,
-            "rate": -145.22000000000025,
+            "total_time": 0.036900000000000155,
+            "index_time": 0.0411999999999999,
+            "rate": -23.540000000000873,
             "memory": 0,
             "peak": 0
         }
@@ -25,39 +25,39 @@
     "search": {
         "standard": {
             "star wars": {
-                "time_ms": 6.58,
+                "time_ms": 4.64,
                 "results_found": 5,
                 "total_hits": 946,
                 "titles": [
-                    "Star Wars",
-                    "Star Wars: Deleted Magic",
-                    "The Story of Star Wars",
+                    "Robot Chicken: Star Wars Episode III",
                     "Star Wars: The Legacy Revealed",
+                    "Empire of Dreams: The Story of the Star Wars Trilogy",
+                    "Star Wars: Deleted Magic",
                     "Star Wars: Greatest Moments"
                 ]
             },
             "action": {
-                "time_ms": 10.71,
+                "time_ms": 9.11,
                 "results_found": 5,
                 "total_hits": 5797,
                 "titles": [
                     "Ultimate Fights from the Movies",
-                    "Action Figures",
                     "Dragon Ball: The Magic Begins",
-                    "Hard Rain",
-                    "Backlash"
+                    "Action Figures",
+                    "Backlash",
+                    "Back in Action"
                 ]
             },
             "drama crime": {
-                "time_ms": 21.71,
+                "time_ms": 20.91,
                 "results_found": 5,
                 "total_hits": 14148,
                 "titles": [
                     "Cement",
+                    "Payback",
                     "Zarra's Law",
                     "Low Winter Sun",
-                    "Payback",
-                    "Wisegal"
+                    "London Boulevard"
                 ]
             },
             "nemo": {
@@ -73,19 +73,19 @@
                 ]
             },
             "matrix": {
-                "time_ms": 0.22,
+                "time_ms": 0.2,
                 "results_found": 5,
                 "total_hits": 20,
                 "titles": [
                     "The Matrix Revisited",
-                    "World Record",
                     "Sexual Matrix",
+                    "World Record",
                     "Kid's Story",
-                    "Commando"
+                    "The Matrix"
                 ]
             },
             "Anakin Skywalker": {
-                "time_ms": 0.3,
+                "time_ms": 0.28,
                 "results_found": 5,
                 "total_hits": 18,
                 "titles": [
@@ -93,73 +93,73 @@
                     "Star Wars: Episode I - The Phantom Menace",
                     "Star Wars: Episode II - Attack of the Clones",
                     "The Story of Star Wars",
-                    "Star Wars: The Clone Wars"
+                    "Fanboys"
                 ]
             }
         },
         "fuzzy": {
             "star wars": {
-                "time_ms": 60.42,
+                "time_ms": 57.03,
                 "results_found": 5,
-                "total_hits": 3567,
+                "total_hits": 2752,
                 "titles": [
-                    "Star Wars",
-                    "Star Wars: Deleted Magic",
-                    "The Story of Star Wars",
+                    "Star Warriors",
+                    "From 'Star Wars' to 'Jedi' : The Making of a Saga",
+                    "Robot Chicken: Star Wars Episode III",
                     "Star Wars: The Legacy Revealed",
-                    "The Making of Star Wars"
+                    "Empire of Dreams: The Story of the Star Wars Trilogy"
                 ]
             },
             "action": {
-                "time_ms": 25.14,
+                "time_ms": 23.48,
                 "results_found": 5,
                 "total_hits": 5937,
                 "titles": [
-                    "Just Say Love",
-                    "Three Colors: Blue",
-                    "Straight Men & the Men Who Love Them 3",
-                    "Attraction",
-                    "Chain Reaction"
+                    "Chain Reaction",
+                    "Darkweb",
+                    "A Sound of Thunder",
+                    "Results",
+                    "Dracano"
                 ]
             },
             "drama crime": {
-                "time_ms": 35.28,
+                "time_ms": 18.23,
                 "results_found": 5,
-                "total_hits": 14148,
+                "total_hits": 1823,
                 "titles": [
                     "The Krays",
                     "Like Mother Like Son: The Strange Story of Sante and Kenny Kimes",
                     "The Outrage",
                     "The Maker",
-                    "McBride: Semper Fi"
+                    "Cement"
                 ]
             },
             "nemo": {
-                "time_ms": 11.7,
+                "time_ms": 11.88,
                 "results_found": 5,
                 "total_hits": 40,
                 "titles": [
-                    "Neo Tokyo",
-                    "The Matrix Reloaded",
-                    "Adam's Apples",
-                    "Pink Cadillac",
-                    "Duck! The Carbine High Massacre"
+                    "Finding Nemo",
+                    "Captain Nemo and the Underwater City",
+                    "The Beautiful Person",
+                    "20,000 Leagues Under the Sea",
+                    "Mr. Nobody"
                 ]
             },
             "matrix": {
-                "time_ms": 14.29,
+                "time_ms": 14.52,
                 "results_found": 5,
                 "total_hits": 20,
                 "titles": [
                     "The Matrix Revisited",
-                    "World Record",
                     "Sexual Matrix",
+                    "World Record",
                     "Kid's Story",
-                    "Commando"
+                    "The Matrix"
                 ]
             },
             "Anakin Skywalker": {
-                "time_ms": 16.36,
+                "time_ms": 16.69,
                 "results_found": 5,
                 "total_hits": 18,
                 "titles": [
@@ -167,47 +167,47 @@
                     "Star Wars: Episode I - The Phantom Menace",
                     "Star Wars: Episode II - Attack of the Clones",
                     "The Story of Star Wars",
-                    "Star Wars: The Clone Wars"
+                    "Fanboys"
                 ]
             },
             "Harry Potter": {
-                "time_ms": 14.98,
+                "time_ms": 14.72,
                 "results_found": 5,
                 "total_hits": 172,
                 "titles": [
-                    "Harry Potter and the Goblet of Fire",
                     "Discovering the Real World of Harry Potter",
-                    "Harry Potter and the Chamber of Secrets",
-                    "Harry Potter and the Ten Years Later",
-                    "Harry Potter and the Philosopher's Stone"
+                    "Harry Potter and the Goblet of Fire",
+                    "Harry Potter and the Philosopher's Stone",
+                    "A Very Potter Musical",
+                    "Harry Potter and the Chamber of Secrets"
                 ]
             },
             "Amakin Dkywalker": {
-                "time_ms": 15.74,
+                "time_ms": 16.93,
                 "results_found": 5,
                 "total_hits": 16,
                 "titles": [
-                    "Star Wars: The Rise of Skywalker",
                     "The Story of Star Wars",
                     "Star Wars: Episode III - Revenge of the Sith",
                     "Fanboys",
-                    "Star Wars: Episode I - The Phantom Menace"
+                    "Star Wars: Episode I - The Phantom Menace",
+                    "Star Wars: Episode II - Attack of the Clones"
                 ]
             },
             "Skywaker": {
-                "time_ms": 15.51,
+                "time_ms": 15.55,
                 "results_found": 5,
                 "total_hits": 16,
                 "titles": [
-                    "Star Wars: The Rise of Skywalker",
                     "The Story of Star Wars",
                     "Star Wars: Episode III - Revenge of the Sith",
                     "Fanboys",
-                    "Star Wars: Episode I - The Phantom Menace"
+                    "Star Wars: Episode I - The Phantom Menace",
+                    "Star Wars: Episode II - Attack of the Clones"
                 ]
             },
             "Star Wrs": {
-                "time_ms": 3.1,
+                "time_ms": 1.84,
                 "results_found": 5,
                 "total_hits": 838,
                 "titles": [
@@ -215,89 +215,89 @@
                     "The Star of Bethlehem",
                     "Robot Chicken: Star Wars Episode III",
                     "Big Star: Nothing Can Hurt Me",
-                    "Star Wars: The Legacy Revealed"
+                    "Fan"
                 ]
             },
             "The Godfater": {
-                "time_ms": 15.17,
+                "time_ms": 16,
                 "results_found": 5,
                 "total_hits": 22,
                 "titles": [
+                    "I Knew It Was You: Rediscovering John Cazale",
+                    "Jane Austen's Mafia!",
                     "The Godfather Legacy",
                     "Herschell Gordon Lewis: The Godfather of Gore",
-                    "Bonanno: A Godfather's Story",
-                    "The Godfather Trilogy: 1901-1980",
-                    "The Godfather: Part III"
+                    "The Nutcracker in 3D"
                 ]
             },
             "Inceptionn": {
-                "time_ms": 32.91,
+                "time_ms": 33.71,
                 "results_found": 0,
                 "total_hits": 0,
                 "titles": []
             },
             "The Dark Knigh": {
-                "time_ms": 16.69,
+                "time_ms": 13.89,
                 "results_found": 5,
-                "total_hits": 827,
+                "total_hits": 84,
                 "titles": [
-                    "The Dark Knight Rises",
-                    "The Dark Knight",
+                    "Batman: Gotham Knight",
+                    "Knighty Knight Bugs",
                     "Legends of the Dark Knight: The History of Batman",
-                    "Batman: The Dark Knight Returns, Part 2",
-                    "Batman: The Dark Knight Returns, Part 1"
+                    "The Dark Knight Rises",
+                    "Batman: Mask of the Phantasm"
                 ]
             },
             "Pulp Fictin": {
-                "time_ms": 20.86,
+                "time_ms": 19,
                 "results_found": 5,
-                "total_hits": 2939,
+                "total_hits": 2932,
                 "titles": [
-                    "Pulp Fiction",
                     "Plump Fiction",
-                    "The Magnificent One",
-                    "City Rats",
-                    "The Whole Wide World"
+                    "The Quatermass Experiment",
+                    "Magnetic Rose",
+                    "Shadowplay",
+                    "Alien Dawn"
                 ]
             },
             "Forrest Gump": {
-                "time_ms": 11.56,
+                "time_ms": 11.76,
                 "results_found": 5,
                 "total_hits": 14,
                 "titles": [
                     "Forrest Gump",
                     "UFC 86: Jackson vs. Griffin",
                     "The Old Man & the Gun",
-                    "Sex Files: Alien Erotica II",
-                    "Deadly Honeymoon"
+                    "Norma Rae",
+                    "Sex Files: Alien Erotica II"
                 ]
             },
             "The Shawshank Redemtion": {
-                "time_ms": 17.26,
+                "time_ms": 16.73,
                 "results_found": 5,
                 "total_hits": 109,
                 "titles": [
-                    "The Shawshank Redemption",
-                    "Tales from the Script",
-                    "Redemption",
                     "UFC 97: Redemption",
-                    "Redemption: The Stan Tookie Williams Story"
+                    "The Forgiven",
+                    "Before I Sleep",
+                    "Kimura",
+                    "Powder Blue"
                 ]
             },
             "Lilo and Stich": {
-                "time_ms": 13.64,
+                "time_ms": 13.82,
                 "results_found": 5,
                 "total_hits": 5,
                 "titles": [
                     "The Story Room: The Making of 'Lilo & Stitch'",
-                    "Lilo & Stitch",
-                    "Lilo & Stitch 2: Stitch Has a Glitch",
                     "Leroy & Stitch",
-                    "Stitch! The Movie"
+                    "Lilo & Stitch",
+                    "Stitch! The Movie",
+                    "Lilo & Stitch 2: Stitch Has a Glitch"
                 ]
             },
             "Cristopher Nolan": {
-                "time_ms": 13.75,
+                "time_ms": 14.06,
                 "results_found": 5,
                 "total_hits": 17,
                 "titles": [
@@ -311,67 +311,67 @@
         },
         "standard_after": {
             "star wars": {
-                "time_ms": 3.93,
+                "time_ms": 3.6,
                 "results_found": 5,
                 "total_hits": 946,
                 "titles": [
-                    "Star Wars",
-                    "Star Wars: Deleted Magic",
-                    "Star Wars: Greatest Moments",
+                    "Robot Chicken: Star Wars Episode III",
                     "Star Wars: The Legacy Revealed",
-                    "The Making of Star Wars"
+                    "Empire of Dreams: The Story of the Star Wars Trilogy",
+                    "Star Wars: Deleted Magic",
+                    "Star Wars: Greatest Moments"
                 ]
             },
             "action": {
-                "time_ms": 5.66,
+                "time_ms": 4.35,
                 "results_found": 5,
                 "total_hits": 5797,
                 "titles": [
-                    "Back in Action",
-                    "Action Jackson",
-                    "Hyper Sonic",
-                    "Quattro Noza",
-                    "Missing in Action 2: The Beginning"
+                    "Ultimate Fights from the Movies",
+                    "Dragon Ball: The Magic Begins",
+                    "Action Figures",
+                    "Backlash",
+                    "Back in Action"
                 ]
             },
             "drama crime": {
-                "time_ms": 10.85,
+                "time_ms": 10.32,
                 "results_found": 5,
                 "total_hits": 14148,
                 "titles": [
                     "Cement",
-                    "Payback",
                     "Zarra's Law",
-                    "London Boulevard",
-                    "Godless Youth"
+                    "Low Winter Sun",
+                    "Payback",
+                    "Wisegal"
                 ]
             },
             "nemo": {
-                "time_ms": 0.2,
+                "time_ms": 0.17,
                 "results_found": 5,
                 "total_hits": 11,
                 "titles": [
-                    "Captain Nemo and the Underwater City",
                     "Finding Nemo",
-                    "Little Nemo: Adventures in Slumberland",
+                    "Captain Nemo and the Underwater City",
                     "The Beautiful Person",
-                    "20,000 Leagues Under the Sea"
+                    "20,000 Leagues Under the Sea",
+                    "Mr. Nobody"
                 ]
             },
             "matrix": {
-                "time_ms": 0.2,
+                "time_ms": 0.16,
                 "results_found": 5,
                 "total_hits": 20,
                 "titles": [
                     "The Matrix Revisited",
-                    "The Matrix",
                     "Sexual Matrix",
-                    "Matrix of Evil",
-                    "The Matrix Revolutions"
+                    "World Record",
+                    "Kid's Story",
+                    "The Matrix"
                 ]
             },
             "Anakin Skywalker": {
-                "time_ms": 0.32,
+                "time_ms": 0.27,
                 "results_found": 5,
                 "total_hits": 18,
                 "titles": [
@@ -379,73 +379,73 @@
                     "Star Wars: Episode I - The Phantom Menace",
                     "Star Wars: Episode II - Attack of the Clones",
                     "The Story of Star Wars",
-                    "Star Wars: The Clone Wars"
+                    "Fanboys"
                 ]
             }
         },
         "fuzzy_after": {
             "star wars": {
-                "time_ms": 58.42,
+                "time_ms": 54.34,
                 "results_found": 5,
-                "total_hits": 3567,
+                "total_hits": 2752,
                 "titles": [
-                    "Star Wars",
-                    "Star Wars: Deleted Magic",
-                    "Star Wars: Greatest Moments",
+                    "Star Warriors",
+                    "From 'Star Wars' to 'Jedi' : The Making of a Saga",
+                    "Robot Chicken: Star Wars Episode III",
                     "Star Wars: The Legacy Revealed",
-                    "The Making of Star Wars"
+                    "Empire of Dreams: The Story of the Star Wars Trilogy"
                 ]
             },
             "action": {
-                "time_ms": 20,
+                "time_ms": 19.13,
                 "results_found": 5,
                 "total_hits": 5937,
                 "titles": [
-                    "Attraction",
-                    "Attraction",
                     "Chain Reaction",
-                    "Three Colors: Blue",
-                    "Just Say Love"
+                    "Darkweb",
+                    "A Sound of Thunder",
+                    "Results",
+                    "Dracano"
                 ]
             },
             "drama crime": {
-                "time_ms": 24.55,
+                "time_ms": 16.92,
                 "results_found": 5,
-                "total_hits": 14148,
+                "total_hits": 1869,
                 "titles": [
                     "The Krays",
                     "Like Mother Like Son: The Strange Story of Sante and Kenny Kimes",
                     "The Outrage",
                     "The Maker",
-                    "McBride: Semper Fi"
+                    "Cement"
                 ]
             },
             "nemo": {
-                "time_ms": 11.67,
+                "time_ms": 11.93,
                 "results_found": 5,
                 "total_hits": 40,
                 "titles": [
-                    "Captain Nemo and the Underwater City",
                     "Finding Nemo",
-                    "Little Nemo: Adventures in Slumberland",
-                    "Neo Tokyo",
-                    "The Matrix Reloaded"
+                    "Captain Nemo and the Underwater City",
+                    "The Beautiful Person",
+                    "20,000 Leagues Under the Sea",
+                    "Mr. Nobody"
                 ]
             },
             "matrix": {
-                "time_ms": 14.42,
+                "time_ms": 14.69,
                 "results_found": 5,
                 "total_hits": 20,
                 "titles": [
                     "The Matrix Revisited",
-                    "The Matrix",
                     "Sexual Matrix",
-                    "Matrix of Evil",
-                    "The Matrix Revolutions"
+                    "World Record",
+                    "Kid's Story",
+                    "The Matrix"
                 ]
             },
             "Anakin Skywalker": {
-                "time_ms": 16.83,
+                "time_ms": 17.05,
                 "results_found": 5,
                 "total_hits": 18,
                 "titles": [
@@ -453,137 +453,137 @@
                     "Star Wars: Episode I - The Phantom Menace",
                     "Star Wars: Episode II - Attack of the Clones",
                     "The Story of Star Wars",
-                    "Star Wars: The Clone Wars"
+                    "Fanboys"
                 ]
             },
             "Harry Potter": {
-                "time_ms": 15.61,
+                "time_ms": 15.07,
                 "results_found": 5,
                 "total_hits": 172,
                 "titles": [
-                    "Harry Potter and the Goblet of Fire",
-                    "Harry Potter and the Chamber of Secrets",
                     "Discovering the Real World of Harry Potter",
-                    "Harry Potter and the Ten Years Later",
-                    "Harry Potter and the Philosopher's Stone"
+                    "Harry Potter and the Goblet of Fire",
+                    "Harry Potter and the Philosopher's Stone",
+                    "A Very Potter Musical",
+                    "Harry Potter and the Chamber of Secrets"
                 ]
             },
             "Amakin Dkywalker": {
-                "time_ms": 16.81,
+                "time_ms": 16.61,
                 "results_found": 5,
                 "total_hits": 16,
                 "titles": [
-                    "Star Wars: The Rise of Skywalker",
                     "The Story of Star Wars",
                     "Star Wars: Episode III - Revenge of the Sith",
                     "Fanboys",
-                    "Star Wars: Episode I - The Phantom Menace"
+                    "Star Wars: Episode I - The Phantom Menace",
+                    "Star Wars: Episode II - Attack of the Clones"
                 ]
             },
             "Skywaker": {
-                "time_ms": 15.98,
+                "time_ms": 16.11,
                 "results_found": 5,
                 "total_hits": 16,
                 "titles": [
-                    "Star Wars: The Rise of Skywalker",
                     "The Story of Star Wars",
                     "Star Wars: Episode III - Revenge of the Sith",
                     "Fanboys",
-                    "Star Wars: Episode I - The Phantom Menace"
+                    "Star Wars: Episode I - The Phantom Menace",
+                    "Star Wars: Episode II - Attack of the Clones"
                 ]
             },
             "Star Wrs": {
-                "time_ms": 2.35,
+                "time_ms": 0.99,
                 "results_found": 5,
                 "total_hits": 838,
                 "titles": [
-                    "Catch a Falling Star",
                     "Star Trek: Evolutions",
-                    "Amy Winehouse: Fallen Star",
-                    "Star Wars: The Legacy Revealed",
-                    "Robot Chicken: Star Wars Episode III"
+                    "The Star of Bethlehem",
+                    "Robot Chicken: Star Wars Episode III",
+                    "Big Star: Nothing Can Hurt Me",
+                    "Fan"
                 ]
             },
             "The Godfater": {
-                "time_ms": 16.06,
+                "time_ms": 16.01,
                 "results_found": 5,
                 "total_hits": 22,
                 "titles": [
-                    "Bonanno: A Godfather's Story",
-                    "The Godfather Trilogy: 1901-1980",
-                    "The Godfather: Part III",
-                    "The Godfather: Part II",
-                    "Herschell Gordon Lewis: The Godfather of Gore"
+                    "I Knew It Was You: Rediscovering John Cazale",
+                    "Jane Austen's Mafia!",
+                    "The Godfather Legacy",
+                    "Herschell Gordon Lewis: The Godfather of Gore",
+                    "The Nutcracker in 3D"
                 ]
             },
             "Inceptionn": {
-                "time_ms": 34.44,
+                "time_ms": 34.36,
                 "results_found": 0,
                 "total_hits": 0,
                 "titles": []
             },
             "The Dark Knigh": {
-                "time_ms": 15.96,
+                "time_ms": 14,
                 "results_found": 5,
-                "total_hits": 827,
+                "total_hits": 86,
                 "titles": [
+                    "Batman: Gotham Knight",
+                    "Knighty Knight Bugs",
+                    "Legends of the Dark Knight: The History of Batman",
                     "The Dark Knight Rises",
-                    "The Dark Knight",
-                    "Batman: The Dark Knight Returns, Part 2",
-                    "Batman: The Dark Knight Returns, Part 1",
-                    "Legends of the Dark Knight: The History of Batman"
+                    "Batman: Mask of the Phantasm"
                 ]
             },
             "Pulp Fictin": {
-                "time_ms": 17.6,
+                "time_ms": 16.73,
                 "results_found": 5,
-                "total_hits": 2939,
+                "total_hits": 2932,
                 "titles": [
-                    "Pulp Fiction",
-                    "Pulp",
                     "Plump Fiction",
-                    "Pulp: a Film About Life, Death & Supermarkets",
-                    "The Magnificent One"
+                    "The Quatermass Experiment",
+                    "Magnetic Rose",
+                    "Shadowplay",
+                    "Alien Dawn"
                 ]
             },
             "Forrest Gump": {
-                "time_ms": 11.77,
+                "time_ms": 12.06,
                 "results_found": 5,
                 "total_hits": 14,
                 "titles": [
                     "Forrest Gump",
                     "UFC 86: Jackson vs. Griffin",
                     "The Old Man & the Gun",
-                    "Sex Files: Alien Erotica II",
-                    "Deadly Honeymoon"
+                    "Norma Rae",
+                    "Sex Files: Alien Erotica II"
                 ]
             },
             "The Shawshank Redemtion": {
-                "time_ms": 17.42,
+                "time_ms": 16.96,
                 "results_found": 5,
                 "total_hits": 109,
                 "titles": [
-                    "The Shawshank Redemption",
-                    "Tales from the Script",
-                    "Redemption",
                     "UFC 97: Redemption",
-                    "24: Redemption"
+                    "The Forgiven",
+                    "Before I Sleep",
+                    "Kimura",
+                    "Powder Blue"
                 ]
             },
             "Lilo and Stich": {
-                "time_ms": 13.95,
+                "time_ms": 14.24,
                 "results_found": 5,
                 "total_hits": 5,
                 "titles": [
                     "The Story Room: The Making of 'Lilo & Stitch'",
-                    "Lilo & Stitch",
-                    "Lilo & Stitch 2: Stitch Has a Glitch",
                     "Leroy & Stitch",
-                    "Stitch! The Movie"
+                    "Lilo & Stitch",
+                    "Stitch! The Movie",
+                    "Lilo & Stitch 2: Stitch Has a Glitch"
                 ]
             },
             "Cristopher Nolan": {
-                "time_ms": 13.75,
+                "time_ms": 13.94,
                 "results_found": 5,
                 "total_hits": 17,
                 "titles": [

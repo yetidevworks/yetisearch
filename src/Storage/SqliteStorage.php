@@ -6,19 +6,22 @@ use YetiSearch\Contracts\StorageInterface;
 use YetiSearch\Exceptions\StorageException;
 use YetiSearch\Geo\GeoPoint;
 use YetiSearch\Geo\GeoBounds;
+use YetiSearch\Cache\QueryCache;
+use YetiSearch\Storage\PreparedStatementCache;
 
 class SqliteStorage implements StorageInterface
 {
     private ?\PDO $connection = null;
     private array $config = [];
     private array $searchConfig = [];
-    private array $preparedStatements = [];
+    private ?PreparedStatementCache $stmtCache = null;
     private ?bool $rtreeSupport = null;
     private bool $useTermsIndex = false;
     private ?bool $hasMathFunctions = null;
     private array $ftsColumnsCache = [];
     private array $spatialEnabledCache = [];
     private bool $externalContentDefault = false;
+    private ?QueryCache $queryCache = null;
     
     public function connect(array $config): void
     {
@@ -72,6 +75,18 @@ class SqliteStorage implements StorageInterface
             } catch (\PDOException $e) {
                 $this->hasMathFunctions = false;
             }
+            
+            // Initialize query cache if enabled
+            $cacheConfig = $config['cache'] ?? [];
+            if ($cacheConfig['enabled'] ?? false) {  // Default to disabled for backward compatibility
+                $this->queryCache = new QueryCache($this->connection, $cacheConfig);
+            }
+            
+            // Initialize prepared statement cache
+            $maxStmts = isset($config['prepared_statements']['max_size']) 
+                ? $config['prepared_statements']['max_size'] 
+                : 50;
+            $this->stmtCache = new PreparedStatementCache($maxStmts);
         } catch (\PDOException $e) {
             throw new StorageException("Failed to connect to SQLite: " . $e->getMessage());
         }
@@ -79,7 +94,9 @@ class SqliteStorage implements StorageInterface
     
     public function disconnect(): void
     {
-        $this->preparedStatements = [];
+        if ($this->stmtCache) {
+            $this->stmtCache->clear();
+        }
         $this->connection = null;
     }
     
@@ -275,6 +292,11 @@ class SqliteStorage implements StorageInterface
     {
         $this->ensureConnected();
         
+        // Invalidate cache for this index when inserting
+        if ($this->queryCache) {
+            $this->queryCache->invalidate($index);
+        }
+        
         try {
             $this->connection->beginTransaction();
             
@@ -374,6 +396,11 @@ class SqliteStorage implements StorageInterface
     public function insertBatch(string $index, array $documents): void
     {
         $this->ensureConnected();
+        
+        // Invalidate cache for this index when batch inserting
+        if ($this->queryCache) {
+            $this->queryCache->invalidate($index);
+        }
         
         if (empty($documents)) {
             return;
@@ -533,6 +560,11 @@ class SqliteStorage implements StorageInterface
     
     public function update(string $index, string $id, array $document): void
     {
+        // Invalidate cache for this index when updating
+        if ($this->queryCache) {
+            $this->queryCache->invalidate($index);
+        }
+        
         $document['id'] = $id;
         $this->insert($index, $document);
     }
@@ -540,6 +572,11 @@ class SqliteStorage implements StorageInterface
     public function delete(string $index, string $id): void
     {
         $this->ensureConnected();
+        
+        // Invalidate cache for this index when deleting
+        if ($this->queryCache) {
+            $this->queryCache->invalidate($index);
+        }
         
         try {
             $this->connection->beginTransaction();
@@ -589,6 +626,14 @@ class SqliteStorage implements StorageInterface
     public function search(string $index, array $query): array
     {
         $this->ensureConnected();
+        
+        // Check cache first if enabled
+        if ($this->queryCache && !($query['bypass_cache'] ?? false)) {
+            $cached = $this->queryCache->get($index, $query);
+            if ($cached !== null) {
+                return $cached;
+            }
+        }
         
         $searchQuery = $query['query'] ?? '';
         $filters = $query['filters'] ?? [];
@@ -652,7 +697,8 @@ class SqliteStorage implements StorageInterface
                 $sql .= " ORDER BY distance ASC LIMIT ?"; $params[] = $k;
 
                 try {
-                    $stmt = $this->connection->prepare($sql); $stmt->execute($params);
+                    $stmt = $this->getPreparedStatement($sql);
+                    $stmt->execute($params);
                     $results = [];
                     while ($row = $stmt->fetch()) {
                         $content = json_decode($row['content'], true);
@@ -669,6 +715,12 @@ class SqliteStorage implements StorageInterface
                             'centroid_lng' => $row['_centroid_lng'] ?? null,
                         ];
                     }
+                    
+                    // Cache the results before returning
+                    if ($this->queryCache) {
+                        $this->queryCache->set($index, $query, $results);
+                    }
+                    
                     return $results;
                 } catch (\PDOException $e) {
                     throw new StorageException("Search failed: " . $e->getMessage());
@@ -958,6 +1010,11 @@ class SqliteStorage implements StorageInterface
                 
                 // Apply pagination after sorting
                 $results = array_slice($results, $offset, $limit);
+            }
+            
+            // Cache the results before returning
+            if ($this->queryCache) {
+                $this->queryCache->set($index, $query, $results);
             }
             
             return $results;
@@ -1269,6 +1326,41 @@ class SqliteStorage implements StorageInterface
         return $indices;
     }
     
+    public function getStats(string $index): array
+    {
+        return $this->getIndexStats($index);
+    }
+    
+    public function clear(string $index): void
+    {
+        $this->ensureConnected();
+        
+        try {
+            $this->connection->beginTransaction();
+            
+            // Delete all documents from the index
+            $this->connection->exec("DELETE FROM {$index}");
+            
+            // Delete from FTS table
+            $this->connection->exec("DELETE FROM {$index}_fts");
+            
+            // Delete from spatial table if exists
+            if ($this->hasSpatialIndex($index)) {
+                $this->connection->exec("DELETE FROM {$index}_spatial");
+            }
+            
+            // Delete from terms table if exists
+            if ($this->useTermsIndex) {
+                $this->connection->exec("DELETE FROM {$index}_terms");
+            }
+            
+            $this->connection->commit();
+        } catch (\PDOException $e) {
+            $this->connection->rollBack();
+            throw new StorageException("Failed to clear index: " . $e->getMessage());
+        }
+    }
+    
     public function searchMultiple(array $indices, array $query): array
     {
         $this->ensureConnected();
@@ -1329,6 +1421,46 @@ class SqliteStorage implements StorageInterface
         if ($this->connection === null) {
             throw new StorageException("Not connected to database");
         }
+    }
+    
+    private function hasSpatialIndex(string $index): bool
+    {
+        if (!$this->connection) {
+            return false;
+        }
+        
+        try {
+            $stmt = $this->connection->prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
+            );
+            $stmt->execute([$index . '_spatial']);
+            return $stmt->fetch() !== false;
+        } catch (\PDOException $e) {
+            return false;
+        }
+    }
+    
+    private function getPreparedStatement(string $sql): \PDOStatement
+    {
+        $key = md5($sql);
+        
+        // Check cache first
+        if ($this->stmtCache) {
+            $stmt = $this->stmtCache->get($key);
+            if ($stmt !== null) {
+                return $stmt;
+            }
+        }
+        
+        // Prepare new statement
+        $stmt = $this->connection->prepare($sql);
+        
+        // Cache it
+        if ($this->stmtCache) {
+            $this->stmtCache->set($key, $stmt);
+        }
+        
+        return $stmt;
     }
     
     private function initializeDatabase(): void
