@@ -477,12 +477,12 @@ class SearchEngine implements SearchEngineInterface
             }
             
             // Build fuzzy component - group them with lower priority
-            $fuzzyComponent = !empty($fuzzyTokens) ? '(' . implode(' OR ', $fuzzyTokens) . ')' : '';
+            $fuzzyComponent = count($fuzzyTokens) > 0 ? '(' . implode(' OR ', $fuzzyTokens) . ')' : '';
             
             // Combine with exact matches having priority
             // Structure: (exact_phrase OR NEAR(exact_terms)) OR (fuzzy_terms)
             // This ensures exact matches score higher than fuzzy ones
-            if (!empty($exactComponents) && !empty($fuzzyComponent)) {
+            if (!empty($exactComponents) && $fuzzyComponent !== '') {
                 $processedQuery = '(' . implode(' OR ', $exactComponents) . ') OR ' . $fuzzyComponent;
             } elseif (!empty($exactComponents)) {
                 $processedQuery = implode(' OR ', $exactComponents);
