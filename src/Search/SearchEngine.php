@@ -377,61 +377,96 @@ class SearchEngine implements SearchEngineInterface
         // Reset fuzzy term map for this query
         $this->fuzzyTermMap = [];
         
+        // Check if we should use correction mode (new approach) or expansion mode (old approach)
+        $useCorrectionMode = $this->config['fuzzy_correction_mode'] ?? true;
+        
         $processedTokens = [];
+        $correctedTokens = [];
         $tokenCount = count($tokens);
         $remainingFuzzy = (int)($this->config['fuzzy_total_max_variations'] ?? 30);
+        
         foreach ($tokens as $idx => $token) {
-            // For now, don't stem since FTS is not using porter
-            $processedTokens[] = $token;
             // Mark original terms as exact matches
             $this->fuzzyTermMap[strtolower($token)] = ['type' => 'exact', 'original' => $token];
             
             if ($query->isFuzzy() && $this->config['enable_fuzzy']) {
                 // If enabled, only fuzz the last token (better for as-you-type)
                 if (($this->config['fuzzy_last_token_only'] ?? false) && $idx !== $tokenCount - 1) {
+                    $processedTokens[] = $token;
+                    $correctedTokens[] = $token;
                     continue;
                 }
-                $this->logger->debug('Fuzzy search enabled', [
-                    'token' => $token,
-                    'fuzzy_algorithm' => $this->config['fuzzy_algorithm'] ?? 'basic',
-                    'enable_fuzzy' => $this->config['enable_fuzzy']
-                ]);
-                $fuzzyTokens = $this->generateFuzzyVariations($token);
-                if ($remainingFuzzy > 0 && count($fuzzyTokens) > $remainingFuzzy) {
-                    $fuzzyTokens = array_slice($fuzzyTokens, 0, $remainingFuzzy);
-                }
-                $this->logger->debug('Generated fuzzy variations', [
-                    'original' => $token,
-                    'variations' => $fuzzyTokens
-                ]);
                 
-                // Mark fuzzy variations and calculate their distance
-                foreach ($fuzzyTokens as $fuzzyToken) {
-                    if (strtolower($fuzzyToken) !== strtolower($token)) {
-                        $fuzzyInfo = [
-                            'type' => 'fuzzy',
+                if ($useCorrectionMode) {
+                    // NEW APPROACH: Find single best correction
+                    $correction = $this->findBestCorrection($token);
+                    $correctedTokens[] = $correction;
+                    
+                    if ($correction !== $token) {
+                        // Mark the correction as a fuzzy match
+                        $this->fuzzyTermMap[strtolower($correction)] = [
+                            'type' => 'correction',
                             'original' => $token
                         ];
                         
-                        // Add distance/similarity based on algorithm
-                        $algorithm = $this->config['fuzzy_algorithm'] ?? 'basic';
-                        if ($algorithm === 'levenshtein') {
-                            $fuzzyInfo['distance'] = Levenshtein::distance($token, $fuzzyToken);
-                        } elseif ($algorithm === 'jaro_winkler') {
-                            $fuzzyInfo['similarity'] = JaroWinkler::similarity($token, $fuzzyToken);
-                        } elseif ($algorithm === 'trigram') {
-                            $fuzzyInfo['similarity'] = Trigram::similarity($token, $fuzzyToken);
-                        } else {
-                            $fuzzyInfo['distance'] = 1; // Default for basic algorithm
-                        }
-                        
-                        $this->fuzzyTermMap[strtolower($fuzzyToken)] = $fuzzyInfo;
+                        $this->logger->debug('Using typo correction', [
+                            'original' => $token,
+                            'corrected' => $correction
+                        ]);
                     }
+                    
+                    // For processedTokens, just use the correction
+                    $processedTokens[] = $correction;
+                } else {
+                    // OLD APPROACH: Generate multiple variations
+                    $processedTokens[] = $token;
+                    
+                    $this->logger->debug('Fuzzy search enabled (expansion mode)', [
+                        'token' => $token,
+                        'fuzzy_algorithm' => $this->config['fuzzy_algorithm'] ?? 'basic',
+                        'enable_fuzzy' => $this->config['enable_fuzzy']
+                    ]);
+                    $fuzzyTokens = $this->generateFuzzyVariations($token);
+                    if ($remainingFuzzy > 0 && count($fuzzyTokens) > $remainingFuzzy) {
+                        $fuzzyTokens = array_slice($fuzzyTokens, 0, $remainingFuzzy);
+                    }
+                    $this->logger->debug('Generated fuzzy variations', [
+                        'original' => $token,
+                        'variations' => $fuzzyTokens
+                    ]);
+                    
+                    // Mark fuzzy variations and calculate their distance
+                    foreach ($fuzzyTokens as $fuzzyToken) {
+                        if (strtolower($fuzzyToken) !== strtolower($token)) {
+                            $fuzzyInfo = [
+                                'type' => 'fuzzy',
+                                'original' => $token
+                            ];
+                            
+                            // Add distance/similarity based on algorithm
+                            $algorithm = $this->config['fuzzy_algorithm'] ?? 'basic';
+                            if ($algorithm === 'levenshtein') {
+                                $fuzzyInfo['distance'] = Levenshtein::distance($token, $fuzzyToken);
+                            } elseif ($algorithm === 'jaro_winkler') {
+                                $fuzzyInfo['similarity'] = JaroWinkler::similarity($token, $fuzzyToken);
+                            } elseif ($algorithm === 'trigram') {
+                                $fuzzyInfo['similarity'] = Trigram::similarity($token, $fuzzyToken);
+                            } else {
+                                $fuzzyInfo['distance'] = 1; // Default for basic algorithm
+                            }
+                            
+                            $this->fuzzyTermMap[strtolower($fuzzyToken)] = $fuzzyInfo;
+                        }
+                    }
+                    
+                    $processedTokens = array_merge($processedTokens, $fuzzyTokens);
+                    // Budget down (exclude original token itself if present at [0])
+                    $remainingFuzzy = max(0, $remainingFuzzy - max(0, count($fuzzyTokens) - 1));
                 }
-                
-                $processedTokens = array_merge($processedTokens, $fuzzyTokens);
-                // Budget down (exclude original token itself if present at [0])
-                $remainingFuzzy = max(0, $remainingFuzzy - max(0, count($fuzzyTokens) - 1));
+            } else {
+                // No fuzzy - just use original token
+                $processedTokens[] = $token;
+                $correctedTokens[] = $token;
             }
         }
         
@@ -440,17 +475,29 @@ class SearchEngine implements SearchEngineInterface
         }
         
         // For SQLite FTS5, we need to properly format the query
+        // In correction mode, use corrected tokens directly
+        if ($query->isFuzzy() && $this->config['enable_fuzzy'] && $useCorrectionMode && !empty($correctedTokens)) {
+            // Use corrected tokens as if the user typed them correctly
+            $tokensToUse = $correctedTokens;
+        } else {
+            // Use original tokens (for non-fuzzy or expansion mode)
+            $tokensToUse = $tokens;
+        }
+        
         // Separate exact tokens from fuzzy variations
         $exactTokens = [];
         $fuzzyTokens = [];
         
-        foreach ($tokens as $token) {
+        foreach ($tokensToUse as $token) {
             $exactTokens[] = $token;
         }
         
-        foreach ($processedTokens as $token) {
-            if (!in_array($token, $exactTokens)) {
-                $fuzzyTokens[] = $token;
+        // In expansion mode, add fuzzy variations
+        if (!$useCorrectionMode) {
+            foreach ($processedTokens as $token) {
+                if (!in_array($token, $exactTokens)) {
+                    $fuzzyTokens[] = $token;
+                }
             }
         }
         
@@ -466,7 +513,21 @@ class SearchEngine implements SearchEngineInterface
                 $fuzzyTokens = [];
             }
         }
-        if ($query->isFuzzy() && !empty($fuzzyTokens)) {
+        
+        // In correction mode with fuzzy, build a clean query with corrected terms
+        if ($query->isFuzzy() && $useCorrectionMode && $this->config['enable_fuzzy']) {
+            // Build a simple query with corrected terms
+            // Use the same logic as non-fuzzy search but with corrected tokens
+            $escapedTokens = array_map(function($t) { return $this->escapeFtsToken($t, false); }, $exactTokens);
+            
+            if (count($exactTokens) > 1) {
+                // Multiple terms - search for all of them (implicit AND in FTS5)
+                $processedQuery = implode(' ', $escapedTokens);
+            } else {
+                // Single term
+                $processedQuery = $escapedTokens[0] ?? '';
+            }
+        } elseif ($query->isFuzzy() && !$useCorrectionMode && !empty($fuzzyTokens)) {
             // Build structured query that strongly prioritizes exact matches
             // Use parentheses to group exact matches with higher priority
             // Optional prefix on last token
@@ -1365,6 +1426,118 @@ class SearchEngine implements SearchEngineInterface
         return array_unique($variations);
     }
     
+    /**
+     * Find the single best correction for a potentially misspelled term
+     * Returns the original term if no good correction is found
+     */
+    private function findBestCorrection(string $term): string
+    {
+        // Skip short terms or if fuzzy is disabled
+        if (mb_strlen($term) <= 3 || !$this->config['enable_fuzzy']) {
+            return $term;
+        }
+        
+        $algorithm = $this->config['fuzzy_algorithm'] ?? 'trigram';
+        $correctionThreshold = $this->config['correction_threshold'] ?? 0.7; // Higher threshold for corrections
+        $minFrequency = $this->config['min_term_frequency'] ?? 2;
+        
+        try {
+            // Use cached indexed terms if available
+            $cacheTimeout = $this->config['indexed_terms_cache_ttl'] ?? 300;
+            $now = time();
+            
+            if ($this->indexedTermsCache === null || ($now - $this->indexedTermsCacheTime) > $cacheTimeout) {
+                $this->logger->debug('Loading indexed terms for typo correction');
+                $termLimit = $this->config['max_indexed_terms'] ?? 20000;
+                $this->indexedTermsCache = $this->storage->getIndexedTerms($this->indexName, $minFrequency, $termLimit);
+                $this->indexedTermsCacheTime = $now;
+            }
+            
+            $indexedTerms = $this->indexedTermsCache;
+            $bestMatch = null;
+            $bestScore = 0;
+            $termExistsInIndex = false;
+            $termFrequency = 0;
+            
+            // First check if term exists and get its frequency
+            foreach ($indexedTerms as $indexedTerm => $frequency) {
+                if (strtolower($indexedTerm) === strtolower($term)) {
+                    $termExistsInIndex = true;
+                    $termFrequency = (int)$frequency;
+                    break;
+                }
+            }
+            
+            // Find the single best match based on algorithm
+            foreach ($indexedTerms as $indexedTerm => $frequency) {
+                // Skip if same as input
+                if (strtolower($indexedTerm) === strtolower($term)) {
+                    continue;
+                }
+                
+                $score = 0;
+                if ($algorithm === 'trigram') {
+                    $score = Trigram::similarity($term, $indexedTerm);
+                } elseif ($algorithm === 'levenshtein') {
+                    $distance = Levenshtein::distance($term, $indexedTerm);
+                    // Convert distance to similarity (0-1)
+                    $maxLen = max(mb_strlen($term), mb_strlen($indexedTerm));
+                    $score = 1 - ($distance / $maxLen);
+                } elseif ($algorithm === 'jaro_winkler') {
+                    $score = JaroWinkler::similarity($term, $indexedTerm);
+                }
+                
+                // Weight by frequency (popular terms are more likely corrections)
+                $freq = (int)$frequency;
+                $weightedScore = $score * (1 + log(1 + $freq) / 10);
+                
+                if ($weightedScore > $bestScore && $score >= $correctionThreshold) {
+                    $bestScore = $weightedScore;
+                    $bestMatch = $indexedTerm;
+                }
+            }
+            
+            // Decide whether to use the correction or keep original
+            if ($bestMatch !== null) {
+                // If original term exists but is rare, and we found a much more common similar term, use it
+                if ($termExistsInIndex) {
+                    $bestFreq = (int)($indexedTerms[$bestMatch] ?? 0);
+                    // Only correct if the best match is significantly more frequent
+                    // e.g., "grab" (rare) -> "grav" (common)
+                    if ($bestFreq > $termFrequency * 5) {
+                        $this->logger->debug('Typo correction found (replacing rare term)', [
+                            'original' => $term,
+                            'original_freq' => $termFrequency,
+                            'correction' => $bestMatch,
+                            'correction_freq' => $bestFreq,
+                            'score' => $bestScore
+                        ]);
+                        return $bestMatch;
+                    }
+                    // Otherwise keep the original since it exists
+                    return $term;
+                } else {
+                    // Term doesn't exist, use the correction
+                    $this->logger->debug('Typo correction found (term not in index)', [
+                        'original' => $term,
+                        'correction' => $bestMatch,
+                        'score' => $bestScore
+                    ]);
+                    return $bestMatch;
+                }
+            }
+            
+        } catch (\Exception $e) {
+            $this->logger->error('Failed to find correction', [
+                'term' => $term,
+                'error' => $e->getMessage()
+            ]);
+        }
+        
+        // No good correction found, return original
+        return $term;
+    }
+    
     private function generateTrigramVariations(string $term): array
     {
         $variations = [$term]; // Always include the original term
@@ -1374,8 +1547,8 @@ class SearchEngine implements SearchEngineInterface
             return $variations;
         }
         
-        // Get configuration
-        $threshold = $this->config['trigram_threshold'] ?? 0.5;
+        // Get configuration - lower threshold for better fuzzy matching
+        $threshold = $this->config['trigram_threshold'] ?? 0.3;
         $minFrequency = $this->config['min_term_frequency'] ?? 2;
         $maxVariations = $this->config['max_fuzzy_variations'] ?? 10;
         $ngramSize = $this->config['trigram_size'] ?? 3;

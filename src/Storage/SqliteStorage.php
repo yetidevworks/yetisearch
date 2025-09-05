@@ -936,19 +936,20 @@ class SqliteStorage implements StorageInterface
                 $content = json_decode($row['content'], true);
                 $baseScore = abs($row['rank']);
                 
-                // Apply field weights if provided (only in single-column mode)
-                if (!$isMultiColumn && !empty($fieldWeights) && $hasSearchQuery) {
-                    // In single-column mode, apply post-processing field weights
+                // Apply field weights if provided
+                // Even in multi-column mode, we should apply additional weighting for exact matches
+                if (!empty($fieldWeights) && $hasSearchQuery && is_array($content)) {
+                    // Apply post-processing field weights for better exact match scoring
                     $weightedScore = $this->calculateFieldWeightedScore($searchQuery, $content, $fieldWeights, $baseScore);
                     $finalScore = $weightedScore;
                     
                 } else {
-                    // In multi-column mode, BM25 already applied the weights natively
+                    // No field weights configured
                     $finalScore = $baseScore;
                 }
                 
                 // Merge content fields directly into result
-                $result = array_merge($content, [
+                $result = array_merge($content ?: [], [
                     'id' => $row['id'],
                     'score' => $finalScore,
                     'metadata' => json_decode($row['metadata'], true),
@@ -2213,9 +2214,9 @@ class SqliteStorage implements StorageInterface
                 }
             }
             
-            // Sort by frequency and return just the terms
+            // Sort by frequency and return terms with their frequencies
             arsort($allTerms);
-            return array_keys(array_slice($allTerms, 0, $limit, true));
+            return array_slice($allTerms, 0, $limit, true);
             
         } catch (\PDOException $e) {
             throw new StorageException("Failed to get indexed terms: " . $e->getMessage());
@@ -2262,11 +2263,30 @@ class SqliteStorage implements StorageInterface
         
         // Check each field for search terms
         foreach ($fieldWeights as $field => $weight) {
-            if (!isset($content[$field]) || !is_string($content[$field])) {
+            // Check both top-level and nested content fields
+            $fieldValue = null;
+            
+            // First check if it's a direct field
+            if (isset($content[$field]) && is_string($content[$field])) {
+                $fieldValue = $content[$field];
+            }
+            // Then check if it's nested under 'content' (for chunked documents)
+            elseif (isset($content['content'][$field]) && is_string($content['content'][$field])) {
+                $fieldValue = $content['content'][$field];
+            }
+            // Also check if the entire content is a nested object with the field
+            elseif (isset($content['content']) && is_array($content['content'])) {
+                // For nested fields, also check h1, h2, h3 etc
+                if (isset($content['content'][$field]) && is_string($content['content'][$field])) {
+                    $fieldValue = $content['content'][$field];
+                }
+            }
+            
+            if ($fieldValue === null) {
                 continue;
             }
             
-            $fieldText = strtolower(trim($content[$field]));
+            $fieldText = strtolower(trim($fieldValue));
             if (empty($fieldText)) {
                 continue;
             }
