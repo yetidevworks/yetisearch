@@ -944,6 +944,9 @@ class SearchEngine implements SearchEngineInterface
                         // For important fields like title, use them directly
                         if ($subfield === 'title' && !isset($highlights['title'])) {
                             $highlights['title'] = $this->highlightTerms($snippet, $tokens);
+                        } elseif ($subfield === 'content') {
+                            // For chunks, use the nested content as the main content highlight
+                            $highlights['content'] = $this->highlightTerms($snippet, $tokens);
                         } else {
                             $highlights[$field . '.' . $subfield] = $this->highlightTerms($snippet, $tokens);
                         }
