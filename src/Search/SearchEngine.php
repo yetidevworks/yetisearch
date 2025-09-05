@@ -85,6 +85,11 @@ class SearchEngine implements SearchEngineInterface
     public function search(SearchQuery $query, array $options = []): SearchResults
     {
         $startTime = microtime(true);
+        
+        // Merge runtime options with config (runtime options take precedence)
+        $originalConfig = $this->config;
+        $this->config = array_merge($this->config, $options);
+        
         $cacheKey = $this->getCacheKey($query);
         
         $this->logger->debug('SearchEngine::search called', [
@@ -96,7 +101,10 @@ class SearchEngine implements SearchEngineInterface
         
         if ($this->isCached($cacheKey)) {
             $this->logger->debug('Returning cached results', ['query' => $query->getQuery()]);
-            return $this->cache[$cacheKey]['results'];
+            // Restore original config before returning cached results
+            $cachedResults = $this->cache[$cacheKey]['results'];
+            $this->config = $originalConfig;
+            return $cachedResults;
         }
         
         try {
@@ -240,6 +248,9 @@ class SearchEngine implements SearchEngineInterface
                 'time' => $searchTime
             ]);
             
+            // Restore original config
+            $this->config = $originalConfig;
+            
             return $finalResults;
             
         } catch (\Exception $e) {
@@ -247,6 +258,10 @@ class SearchEngine implements SearchEngineInterface
                 'query' => $query->getQuery(),
                 'error' => $e->getMessage()
             ]);
+            
+            // Restore original config before throwing
+            $this->config = $originalConfig;
+            
             throw new SearchException("Search failed: " . $e->getMessage(), 0, $e);
         }
     }
@@ -1294,7 +1309,7 @@ class SearchEngine implements SearchEngineInterface
             $termLower = strtolower($term);
             $termLen = mb_strlen($term);
             
-            foreach ($indexedTerms as $indexedTerm) {
+            foreach ($indexedTerms as $indexedTerm => $frequency) {
                 // Skip if same as search term (case insensitive)
                 if (strcasecmp($term, $indexedTerm) === 0) {
                     continue;
@@ -1400,9 +1415,10 @@ class SearchEngine implements SearchEngineInterface
             $indexedTerms = $this->indexedTermsCache;
             
             // Find best matches using Jaro-Winkler
+            // Convert associative array to just keys for findBestMatches
             $matches = JaroWinkler::findBestMatches(
                 $term,
-                $indexedTerms,
+                array_keys($indexedTerms),
                 $threshold,
                 $maxVariations,
                 $prefixScale
@@ -1575,9 +1591,10 @@ class SearchEngine implements SearchEngineInterface
             $indexedTerms = $this->indexedTermsCache;
             
             // Find best matches using Trigram similarity
+            // Convert associative array to just keys for findBestMatches
             $matches = Trigram::findBestMatches(
                 $term,
-                $indexedTerms,
+                array_keys($indexedTerms),
                 $threshold,
                 $maxVariations,
                 $ngramSize
