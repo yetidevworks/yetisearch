@@ -8,3 +8,12 @@
 /AGENTS.md
 *.db-shm
 *.db-wal
+/check-fts.php
+/debug-basic-vs-enhanced.php
+/debug-correction-detailed.php
+/debug-correction.php
+/debug-multiple.php
+/debug-scores.php
+/debug-suggestions.php
+/debug-with-logging.php
+/minimal-test.php

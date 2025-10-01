@@ -12,6 +12,8 @@ use YetiSearch\Exceptions\SearchException;
 use YetiSearch\Utils\Levenshtein;
 use YetiSearch\Utils\JaroWinkler;
 use YetiSearch\Utils\Trigram;
+use YetiSearch\Utils\PhoneticMatcher;
+use YetiSearch\Utils\KeyboardProximity;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
@@ -56,8 +58,14 @@ class SearchEngine implements SearchEngineInterface
             'facet_min_count' => 1,
             // Fuzzy behavior tuning
             'fuzzy_last_token_only' => false,
+            'fuzzy_correction_mode' => true,    // Enable modern typo correction by default
+            'fuzzy_algorithm' => 'trigram',     // Best balance of speed/accuracy
+            'correction_threshold' => 0.6,      // Lower threshold for better sensitivity
             'trigram_size' => 3,
-            'trigram_threshold' => 0.5,
+            'trigram_threshold' => 0.35,        // Lower threshold for better matching
+            'jaro_winkler_threshold' => 0.85,   // Slightly lower for more matches
+            'levenshtein_threshold' => 2,       // Keep current but optimize weighting
+            'max_fuzzy_variations' => 15,       // Increase for better coverage
             // Prefix matching (requires FTS5 prefix index)
             'prefix_last_token' => false,
             // Geo scoring
@@ -70,7 +78,7 @@ class SearchEngine implements SearchEngineInterface
             // Exact match boosting
             'exact_match_boost' => 2.0,     // Multiplier for exact phrase matches
             'exact_terms_boost' => 1.5,     // Multiplier for all exact terms present
-            'fuzzy_score_penalty' => 0.5,   // Penalty factor for fuzzy-only matches
+            'fuzzy_score_penalty' => 0.25,   // Reduced penalty for better fuzzy results
             // Two-pass search strategy (disabled by default for performance)
             'two_pass_search' => false,     // Enable two-pass search for better field weighting
             'primary_fields' => ['title', 'h1', 'name', 'label'], // Fields to search in first pass
@@ -1447,6 +1455,7 @@ class SearchEngine implements SearchEngineInterface
     
     /**
      * Find the single best correction for a potentially misspelled term
+     * Uses multi-algorithm consensus for improved accuracy
      * Returns the original term if no good correction is found
      */
     private function findBestCorrection(string $term): string
@@ -1456,8 +1465,17 @@ class SearchEngine implements SearchEngineInterface
             return $term;
         }
         
-        $algorithm = $this->config['fuzzy_algorithm'] ?? 'trigram';
-        $correctionThreshold = $this->config['correction_threshold'] ?? 0.7; // Higher threshold for corrections
+        // Quick check for common phonetic typos first
+        $quickPhonetic = PhoneticMatcher::quickPhoneticCorrection($term);
+        if ($quickPhonetic !== null) {
+            $this->logger->debug('Quick phonetic correction applied', [
+                'original' => $term,
+                'correction' => $quickPhonetic
+            ]);
+            return $quickPhonetic;
+        }
+        
+        $correctionThreshold = $this->config['correction_threshold'] ?? 0.6;
         $minFrequency = $this->config['min_term_frequency'] ?? 2;
         
         try {
@@ -1473,10 +1491,11 @@ class SearchEngine implements SearchEngineInterface
             }
             
             $indexedTerms = $this->indexedTermsCache;
-            $bestMatch = null;
-            $bestScore = 0;
+            $candidates = [];
             $termExistsInIndex = false;
             $termFrequency = 0;
+            
+
             
             // First check if term exists and get its frequency
             foreach ($indexedTerms as $indexedTerm => $frequency) {
@@ -1487,67 +1506,79 @@ class SearchEngine implements SearchEngineInterface
                 }
             }
             
-            // Find the single best match based on algorithm
+            // If term exists and is reasonably common, don't correct it
+            if ($termExistsInIndex && $termFrequency >= 3) {
+                return $term;
+            }
+            
+            // Generate candidates using multiple algorithms
             foreach ($indexedTerms as $indexedTerm => $frequency) {
                 // Skip if same as input
                 if (strtolower($indexedTerm) === strtolower($term)) {
                     continue;
                 }
                 
-                $score = 0;
-                if ($algorithm === 'trigram') {
-                    $score = Trigram::similarity($term, $indexedTerm);
-                } elseif ($algorithm === 'levenshtein') {
-                    $distance = Levenshtein::distance($term, $indexedTerm);
-                    // Convert distance to similarity (0-1)
-                    $maxLen = max(mb_strlen($term), mb_strlen($indexedTerm));
-                    $score = 1 - ($distance / $maxLen);
-                } elseif ($algorithm === 'jaro_winkler') {
-                    $score = JaroWinkler::similarity($term, $indexedTerm);
+
+                
+                // Quick length filter - skip terms that are too different in length
+                $lenDiff = abs(mb_strlen($term) - mb_strlen($indexedTerm));
+                if ($lenDiff > 2) {
+
+                    continue;
                 }
                 
-                // Weight by frequency (popular terms are more likely corrections)
-                $freq = (int)$frequency;
-                $weightedScore = $score * (1 + log(1 + $freq) / 10);
+                $candidate = [
+                    'term' => $indexedTerm,
+                    'frequency' => (int)$frequency,
+                    'scores' => []
+                ];
                 
-                if ($weightedScore > $bestScore && $score >= $correctionThreshold) {
-                    $bestScore = $weightedScore;
-                    $bestMatch = $indexedTerm;
+                // Calculate scores from different algorithms
+                $candidate['scores']['trigram'] = Trigram::similarity($term, $indexedTerm);
+                
+                $distance = Levenshtein::distance($term, $indexedTerm);
+                $maxLen = max(mb_strlen($term), mb_strlen($indexedTerm));
+                $candidate['scores']['levenshtein'] = 1 - ($distance / $maxLen);
+                
+                $candidate['scores']['jaro_winkler'] = JaroWinkler::similarity($term, $indexedTerm);
+                $candidate['scores']['phonetic'] = PhoneticMatcher::phoneticSimilarity($term, $indexedTerm);
+                $candidate['scores']['keyboard'] = KeyboardProximity::proximityScore($term, $indexedTerm);
+                
+                // Calculate consensus score with weighted algorithm importance
+                $consensusScore = $this->calculateConsensusScore($candidate['scores'], $term, $indexedTerm);
+                
+                // Skip candidates with zero consensus score
+                if ($consensusScore <= 0) {
+                    continue;
+                }
+                
+                // Apply frequency weighting (improved formula)
+                $freqWeight = $this->calculateFrequencyWeight($candidate['frequency'], $termFrequency);
+                $candidate['final_score'] = $consensusScore * $freqWeight;
+                
+                // Only keep candidates that meet minimum threshold
+                if ($consensusScore >= $correctionThreshold * 0.7) { // Lower threshold for individual algorithms
+                    $candidates[] = $candidate;
                 }
             }
             
-            // Decide whether to use the correction or keep original
-            if ($bestMatch !== null) {
-                // If original term exists but is rare, and we found a much more common similar term, use it
-                if ($termExistsInIndex) {
-                    $bestFreq = (int)($indexedTerms[$bestMatch] ?? 0);
-                    // Only correct if the best match is significantly more frequent
-                    // e.g., "grab" (rare) -> "grav" (common)
-                    if ($bestFreq > $termFrequency * 5) {
-                        $this->logger->debug('Typo correction found (replacing rare term)', [
-                            'original' => $term,
-                            'original_freq' => $termFrequency,
-                            'correction' => $bestMatch,
-                            'correction_freq' => $bestFreq,
-                            'score' => $bestScore
-                        ]);
-                        return $bestMatch;
-                    }
-                    // Otherwise keep the original since it exists
-                    return $term;
-                } else {
-                    // Term doesn't exist, use the correction
-                    $this->logger->debug('Typo correction found (term not in index)', [
-                        'original' => $term,
-                        'correction' => $bestMatch,
-                        'score' => $bestScore
-                    ]);
-                    return $bestMatch;
+            // Sort by final score
+            usort($candidates, function($a, $b) {
+                return $b['final_score'] <=> $a['final_score'];
+            });
+            
+            // Select best candidate
+            if (!empty($candidates)) {
+                $bestCandidate = $candidates[0];
+                
+                // Additional validation checks
+                if ($this->validateCorrection($term, $bestCandidate, $termExistsInIndex, $termFrequency)) {
+                    return $bestCandidate['term'];
                 }
             }
             
         } catch (\Exception $e) {
-            $this->logger->error('Failed to find correction', [
+            $this->logger->error('Failed to find enhanced correction', [
                 'term' => $term,
                 'error' => $e->getMessage()
             ]);
@@ -1555,6 +1586,104 @@ class SearchEngine implements SearchEngineInterface
         
         // No good correction found, return original
         return $term;
+    }
+    
+    /**
+     * Calculate consensus score from multiple algorithms
+     */
+    private function calculateConsensusScore(array $scores, string $original, string $candidate): float
+    {
+        // Weight different algorithms based on their strengths
+        $weights = [
+            'trigram' => 0.25,      // Good for overall similarity
+            'levenshtein' => 0.20,  // Good for edit distance
+            'jaro_winkler' => 0.25, // Good for short strings and prefixes
+            'phonetic' => 0.15,     // Good for sound-alike typos
+            'keyboard' => 0.15      // Good for fat-finger errors
+        ];
+        
+        $weightedScore = 0.0;
+        $totalWeight = 0.0;
+        $validScoreCount = 0;
+        
+        foreach ($scores as $algorithm => $score) {
+            // Skip invalid scores
+            if (!is_numeric($score) || $score <= 0) {
+                continue;
+            }
+            
+            if (isset($weights[$algorithm])) {
+                $weightedScore += $score * $weights[$algorithm];
+                $totalWeight += $weights[$algorithm];
+                $validScoreCount++;
+            }
+        }
+        
+        // Defensive check against division by zero - no valid scores
+        if ($validScoreCount === 0 || $totalWeight <= 0) {
+            return 0.0;
+        }
+        
+        $consensusScore = $weightedScore / $totalWeight;
+        
+        // Bonus for multiple algorithms agreeing
+        $highScores = array_filter($scores, function($score) {
+            return is_numeric($score) && $score >= 0.8;
+        });
+        if (count($highScores) >= 2) {
+            $consensusScore *= 1.1; // 10% bonus for consensus
+        }
+        
+        return min(1.0, max(0.0, $consensusScore));
+    }
+    
+    /**
+     * Calculate improved frequency weighting
+     */
+    private function calculateFrequencyWeight(int $candidateFreq, int $originalFreq): float
+    {
+        // Base frequency weight (more frequent terms are more likely corrections)
+        $freqWeight = 1.0 + (log(1 + $candidateFreq) / 5.0); // Improved from /10 to /5
+        
+        // If original term exists but is rare, heavily prefer more common alternatives
+        if ($originalFreq > 0 && $candidateFreq > $originalFreq * 3) {
+            $freqWeight *= 1.5; // 50% boost for much more common terms
+        }
+        
+        // Cap the weight to prevent extreme bias
+        return min($freqWeight, 3.0);
+    }
+    
+    /**
+     * Validate correction with additional checks
+     */
+    private function validateCorrection(string $original, array $candidate, bool $originalExists, int $originalFreq): bool
+    {
+        $candidateTerm = $candidate['term'];
+        $finalScore = $candidate['final_score'];
+        $consensusScore = $this->calculateConsensusScore($candidate['scores'], $original, $candidateTerm);
+        
+        // Minimum consensus score requirement
+        if ($consensusScore < 0.65) {
+            return false;
+        }
+        
+        // If original doesn't exist, be more permissive
+        if (!$originalExists) {
+            return $finalScore >= 0.7;
+        }
+        
+        // If original exists but is rare, require stronger evidence
+        if ($originalFreq < 3) {
+            return $finalScore >= 0.8 && $candidate['frequency'] > $originalFreq * 2;
+        }
+        
+        // If original exists and is reasonably common, don't correct unless very confident
+        if ($originalFreq >= 3) {
+            return $finalScore >= 0.9 && $candidate['frequency'] > $originalFreq * 5;
+        }
+        
+        return false;
     }
     
     private function generateTrigramVariations(string $term): array
@@ -1673,8 +1802,19 @@ class SearchEngine implements SearchEngineInterface
     {
         $tokens = $this->analyzer->tokenize($query);
         $suggestions = [];
+        $corrections = [];
         
         foreach ($tokens as $token) {
+            // First, try to find the best correction using our enhanced method
+            $correction = $this->findBestCorrection($token);
+            
+            if ($correction !== $token) {
+                // This token was corrected
+                $corrections[] = $correction;
+                continue;
+            }
+            
+            // If no correction found, try fuzzy variations
             $fuzzyVariations = $this->generateFuzzyVariations($token);
             
             foreach ($fuzzyVariations as $variation) {
@@ -1688,7 +1828,124 @@ class SearchEngine implements SearchEngineInterface
             }
         }
         
-        return !empty($suggestions) ? implode(' ', $suggestions) : null;
+        // Prefer corrections over fuzzy suggestions
+        if (!empty($corrections)) {
+            $suggestion = implode(' ', $corrections);
+            
+            // Verify that the corrected query actually has results
+            $testQuery = new SearchQuery($suggestion);
+            $testQuery->limit(1);
+            
+            if ($this->count($testQuery) > 0) {
+                $this->logger->debug('Did you mean suggestion generated', [
+                    'original' => $query,
+                    'suggestion' => $suggestion,
+                    'type' => 'correction'
+                ]);
+                return $suggestion;
+            }
+        }
+        
+        // Fall back to fuzzy suggestions
+        if (!empty($suggestions)) {
+            $suggestion = implode(' ', $suggestions);
+            $this->logger->debug('Did you mean suggestion generated', [
+                'original' => $query,
+                'suggestion' => $suggestion,
+                'type' => 'fuzzy'
+            ]);
+            return $suggestion;
+        }
+        
+        return null;
+    }
+    
+    /**
+     * Generate multiple "did you mean" suggestions with confidence scores
+     */
+    public function generateSuggestions(string $query, int $maxSuggestions = 3): array
+    {
+        $tokens = $this->analyzer->tokenize($query);
+        $allSuggestions = [];
+        
+        // Generate corrections for each token
+        foreach ($tokens as $tokenIndex => $token) {
+            $correction = $this->findBestCorrection($token);
+            
+            if ($correction !== $token) {
+                // Create a corrected query
+                $correctedTokens = $tokens;
+                $correctedTokens[$tokenIndex] = $correction;
+                $suggestion = implode(' ', $correctedTokens);
+                
+                // Calculate confidence
+                $confidence = $this->calculateCorrectionConfidence($token, $correction);
+                
+                $allSuggestions[] = [
+                    'text' => $suggestion,
+                    'confidence' => $confidence,
+                    'type' => 'correction',
+                    'original_token' => $token,
+                    'correction' => $correction
+                ];
+            }
+        }
+        
+        // Sort by confidence
+        usort($allSuggestions, function($a, $b) {
+            return $b['confidence'] <=> $a['confidence'];
+        });
+        
+        // Verify suggestions have results and limit
+        $validSuggestions = [];
+        foreach ($allSuggestions as $suggestion) {
+            if (count($validSuggestions) >= $maxSuggestions) {
+                break;
+            }
+            
+            $testQuery = new SearchQuery($suggestion['text']);
+            $testQuery->limit(1);
+            
+            if ($this->count($testQuery) > 0) {
+                $validSuggestions[] = $suggestion;
+            }
+        }
+        
+        return $validSuggestions;
+    }
+    
+    /**
+     * Calculate confidence score for a correction
+     */
+    private function calculateCorrectionConfidence(string $original, string $correction): float
+    {
+        // Quick phonetic match gets high confidence
+        if (PhoneticMatcher::quickPhoneticCorrection($original) === $correction) {
+            return 0.95;
+        }
+        
+        // Calculate consensus score
+        $scores = [
+            'trigram' => Trigram::similarity($original, $correction),
+            'levenshtein' => 1 - (Levenshtein::distance($original, $correction) / max(strlen($original), strlen($correction))),
+            'jaro_winkler' => JaroWinkler::similarity($original, $correction),
+            'phonetic' => PhoneticMatcher::phoneticSimilarity($original, $correction),
+            'keyboard' => KeyboardProximity::proximityScore($original, $correction)
+        ];
+        
+        $consensusScore = $this->calculateConsensusScore($scores, $original, $correction);
+        
+        // Boost for keyboard proximity typos (very common)
+        if ($scores['keyboard'] >= 0.8) {
+            $consensusScore *= 1.1;
+        }
+        
+        // Boost for phonetic matches
+        if ($scores['phonetic'] >= 0.8) {
+            $consensusScore *= 1.05;
+        }
+        
+        return min(1.0, $consensusScore);
     }
     
     private function getCacheKey(SearchQuery $query): string

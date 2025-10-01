@@ -421,6 +421,15 @@ class YetiSearch
         return $this->cacheManager ? $this->cacheManager->warmUp($indexName, $popularQueries) : [];
     }
     
+    /**
+     * Generate "did you mean" suggestions for a query
+     */
+    public function generateSuggestions(string $name, string $query, int $maxSuggestions = 3): array
+    {
+        $engine = $this->getSearchEngine($name);
+        return $engine->generateSuggestions($query, $maxSuggestions);
+    }
+    
     private function initializeCacheManager(): void
     {
         if (!$this->cacheManager && $this->storage) {
