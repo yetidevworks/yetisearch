@@ -340,7 +340,7 @@ class YetiSearch
     }
 
     // Simplified index method for backward compatibility
-    public function index(string $indexName, mixed $documentOrId, mixed $content = null, array $options = []): void
+    public function index(string $indexName, $documentOrId, $content = null, array $options = []): void
     {
         // Handle both old signature (id, content) and new signature (document array)
         if (is_array($documentOrId) && $content === null) {
