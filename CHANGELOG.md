@@ -43,6 +43,46 @@
 - **Mixed chunking modes**: Pre-chunked and auto-chunked documents can coexist in the same index
 - **Better search relevance**: Keep related content together for improved search accuracy
 
+#### Enhanced Fuzzy Search with Modern Typo Correction
+- **Modern search engine behavior**: Automatic typo correction like Google and Elasticsearch
+  - Multi-algorithm consensus scoring using 5 different similarity algorithms
+  - Phonetic matching for sound-alike typos (fone→phone, thier→their)
+  - Keyboard proximity analysis for fat-finger errors (qyick→quick)
+  - Configurable sensitivity and precision thresholds
+  - Enabled by default for improved user experience
+
+- **Multi-algorithm consensus scoring**:
+  - Trigram similarity (25% weight) - Good for overall similarity
+  - Levenshtein distance (20% weight) - Good for edit distance
+  - Jaro-Winkler similarity (25% weight) - Good for short strings and prefixes
+  - Phonetic matching (15% weight) - Good for sound-alike typos
+  - Keyboard proximity (15% weight) - Good for fat-finger errors
+
+- **Enhanced "Did You Mean?" features**:
+  - Improved suggestion generation with confidence scores
+  - Multiple suggestions with detailed metadata (confidence, type, original_token, correction)
+  - Automatic suggestion inclusion in search results when no matches found
+  - `generateSuggestions()` method returning confidence scores
+
+- **New utility classes**:
+  - `PhoneticMatcher` - Handles phonetic similarity using Metaphone and Double Metaphone
+  - `KeyboardProximity` - Analyzes QWERTY keyboard layout for proximity-based typos
+
+- **Updated default configuration**:
+  ```php
+  'search' => [
+      'fuzzy_correction_mode' => true,    // Enable modern typo correction
+      'correction_threshold' => 0.6,      // Balance sensitivity and precision
+      'trigram_threshold' => 0.35,        // Improved matching for partial words
+      'fuzzy_score_penalty' => 0.25,      // Reduced penalty for fuzzy matches
+  ]
+  ```
+
+- **Performance improvements**: 
+  - Consensus scoring with early validation for faster processing
+  - Improved frequency weighting for better correction accuracy
+  - Cached indexed terms for reduced database queries
+
 #### DSL (Domain Specific Language) Support
 - **Natural language query syntax**: Write queries using SQL-like syntax for intuitive query construction
   - Example: `author = "John" AND status IN [published] SORT -created_at LIMIT 10`

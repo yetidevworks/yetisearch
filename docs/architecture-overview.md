@@ -11,7 +11,7 @@ flowchart LR
   Analyzer --> Stemmer
   Indexer --> Storage[(SQLite FTS5, external-content)]
   SearchEngine --> Storage
-  SearchEngine --> Fuzzy[Utils: Trigram / Jaro-Winkler / Levenshtein]
+  SearchEngine --> Fuzzy[Utils: Enhanced Fuzzy (Phonetic, Keyboard, Consensus) + Trigram / Jaro-Winkler / Levenshtein]
   Storage --> Cache[FuzzyTermCache]
   YetiSearch --> Models[Models: Query / Results]
   Geo[Geo (R*-Tree helpers)] --> Storage
@@ -21,7 +21,7 @@ ASCII alternative (if Mermaid isn’t rendered):
 
 ```
 App -> YetiSearch -> { Indexer -> Analyzer -> Stemmer -> Storage(FTS5)
-                      SearchEngine -> Storage + Fuzzy Utils }
+                      SearchEngine -> Storage + Enhanced Fuzzy Utils }
                 -> Models(Query/Results); Geo helpers -> Storage
 ```
 

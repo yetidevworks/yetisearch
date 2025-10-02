@@ -62,7 +62,7 @@ A powerful, pure-PHP search engine library with advanced full-text search capabi
 - 🔧 **Flexible architecture** with interfaces for easy extension
 - 📊 **Advanced scoring** with intelligent field boosting and exact match prioritization
 - 🎨 **Search highlighting** with customizable tags
-- 🔤 **Advanced fuzzy matching** with multiple algorithms (Trigram, Jaro-Winkler, Levenshtein, Basic)
+- 🔤 **Advanced fuzzy matching** with automatic typo correction and multi-algorithm consensus scoring (Trigram, Jaro-Winkler, Levenshtein, Phonetic, Keyboard Proximity)
 - 🎯 **Enhanced multi-word matching** for more accurate search results
 - 🏆 **Smart result ranking** prioritizing exact matches over fuzzy matches
 - 📈 **Faceted search** and aggregations support
@@ -75,6 +75,7 @@ A powerful, pure-PHP search engine library with advanced full-text search capabi
 - ✨ **NEW: Improved fuzzy consistency** - exact matches always rank higher
 - ✨ **NEW: DSL Support** - Natural language query syntax and JSON API-compliant URL parameters
 - ✨ **NEW: Query Result Caching** - 10-100x faster repeated searches with automatic invalidation
+- ✨ **NEW: Enhanced Fuzzy Search** - Modern typo correction with multi-algorithm consensus scoring (phonetic, keyboard proximity, trigram, Levenshtein, Jaro-Winkler)
 
 ## Requirements
 
@@ -127,8 +128,9 @@ $indexer->insert([
 // Search for documents
 $results = $search->search('pages', 'powerful search');
 
-// Search with fuzzy matching enabled (uses trigram algorithm by default)
+// Search with fuzzy matching enabled (automatic typo correction)
 $fuzzyResults = $search->search('pages', 'powerfull serch', ['fuzzy' => true]);
+// Automatically corrects typos: "powerfull serch" → "powerful search"
 
 // Display results
 foreach ($results['results'] as $result) {
@@ -159,6 +161,7 @@ php examples/apartment-search-simple.php
 ```
 
 ### 🔍 Other Examples
+- **Enhanced fuzzy search**: [`examples/enhanced-fuzzy-search.php`](examples/enhanced-fuzzy-search.php) - Modern typo correction with multi-algorithm consensus
 - **Pre-chunked indexing**: [`examples/pre-chunked-indexing.php`](examples/pre-chunked-indexing.php) - Custom document chunking with semantic boundaries
 - **Type-ahead search**: [`examples/type-ahead.php`](examples/type-ahead.php) - Interactive as-you-type search
 - **Geo facets and k-NN**: [`examples/geo-facets-knn.php`](examples/geo-facets-knn.php) - Distance faceting and nearest neighbors
@@ -855,13 +858,13 @@ $search = new YetiSearch([
 Enable fuzzy matching for typo tolerance:
 
 ```php
-// Find results even with typos
+// Find results even with typos (automatic correction enabled by default)
 $results = $search->search('pages', 'porgramming', [  // Note the typo
     'fuzzy' => true,
     'fuzziness' => 0.8  // 0.0 to 1.0 (higher = stricter)
 ]);
 
-// Will still find documents about "programming"
+// Will still find documents about "programming" with automatic typo correction
 ```
 
 #### Advanced Fuzzy Search Algorithms
@@ -928,6 +931,88 @@ Different algorithms have different performance characteristics:
 - **Levenshtein**: Requires term indexing, impacting indexing performance (~295 docs/sec vs ~670 docs/sec)
 
 Term indexing is only performed when `fuzzy_algorithm` is set to `'levenshtein'`. For most use cases, `'trigram'` provides the best balance of accuracy and performance.
+
+#### Enhanced Fuzzy Search with Modern Typo Correction
+
+YetiSearch 2.2+ includes enhanced fuzzy search with automatic typo correction, behaving like modern search engines (Google, Elasticsearch):
+
+```php
+// Enable enhanced typo correction (enabled by default in 2.2+)
+$config = [
+    'search' => [
+        'fuzzy_correction_mode' => true,    // Enable modern typo correction
+        'correction_threshold' => 0.6,      // Sensitivity threshold (0.0-1.0)
+        'trigram_threshold' => 0.35,        // Trigram similarity threshold
+        'fuzzy_score_penalty' => 0.25,      // Reduced penalty for corrected matches
+    ]
+];
+
+$search = new YetiSearch($config);
+
+// Automatic typo correction
+$results = $search->search('docs', 'qyick tutoral', ['fuzzy' => true]);
+// Automatically corrected to: "quick tutorial"
+// Finds documents about quick tutorials
+```
+
+**Multi-Algorithm Consensus Scoring:**
+
+The enhanced fuzzy search uses 5 different algorithms and combines their scores:
+
+1. **Trigram Similarity (25%)** - Overall character sequence similarity
+2. **Levenshtein Distance (20%)** - Edit distance (insertions, deletions, substitutions)
+3. **Jaro-Winkler Similarity (25%)** - Optimized for short strings and prefixes
+4. **Phonetic Matching (15%)** - Sound-alike typos using Metaphone
+5. **Keyboard Proximity (15%)** - Fat-finger errors based on QWERTY layout
+
+**Typo Correction Examples:**
+
+```php
+// Phonetic typos
+$search->search('docs', 'fone', ['fuzzy' => true]);        // → "phone"
+$search->search('docs', 'thier', ['fuzzy' => true);       // → "their"
+
+// Keyboard proximity typos  
+$search->search('docs', 'qyick', ['fuzzy' => true);       // → "quick"
+$search->search('docs', 'tutoral', ['fuzzy' => true);     // → "tutorial"
+
+// Multiple typos in one query
+$search->search('docs', 'qyick fone', ['fuzzy' => true);  // → "quick phone"
+```
+
+**Enhanced "Did You Mean?" Suggestions:**
+
+```php
+// Get suggestions with confidence scores
+$suggestions = $search->generateSuggestions('docs', 'qyick tutoral');
+// Returns:
+// [
+//     [
+//         'text' => 'quick tutorial',
+//         'confidence' => 0.94,
+//         'type' => 'correction',
+//         'original_token' => 'qyick',
+//         'correction' => 'quick'
+//     ],
+//     // ... more suggestions
+// ]
+
+// Search results include suggestions when no matches found
+$results = $search->search('docs', 'qyick tutoral', ['fuzzy' => true]);
+if ($results['total'] === 0 && !empty($results['suggestions'])) {
+    echo "Did you mean: {$results['suggestions'][0]['text']}?";
+}
+```
+
+**Configuration Options:**
+
+- `fuzzy_correction_mode`: Enable/disable modern typo correction (default: true)
+- `correction_threshold`: Minimum consensus score for correction (default: 0.6)
+- `trigram_threshold`: Trigram similarity threshold (default: 0.35)
+- `fuzzy_score_penalty`: Score penalty for fuzzy matches (default: 0.25)
+- `min_term_frequency`: Minimum term frequency for correction candidates (default: 2)
+
+The enhanced fuzzy search provides significantly better user experience by automatically correcting common typos while maintaining high precision through consensus scoring.
 
 ### Query Result Caching
 

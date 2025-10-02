@@ -15,7 +15,7 @@ class UTF8Helper
     {
         return mb_strtolower($string, 'UTF-8');
     }
-    
+
     /**
      * Get string length (UTF-8 safe)
      */
@@ -23,17 +23,17 @@ class UTF8Helper
     {
         return mb_strlen($string, 'UTF-8');
     }
-    
+
     /**
      * Find position of string (case-insensitive, UTF-8 safe)
-     * 
+     *
      * @return int|false
      */
     public static function stripos(string $haystack, string $needle, int $offset = 0)
     {
         return mb_stripos($haystack, $needle, $offset, 'UTF-8');
     }
-    
+
     /**
      * Normalize whitespace characters
      * Converts various Unicode whitespace characters to regular spaces
@@ -55,14 +55,14 @@ class UTF8Helper
             "\xE2\x80\xAC", "\xE2\x80\xAD", "\xE2\x80\xAE", "\xE2\x80\xAF",
             "\xE2\x81\x9F", "\xE3\x80\x80", "\xEF\xBB\xBF",
         ];
-        
+
         // Replace all whitespace with regular space
         $string = str_replace($whitespace, ' ', $string);
-        
+
         // Collapse multiple spaces
         return preg_replace('/\s+/', ' ', $string);
     }
-    
+
     /**
      * Remove invisible/zero-width characters
      */
@@ -82,7 +82,7 @@ class UTF8Helper
             "\xE2\x80\xAD", // Left-to-Right Override
             "\xE2\x80\xAE", // Right-to-Left Override
         ];
-        
+
         return str_replace($invisible, '', $string);
     }
 }

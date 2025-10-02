@@ -1,9 +1,10 @@
 <?php
+
 namespace YetiSearch\Utils;
 
 /**
  * Phonetic matching for improved typo correction
- * 
+ *
  * Handles common phonetic typos like:
  * - phone/fone
  * - there/their/they're
@@ -20,7 +21,7 @@ class PhoneticMatcher
         // Use PHP's built-in metaphone function
         return metaphone($word);
     }
-    
+
     /**
      * Generate Double Metaphone key for more accurate matching
      */
@@ -31,7 +32,7 @@ class PhoneticMatcher
         $primary = metaphone($word);
         return [$primary, $primary]; // Simplified - would implement full algorithm
     }
-    
+
     /**
      * Calculate phonetic similarity between two words
      */
@@ -39,15 +40,15 @@ class PhoneticMatcher
     {
         $meta1 = self::metaphone($word1);
         $meta2 = self::metaphone($word2);
-        
+
         if ($meta1 === $meta2) {
             return 1.0;
         }
-        
+
         // Check Double Metaphone alternatives
         $double1 = self::doubleMetaphone($word1);
         $double2 = self::doubleMetaphone($word2);
-        
+
         foreach ($double1 as $alt1) {
             foreach ($double2 as $alt2) {
                 if ($alt1 === $alt2) {
@@ -55,21 +56,21 @@ class PhoneticMatcher
                 }
             }
         }
-        
+
         // Partial phonetic match
         $similarity = 0.0;
         $len1 = strlen($meta1);
         $len2 = strlen($meta2);
         $maxLen = max($len1, $len2);
-        
+
         if ($maxLen > 0) {
             $common = similar_text($meta1, $meta2, $percent);
             $similarity = $percent / 100.0;
         }
-        
+
         return $similarity;
     }
-    
+
     /**
      * Find phonetically similar words from a dictionary
      */
@@ -77,22 +78,22 @@ class PhoneticMatcher
     {
         $matches = [];
         $termPhonetic = self::metaphone($term);
-        
+
         foreach ($candidates as $candidate) {
             $similarity = self::phoneticSimilarity($term, $candidate);
             if ($similarity >= $threshold) {
                 $matches[] = [$candidate, $similarity];
             }
         }
-        
+
         // Sort by similarity (descending)
-        usort($matches, function($a, $b) {
+        usort($matches, function ($a, $b) {
             return $b[1] <=> $a[1];
         });
-        
+
         return $matches;
     }
-    
+
     /**
      * Check if two words are likely phonetic typos of each other
      */
@@ -103,16 +104,15 @@ class PhoneticMatcher
         if ($lenDiff > 2) {
             return false;
         }
-        
+
         $similarity = self::phoneticSimilarity($original, $correction);
         return $similarity >= 0.8;
     }
-    
+
     /**
      * Common phonetic typo patterns for quick lookup
      */
     private static array $commonPatterns = [
-        'fone' => 'phone',
         'fone' => 'phone',
         'thier' => 'their',
         'teh' => 'the',
@@ -139,7 +139,7 @@ class PhoneticMatcher
         'wont' => "won't",
         'dont' => "don't",
     ];
-    
+
     /**
      * Quick lookup for common phonetic typos
      */

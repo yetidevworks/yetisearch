@@ -7,12 +7,12 @@ class PreparedStatementCache
     private array $statements = [];
     private array $hitCount = [];
     private int $maxSize;
-    
+
     public function __construct(int $maxSize = 50)
     {
         $this->maxSize = $maxSize;
     }
-    
+
     public function get(string $key): ?\PDOStatement
     {
         if (isset($this->statements[$key])) {
@@ -21,7 +21,7 @@ class PreparedStatementCache
         }
         return null;
     }
-    
+
     public function set(string $key, \PDOStatement $statement): void
     {
         // Check if we need to evict
@@ -29,30 +29,30 @@ class PreparedStatementCache
             // Evict least recently used (lowest hit count)
             $minHits = PHP_INT_MAX;
             $evictKey = null;
-            
+
             foreach ($this->hitCount as $k => $hits) {
                 if ($hits < $minHits) {
                     $minHits = $hits;
                     $evictKey = $k;
                 }
             }
-            
+
             if ($evictKey !== null) {
                 unset($this->statements[$evictKey]);
                 unset($this->hitCount[$evictKey]);
             }
         }
-        
+
         $this->statements[$key] = $statement;
         $this->hitCount[$key] = 0;
     }
-    
+
     public function clear(): void
     {
         $this->statements = [];
         $this->hitCount = [];
     }
-    
+
     public function getStats(): array
     {
         return [

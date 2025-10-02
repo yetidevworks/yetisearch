@@ -21,7 +21,7 @@ class YetiSearch
     private array $searchEngines = [];
     private ?LoggerInterface $logger = null;
     private ?CacheManager $cacheManager = null;
-    
+
     public function __construct(array $config = [], ?LoggerInterface $logger = null)
     {
         // Defaults
@@ -70,7 +70,7 @@ class YetiSearch
         ];
         // Deep-merge user config over defaults so nested arrays keep defaults
         $this->config = self::deepMergeArrays($defaults, $config);
-        
+
         $this->logger = $logger;
     }
 
@@ -80,8 +80,12 @@ class YetiSearch
             if (is_array($value) && isset($base[$key]) && is_array($base[$key])) {
                 // If both sides are arrays, merge recursively for associative keys.
                 // For numeric-indexed arrays, override entirely to avoid duplication.
-                $isAssoc = static function(array $arr): bool {
-                    foreach (array_keys($arr) as $k) { if (!is_int($k)) return true; }
+                $isAssoc = static function (array $arr): bool {
+                    foreach (array_keys($arr) as $k) {
+                        if (!is_int($k)) {
+                            return true;
+                        }
+                    }
                     return false;
                 };
                 if ($isAssoc($base[$key]) || $isAssoc($value)) {
@@ -95,12 +99,12 @@ class YetiSearch
         }
         return $base;
     }
-    
+
     public function createIndex(string $name, array $options = []): Indexer
     {
         $storage = $this->getStorage();
         $analyzer = $this->getAnalyzer();
-        
+
         $indexer = new Indexer(
             $storage,
             $analyzer,
@@ -108,53 +112,53 @@ class YetiSearch
             array_merge($this->config['indexer'], $options),
             $this->logger
         );
-        
+
         $this->indexers[$name] = $indexer;
-        
+
         return $indexer;
     }
-    
+
     public function getIndex(string $name): ?Indexer
     {
         if (isset($this->indexers[$name])) {
             return $this->indexers[$name];
         }
-        
+
         $storage = $this->getStorage();
         if (!$storage->indexExists($name)) {
             return null;
         }
-        
+
         return $this->createIndex($name);
     }
-    
+
     // Alias for backward compatibility
     public function getIndexer(string $name): ?Indexer
     {
         return $this->getIndex($name);
     }
-    
+
     public function dropIndex(string $name): void
     {
         $storage = $this->getStorage();
         $storage->dropIndex($name);
-        
+
         unset($this->indexers[$name]);
         unset($this->searchEngines[$name]);
-        
+
         // Also invalidate cache for this index
         if ($this->cacheManager) {
             $this->cacheManager->invalidateIndex($name);
         }
     }
-    
+
     public function search(string $name, string $query, array $options = []): array
     {
         $engine = $this->getSearchEngine($name);
-        
+
         // Create a SearchQuery object
         $searchQuery = new SearchQuery($query);
-        
+
         // Apply options
         if (isset($options['limit'])) {
             $searchQuery->limit($options['limit']);
@@ -187,35 +191,35 @@ class YetiSearch
         if (isset($options['bypass_cache'])) {
             $searchQuery->setOptions(['bypass_cache' => $options['bypass_cache']]);
         }
-        
+
         // Handle geo filters
         if (isset($options['geoFilters'])) {
             $geo = $options['geoFilters'];
-            
+
             if (isset($geo['near'])) {
                 $point = new \YetiSearch\Geo\GeoPoint($geo['near']['point']['lat'], $geo['near']['point']['lng']);
                 $radius = $geo['near']['radius'] ?? 1000;
                 $units = $geo['near']['units'] ?? 'm';
-                
+
                 // Convert to meters if needed
                 if ($units === 'km') {
                     $radius *= 1000;
                 } elseif ($units === 'mi' || $units === 'mile' || $units === 'miles') {
                     $radius *= 1609.344;
                 }
-                
+
                 $searchQuery->near($point, $radius);
             }
-            
+
             if (isset($geo['distance_sort'])) {
                 $from = new \YetiSearch\Geo\GeoPoint($geo['distance_sort']['from']['lat'], $geo['distance_sort']['from']['lng']);
                 $direction = $geo['distance_sort']['direction'] ?? 'asc';
                 $searchQuery->sortByDistance($from, $direction);
             }
         }
-        
+
         $results = $engine->search($searchQuery, $options);
-        
+
         // Convert SearchResults to array format
         $documents = [];
         foreach ($results->getResults() as $result) {
@@ -225,7 +229,7 @@ class YetiSearch
                 $documents[] = $result;
             }
         }
-        
+
         return [
             'results' => $documents,
             'total' => $results->getTotalCount(),
@@ -235,44 +239,44 @@ class YetiSearch
             'suggestions' => $results->getSuggestion() ? [$results->getSuggestion()] : []
         ];
     }
-    
+
     public function indexDocument(string $name, string $id, mixed $content, array $options = []): void
     {
         $indexer = $this->getIndex($name) ?? $this->createIndex($name);
-        
+
         // Prepare document for indexer
         $document = is_array($content) ? $content : ['content' => $content];
         if (!isset($document['id'])) {
             $document['id'] = $id;
         }
-        
+
         $indexer->insert($document);
     }
-    
+
     public function indexBatch(string $name, array $documents): void
     {
         $indexer = $this->getIndex($name) ?? $this->createIndex($name);
         $indexer->indexBatch($documents);
     }
-    
+
     public function deleteDocument(string $name, string $id): void
     {
         $storage = $this->getStorage();
-        
+
         // Check if index exists before trying to delete
         if (!$storage->indexExists($name)) {
             // Silently return or you could throw a more specific exception
             return;
         }
-        
+
         $storage->delete($name, $id);
     }
-    
+
     public function updateDocument(string $name, string $id, mixed $content, array $options = []): void
     {
         $this->indexDocument($name, $id, $content, $options);
     }
-    
+
     // Alias for backward compatibility - handles both signatures
     public function update(string $name, mixed $documentOrId, mixed $content = null, array $options = []): void
     {
@@ -289,52 +293,52 @@ class YetiSearch
             $this->updateDocument($name, (string)$documentOrId, $content, $options);
         }
     }
-    
+
     public function getStats(string $name): array
     {
         $storage = $this->getStorage();
         return $storage->getStats($name);
     }
-    
+
     public function optimize(string $name): void
     {
         $storage = $this->getStorage();
         $storage->optimize($name);
     }
-    
+
     public function multiSearch(array $indices, string $query, array $options = []): array
     {
         $storage = $this->getStorage();
-        
+
         // Prepare query array for storage
         $queryArray = array_merge([
             'query' => $query,
             'limit' => 20,
             'offset' => 0
         ], $options);
-        
+
         return $storage->searchMultiple($indices, $queryArray);
     }
-    
+
     public function suggest(string $name, string $term, array $options = []): array
     {
         $engine = $this->getSearchEngine($name);
         return $engine->suggest($term, $options);
     }
-    
+
     public function countDocuments(string $name): int
     {
         $storage = $this->getStorage();
         $stats = $storage->getStats($name);
         return $stats['document_count'] ?? 0;
     }
-    
+
     // Alias for backward compatibility
     public function count(string $name): int
     {
         return $this->countDocuments($name);
     }
-    
+
     // Simplified index method for backward compatibility
     public function index(string $indexName, mixed $documentOrId, mixed $content = null, array $options = []): void
     {
@@ -351,26 +355,26 @@ class YetiSearch
             $this->indexDocument($indexName, (string)$documentOrId, $content, $options);
         }
     }
-    
+
     // Delete method for backward compatibility
     public function delete(string $indexName, string $id): void
     {
         $this->deleteDocument($indexName, $id);
     }
-    
+
     // Clear index method
     public function clear(string $indexName): void
     {
         $storage = $this->getStorage();
         $storage->clear($indexName);
     }
-    
+
     // Search multiple indices
     public function searchMultiple(array $indices, string $query, array $options = []): array
     {
         return $this->multiSearch($indices, $query, $options);
     }
-    
+
     /**
      * Get cache statistics
      */
@@ -379,10 +383,10 @@ class YetiSearch
         if (!$this->cacheManager) {
             $this->initializeCacheManager();
         }
-        
+
         return $this->cacheManager ? $this->cacheManager->getStats() : [];
     }
-    
+
     /**
      * Clear all caches
      */
@@ -391,12 +395,12 @@ class YetiSearch
         if (!$this->cacheManager) {
             $this->initializeCacheManager();
         }
-        
+
         if ($this->cacheManager) {
             $this->cacheManager->clearAll();
         }
     }
-    
+
     /**
      * Get cache information
      */
@@ -405,10 +409,10 @@ class YetiSearch
         if (!$this->cacheManager) {
             $this->initializeCacheManager();
         }
-        
+
         return $this->cacheManager ? $this->cacheManager->getCacheInfo() : [];
     }
-    
+
     /**
      * Warm up cache with popular queries
      */
@@ -417,10 +421,10 @@ class YetiSearch
         if (!$this->cacheManager) {
             $this->initializeCacheManager();
         }
-        
+
         return $this->cacheManager ? $this->cacheManager->warmUp($indexName, $popularQueries) : [];
     }
-    
+
     /**
      * Generate "did you mean" suggestions for a query
      */
@@ -429,20 +433,20 @@ class YetiSearch
         $engine = $this->getSearchEngine($name);
         return $engine->generateSuggestions($query, $maxSuggestions);
     }
-    
+
     private function initializeCacheManager(): void
     {
         if (!$this->cacheManager && $this->storage) {
             $this->cacheManager = new CacheManager($this->storage);
         }
     }
-    
+
     public function getSearchEngine(string $name): SearchEngine
     {
         if (!isset($this->searchEngines[$name])) {
             $storage = $this->getStorage();
             $analyzer = $this->getAnalyzer();
-            
+
             $this->searchEngines[$name] = new SearchEngine(
                 $storage,
                 $analyzer,
@@ -451,31 +455,31 @@ class YetiSearch
                 $this->logger
             );
         }
-        
+
         return $this->searchEngines[$name];
     }
-    
+
     public function query(string $index): SearchQuery
     {
         $searchQuery = new SearchQuery();
         $fuzzyOptions = [];
-        
+
         $options = func_get_args();
         array_shift($options); // Remove index
         $options = $options[0] ?? [];
-        
+
         if (isset($options['fields'])) {
             $searchQuery->fields($options['fields']);
         }
-        
+
         if (isset($options['limit'])) {
             $searchQuery->limit($options['limit']);
         }
-        
+
         if (isset($options['offset'])) {
             $searchQuery->offset($options['offset']);
         }
-        
+
         if (isset($options['filters'])) {
             foreach ($options['filters'] as $filter) {
                 $searchQuery->filter(
@@ -485,17 +489,17 @@ class YetiSearch
                 );
             }
         }
-        
+
         if (isset($options['sort'])) {
             foreach ($options['sort'] as $field => $direction) {
                 $searchQuery->sortBy($field, $direction);
             }
         }
-        
+
         if (isset($options['language'])) {
             $searchQuery->language($options['language']);
         }
-        
+
         // Fuzzy config: accept boolean or nested array with aliases
         if (array_key_exists('fuzzy', $options)) {
             $f = $options['fuzzy'];
@@ -513,49 +517,59 @@ class YetiSearch
                     'penalty' => 'fuzzy_score_penalty',
                 ];
                 foreach ($map as $k => $to) {
-                    if (array_key_exists($k, $f)) { $fuzzyOptions[$to] = $f[$k]; }
+                    if (array_key_exists($k, $f)) {
+                        $fuzzyOptions[$to] = $f[$k];
+                    }
                 }
                 if (isset($f['jaro_winkler'])) {
                     $jw = $f['jaro_winkler'];
-                    if (isset($jw['threshold'])) { $fuzzyOptions['jaro_winkler_threshold'] = $jw['threshold']; }
-                    if (isset($jw['prefix_scale'])) { $fuzzyOptions['jaro_winkler_prefix_scale'] = $jw['prefix_scale']; }
+                    if (isset($jw['threshold'])) {
+                        $fuzzyOptions['jaro_winkler_threshold'] = $jw['threshold'];
+                    }
+                    if (isset($jw['prefix_scale'])) {
+                        $fuzzyOptions['jaro_winkler_prefix_scale'] = $jw['prefix_scale'];
+                    }
                 }
                 if (isset($f['levenshtein']['threshold'])) {
                     $fuzzyOptions['levenshtein_threshold'] = $f['levenshtein']['threshold'];
                 }
                 if (isset($f['trigram'])) {
                     $tg = $f['trigram'];
-                    if (isset($tg['size'])) { $fuzzyOptions['trigram_size'] = $tg['size']; }
-                    if (isset($tg['threshold'])) { $fuzzyOptions['trigram_threshold'] = $tg['threshold']; }
+                    if (isset($tg['size'])) {
+                        $fuzzyOptions['trigram_size'] = $tg['size'];
+                    }
+                    if (isset($tg['threshold'])) {
+                        $fuzzyOptions['trigram_threshold'] = $tg['threshold'];
+                    }
                 }
             }
         }
-        
+
         if (isset($options['highlight'])) {
             $searchQuery->highlight($options['highlight']);
         }
-        
+
         if (isset($options['snippet_length'])) {
             $searchQuery->snippetLength($options['snippet_length']);
         }
-        
+
         if (isset($options['field_weights'])) {
             foreach ($options['field_weights'] as $field => $weight) {
                 $searchQuery->weight($field, $weight);
             }
         }
-        
+
         // Boost alias
         if (isset($options['boost'])) {
             foreach ($options['boost'] as $field => $weight) {
                 $searchQuery->weight($field, $weight);
             }
         }
-        
+
         // Geo filtering
         if (isset($options['geo_filters'])) {
             $geo = $options['geo_filters'];
-            
+
             if (isset($geo['bounds'])) {
                 $bounds = new GeoBounds(
                     $geo['bounds']['min_lat'],
@@ -570,58 +584,58 @@ class YetiSearch
                     $bounds->getWest()
                 );
             }
-            
+
             if (isset($geo['near'])) {
                 $point = new GeoPoint($geo['near']['lat'], $geo['near']['lng']);
                 $radius = $geo['near']['radius'] ?? 1000;
                 $searchQuery->nearPoint($point, $radius);
             }
         }
-        
+
         $searchQuery->setOptions($fuzzyOptions);
-        
+
         return $searchQuery;
     }
-    
+
     public function execute(SearchQuery $query, string $index): array
     {
         $engine = $this->getSearchEngine($index);
         $results = $engine->search($query);
         return $results->toArray();
     }
-    
+
     private function getStorage(): SqliteStorage
     {
         if ($this->storage === null) {
             $this->storage = new SqliteStorage();
             $this->storage->connect($this->config['storage']);
         }
-        
+
         return $this->storage;
     }
-    
+
     private function getAnalyzer(): StandardAnalyzer
     {
         if ($this->analyzer === null) {
             $this->analyzer = new StandardAnalyzer($this->config['analyzer']);
         }
-        
+
         return $this->analyzer;
     }
-    
+
     public function listIndices(): array
     {
         $storage = $this->getStorage();
         return $storage->listIndices();
     }
-    
+
     public function close(): void
     {
         if ($this->storage !== null) {
             $this->storage->disconnect();
             $this->storage = null;
         }
-        
+
         $this->indexers = [];
         $this->searchEngines = [];
         $this->cacheManager = null;

@@ -8,7 +8,7 @@ namespace YetiSearch\Stemmer;
 abstract class BaseStemmer implements StemmerInterface
 {
     protected string $word = '';
-    
+
     /**
      * Check if a string ends with a suffix
      */
@@ -20,7 +20,7 @@ abstract class BaseStemmer implements StemmerInterface
         }
         return substr($this->word, -$length) === $suffix;
     }
-    
+
     /**
      * Replace suffix if it exists
      */
@@ -32,7 +32,7 @@ abstract class BaseStemmer implements StemmerInterface
         }
         return false;
     }
-    
+
     /**
      * Remove suffix if it exists
      */
@@ -40,7 +40,7 @@ abstract class BaseStemmer implements StemmerInterface
     {
         return $this->replaceSuffix($suffix, '');
     }
-    
+
     /**
      * Get the measure (consonant-vowel sequences) of the word
      * Used in Porter algorithm
@@ -51,7 +51,7 @@ abstract class BaseStemmer implements StemmerInterface
         $vowels = 'aeiou';
         $measure = 0;
         $previousWasVowel = false;
-        
+
         for ($i = 0; $i < strlen($word); $i++) {
             $isVowel = strpos($vowels, $word[$i]) !== false;
             if (!$isVowel && $previousWasVowel) {
@@ -59,10 +59,10 @@ abstract class BaseStemmer implements StemmerInterface
             }
             $previousWasVowel = $isVowel;
         }
-        
+
         return $measure;
     }
-    
+
     /**
      * Check if word contains a vowel
      */
@@ -70,7 +70,7 @@ abstract class BaseStemmer implements StemmerInterface
     {
         return preg_match('/[aeiou]/i', $this->word) === 1;
     }
-    
+
     /**
      * Common preprocessing
      */

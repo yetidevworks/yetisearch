@@ -8,10 +8,10 @@ class GeoUtils
      * Earth radius in meters
      */
     const EARTH_RADIUS_METERS = 6371000;
-    
+
     /**
      * Calculate the Haversine distance between two points
-     * 
+     *
      * @param GeoPoint $from
      * @param GeoPoint $to
      * @return float Distance in meters
@@ -20,10 +20,10 @@ class GeoUtils
     {
         return $from->distanceTo($to);
     }
-    
+
     /**
      * Calculate the Haversine distance using raw coordinates
-     * 
+     *
      * @param float $lat1
      * @param float $lng1
      * @param float $lat2
@@ -36,16 +36,16 @@ class GeoUtils
         $lat2Rad = deg2rad($lat2);
         $deltaLatRad = deg2rad($lat2 - $lat1);
         $deltaLngRad = deg2rad($lng2 - $lng1);
-        
+
         $a = sin($deltaLatRad / 2) * sin($deltaLatRad / 2) +
              cos($lat1Rad) * cos($lat2Rad) *
              sin($deltaLngRad / 2) * sin($deltaLngRad / 2);
-        
+
         $c = 2 * atan2(sqrt($a), sqrt(1 - $a));
-        
+
         return self::EARTH_RADIUS_METERS * $c;
     }
-    
+
     /**
      * Convert kilometers to meters
      */
@@ -53,7 +53,7 @@ class GeoUtils
     {
         return $km * 1000;
     }
-    
+
     /**
      * Convert miles to meters
      */
@@ -61,7 +61,7 @@ class GeoUtils
     {
         return $miles * 1609.344;
     }
-    
+
     /**
      * Convert meters to kilometers
      */
@@ -69,7 +69,7 @@ class GeoUtils
     {
         return $meters / 1000;
     }
-    
+
     /**
      * Convert meters to miles
      */
@@ -77,10 +77,10 @@ class GeoUtils
     {
         return $meters / 1609.344;
     }
-    
+
     /**
      * Create a bounding box from a center point and radius
-     * 
+     *
      * @param GeoPoint $center
      * @param float $radiusInMeters
      * @return GeoBounds
@@ -89,10 +89,10 @@ class GeoUtils
     {
         return $center->getBoundingBox($radiusInMeters);
     }
-    
+
     /**
      * Check if a point is within a given radius of another point
-     * 
+     *
      * @param GeoPoint $point
      * @param GeoPoint $center
      * @param float $radiusInMeters
@@ -102,7 +102,7 @@ class GeoUtils
     {
         return $point->distanceTo($center) <= $radiusInMeters;
     }
-    
+
     /**
      * Parse various coordinate formats into GeoPoint
      * Supports:
@@ -110,7 +110,7 @@ class GeoUtils
      * - Array with 'latitude' and 'longitude' keys
      * - Array with numeric indices [lat, lng]
      * - String "lat,lng"
-     * 
+     *
      * @param mixed $input
      * @return GeoPoint|null
      */
@@ -119,24 +119,24 @@ class GeoUtils
         if ($input instanceof GeoPoint) {
             return $input;
         }
-        
+
         if (is_array($input)) {
             // Try 'lat' and 'lng' keys
             if (isset($input['lat']) && isset($input['lng'])) {
                 return new GeoPoint((float)$input['lat'], (float)$input['lng']);
             }
-            
+
             // Try 'latitude' and 'longitude' keys
             if (isset($input['latitude']) && isset($input['longitude'])) {
                 return new GeoPoint((float)$input['latitude'], (float)$input['longitude']);
             }
-            
+
             // Try numeric indices
             if (isset($input[0]) && isset($input[1])) {
                 return new GeoPoint((float)$input[0], (float)$input[1]);
             }
         }
-        
+
         if (is_string($input)) {
             // Try to parse "lat,lng" format
             $parts = explode(',', $input);
@@ -148,13 +148,13 @@ class GeoUtils
                 }
             }
         }
-        
+
         return null;
     }
-    
+
     /**
      * Format a distance for display
-     * 
+     *
      * @param float $meters
      * @param string $unit 'metric' or 'imperial'
      * @param int $decimals
@@ -170,12 +170,12 @@ class GeoUtils
             }
             return number_format($miles, $decimals) . ' mi';
         }
-        
+
         // Metric
         if ($meters < 1000) {
             return round($meters) . ' m';
         }
-        
+
         $km = self::metersToKm($meters);
         return number_format($km, $decimals) . ' km';
     }

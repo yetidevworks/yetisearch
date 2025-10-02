@@ -12,7 +12,7 @@ class StandardAnalyzer implements AnalyzerInterface
     private array $customStopWords = [];
     private array $stemmers = [];
     private array $config;
-    
+
     public function __construct(array $config = [])
     {
         $this->config = array_merge([
@@ -26,20 +26,20 @@ class StandardAnalyzer implements AnalyzerInterface
             'custom_stop_words' => [],
             'disable_stop_words' => false
         ], $config);
-        
+
         $this->loadStopWords();
         $this->setCustomStopWords($this->config['custom_stop_words']);
     }
-    
+
     public function analyze(string $text, ?string $language = null): array
     {
         $language = $language ?? $this->detectLanguage($text);
-        
+
         $originalText = $text;
         $text = $this->normalize($text);
         $tokens = $this->tokenize($text);
         $tokens = $this->removeStopWords($tokens, $language);
-        
+
         $analyzed = [];
         foreach ($tokens as $token) {
             $stemmed = $this->stem($token, $language);
@@ -47,47 +47,47 @@ class StandardAnalyzer implements AnalyzerInterface
                 $analyzed[] = $stemmed;
             }
         }
-        
+
         return [
             'tokens' => $analyzed,
             'original' => $originalText,
             'language' => $language
         ];
     }
-    
+
     public function tokenize(string $text): array
     {
         if ($this->config['strip_html']) {
             $text = strip_tags($text);
         }
-        
+
         if ($this->config['expand_contractions']) {
             $text = $this->expandContractions($text);
         }
-        
+
         if ($this->config['strip_punctuation']) {
             $text = preg_replace('/[^\p{L}\p{N}\s\'-]/u', ' ', $text);
         }
-        
+
         if ($this->config['lowercase']) {
             $text = UTF8::strtolower($text);
         }
-        
+
         $tokens = preg_split('/\s+/', $text, -1, PREG_SPLIT_NO_EMPTY);
-        
+
         if ($this->config['remove_numbers']) {
             $tokens = array_filter($tokens, function ($token) {
                 return !is_numeric($token);
             });
         }
-        
+
         return array_values($tokens);
     }
-    
+
     public function stem(string $word, ?string $language = null): string
     {
         $language = $language ?? 'english';
-        
+
         if (!isset($this->stemmers[$language])) {
             try {
                 $this->stemmers[$language] = StemmerFactory::create($language);
@@ -95,29 +95,29 @@ class StandardAnalyzer implements AnalyzerInterface
                 $this->stemmers[$language] = StemmerFactory::create('english');
             }
         }
-        
+
         return $this->stemmers[$language]->stem($word);
     }
-    
+
     public function removeStopWords(array $tokens, ?string $language = null): array
     {
         if ($this->config['disable_stop_words']) {
             return $tokens;
         }
-        
+
         $language = $language ?? 'english';
         $stopWords = $this->getStopWords($language);
-        
+
         return array_values(array_filter($tokens, function ($token) use ($stopWords) {
             return !in_array(UTF8::strtolower($token), $stopWords);
         }));
     }
-    
+
     public function normalize(string $text): string
     {
         $text = UTF8::normalize_whitespace($text);
         $text = UTF8::remove_invisible_characters($text);
-        
+
         // Replace smart quotes and ellipsis
         $replacements = [
             "\u{201C}" => '"',  // Left double quotation mark
@@ -127,48 +127,48 @@ class StandardAnalyzer implements AnalyzerInterface
             "\u{2026}" => '...' // Horizontal ellipsis
         ];
         $text = str_replace(array_keys($replacements), array_values($replacements), $text);
-        
+
         $text = preg_replace('/\s+/', ' ', $text);
-        
+
         return trim($text);
     }
-    
+
     public function extractKeywords(string $text, int $limit = 10): array
     {
         $tokens = $this->analyze($text);
         $frequencies = array_count_values($tokens);
-        
+
         arsort($frequencies);
-        
+
         $keywords = [];
         $count = 0;
-        
+
         foreach ($frequencies as $word => $frequency) {
             if ($count >= $limit) {
                 break;
             }
-            
+
             $keywords[] = [
                 'word' => $word,
                 'frequency' => $frequency,
                 'score' => $this->calculateKeywordScore($word, $frequency, $text)
             ];
-            
+
             $count++;
         }
-        
+
         usort($keywords, function ($a, $b) {
             return $b['score'] <=> $a['score'];
         });
-        
+
         return $keywords;
     }
-    
+
     private function detectLanguage(string $text): string
     {
         return 'english';
     }
-    
+
     private function loadStopWords(): void
     {
         $this->stopWords = [
@@ -251,19 +251,19 @@ class StandardAnalyzer implements AnalyzerInterface
             ]
         ];
     }
-    
+
     public function getStopWords(string $language): array
     {
         $defaultStopWords = $this->stopWords[$language] ?? $this->stopWords['english'];
-        
+
         // Merge default stop words with custom stop words
         if (!empty($this->customStopWords)) {
             return array_unique(array_merge($defaultStopWords, $this->customStopWords));
         }
-        
+
         return $defaultStopWords;
     }
-    
+
     private function expandContractions(string $text): string
     {
         $contractions = [
@@ -279,12 +279,12 @@ class StandardAnalyzer implements AnalyzerInterface
             // This needs more sophisticated handling to differentiate between
             // possessive (Grav's) and contractions (it's, that's)
         ];
-        
+
         // Handle specific contractions with 's more carefully
         // Only expand common contractions, not possessives
         $specificContractions = [
             "/\bit's\b/i" => "it is",
-            "/\bthat's\b/i" => "that is", 
+            "/\bthat's\b/i" => "that is",
             "/\bwhat's\b/i" => "what is",
             "/\bthere's\b/i" => "there is",
             "/\bhere's\b/i" => "here is",
@@ -296,48 +296,48 @@ class StandardAnalyzer implements AnalyzerInterface
             "/\bwhen's\b/i" => "when is",
             "/\bwhy's\b/i" => "why is"
         ];
-        
+
         // First apply simple replacements
         $text = str_ireplace(array_keys($contractions), array_values($contractions), $text);
-        
+
         // Then apply regex-based replacements for 's contractions
         foreach ($specificContractions as $pattern => $replacement) {
             $text = preg_replace($pattern, $replacement, $text);
         }
-        
+
         return $text;
     }
-    
+
     private function isValidToken(string $token): bool
     {
         $length = UTF8::strlen($token);
-        
-        return $length >= $this->config['min_word_length'] 
+
+        return $length >= $this->config['min_word_length']
             && $length <= $this->config['max_word_length'];
     }
-    
+
     private function calculateKeywordScore(string $word, int $frequency, string $text): float
     {
         $score = $frequency;
-        
+
         if (UTF8::stripos($text, $word) < 100) {
             $score *= 1.5;
         }
-        
+
         if (UTF8::strlen($word) > 6) {
             $score *= 1.2;
         }
-        
+
         return $score;
     }
-    
+
     public function setCustomStopWords(array $stopWords): void
     {
         $this->customStopWords = array_map(function ($word) {
             return UTF8::strtolower(trim($word));
         }, $stopWords);
     }
-    
+
     public function addCustomStopWord(string $word): void
     {
         $word = UTF8::strtolower(trim($word));
@@ -345,7 +345,7 @@ class StandardAnalyzer implements AnalyzerInterface
             $this->customStopWords[] = $word;
         }
     }
-    
+
     public function removeCustomStopWord(string $word): void
     {
         $word = UTF8::strtolower(trim($word));
@@ -353,17 +353,17 @@ class StandardAnalyzer implements AnalyzerInterface
             return $stopWord !== $word;
         }));
     }
-    
+
     public function getCustomStopWords(): array
     {
         return $this->customStopWords;
     }
-    
+
     public function isStopWordsDisabled(): bool
     {
         return $this->config['disable_stop_words'];
     }
-    
+
     public function setStopWordsDisabled(bool $disabled): void
     {
         $this->config['disable_stop_words'] = $disabled;

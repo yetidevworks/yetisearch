@@ -14,7 +14,7 @@ interface StemmerInterface
      * @return string The stemmed word
      */
     public function stem(string $word): string;
-    
+
     /**
      * Get the language code this stemmer supports
      *

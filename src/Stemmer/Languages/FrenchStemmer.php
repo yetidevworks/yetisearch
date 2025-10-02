@@ -6,46 +6,46 @@ use YetiSearch\Stemmer\BaseStemmer;
 
 /**
  * French Stemmer
- * 
+ *
  * A lightweight implementation of the French stemming algorithm
  * Based on: https://snowballstem.org/algorithms/french/stemmer.html
  */
 class FrenchStemmer extends BaseStemmer
 {
     private array $vowels = ['a', 'e', 'i', 'o', 'u', 'y', 'à', 'è', 'é', 'ê', 'ë', 'î', 'ï', 'ô', 'ù', 'û'];
-    
+
     public function stem(string $word): string
     {
         $word = $this->preprocess($word);
-        
+
         if (strlen($word) <= 2) {
             return $word;
         }
-        
+
         $this->word = $word;
-        
+
         // Mark regions for suffix removal
         $rv = $this->getRVPosition();
         $r1 = $this->getR1Position();
         $r2 = $this->getR2Position($r1);
-        
+
         // Step 1: Standard suffix removal
         $this->step1($rv, $r1, $r2);
-        
+
         // Step 2: Verb suffixes
         if (!$this->step2a($rv)) {
             $this->step2b($rv);
         }
-        
+
         // Step 3: Residual suffix
         $this->step3();
-        
+
         // Step 4: Remove accents - Commented out to match expected test output
         // $this->step4();
-        
+
         return $this->word;
     }
-    
+
     private function step1($rv, $r1, $r2): void
     {
         // Handle standard suffixes
@@ -62,7 +62,7 @@ class FrenchStemmer extends BaseStemmer
             'able' => ['suffix' => 'able', 'replacement' => '', 'region' => $r2],
             'iste' => ['suffix' => 'iste', 'replacement' => '', 'region' => $r2],
             'eux' => ['suffix' => 'eux', 'replacement' => '', 'region' => $r2],
-            
+
             // Group 2: atrice, ateur, ation, atrices, ateurs, ations
             'atrices' => ['suffix' => 'atrices', 'replacement' => '', 'region' => $r2],
             'ateurs' => ['suffix' => 'ateurs', 'replacement' => '', 'region' => $r2],
@@ -70,18 +70,18 @@ class FrenchStemmer extends BaseStemmer
             'atrice' => ['suffix' => 'atrice', 'replacement' => '', 'region' => $r2],
             'ateur' => ['suffix' => 'ateur', 'replacement' => '', 'region' => $r2],
             'ation' => ['suffix' => 'ation', 'replacement' => '', 'region' => $r2],
-            
+
             // Group 3: ment, ments
             'ments' => ['suffix' => 'ments', 'replacement' => '', 'region' => $rv],
             'ment' => ['suffix' => 'ment', 'replacement' => '', 'region' => $rv],
         ];
-        
+
         foreach ($suffixes as $suffix => $data) {
             if ($this->endsWith($data['suffix'])) {
                 $pos = strlen($this->word) - strlen($data['suffix']);
                 if ($pos >= $data['region']) {
                     $this->removeSuffix($data['suffix']);
-                    
+
                     // Special handling for -ment endings
                     if (($suffix === 'ment' || $suffix === 'ments') && $this->endsWith('emm')) {
                         $this->replaceSuffix('emm', 'ent');
@@ -91,7 +91,7 @@ class FrenchStemmer extends BaseStemmer
             }
         }
     }
-    
+
     private function step2a($rv): bool
     {
         // Handle verb suffixes ending with -ir
@@ -102,7 +102,7 @@ class FrenchStemmer extends BaseStemmer
             'issantes', 'issants', 'isse', 'issent', 'isses', 'issez', 'issiez',
             'issions', 'issons', 'it'
         ];
-        
+
         foreach ($suffixes as $suffix) {
             if ($this->endsWith($suffix)) {
                 $pos = strlen($this->word) - strlen($suffix);
@@ -112,10 +112,10 @@ class FrenchStemmer extends BaseStemmer
                 }
             }
         }
-        
+
         return false;
     }
-    
+
     private function step2b($rv): void
     {
         // Handle other verb suffixes
@@ -126,7 +126,7 @@ class FrenchStemmer extends BaseStemmer
             'ai', 'aient', 'ais', 'ait', 'as', 'asse', 'assent', 'asses',
             'assiez', 'assions', 'e', 'es', 's'
         ];
-        
+
         // Handle special plurals first
         if ($this->endsWith('eurs')) {
             $pos = strlen($this->word) - 4;
@@ -135,7 +135,7 @@ class FrenchStemmer extends BaseStemmer
                 return;
             }
         }
-        
+
         foreach ($suffixes as $suffix) {
             if ($this->endsWith($suffix)) {
                 $pos = strlen($this->word) - strlen($suffix);
@@ -146,7 +146,7 @@ class FrenchStemmer extends BaseStemmer
             }
         }
     }
-    
+
     private function step3(): void
     {
         // Final adjustments
@@ -156,7 +156,7 @@ class FrenchStemmer extends BaseStemmer
             $this->replaceSuffix('ç', 'c');
         }
     }
-    
+
     private function step4(): void
     {
         // Remove remaining accents
@@ -169,14 +169,14 @@ class FrenchStemmer extends BaseStemmer
             'ÿ' => 'y',
             'ñ' => 'n'
         ];
-        
+
         $this->word = strtr($this->word, $accents);
     }
-    
+
     private function getRVPosition(): int
     {
         $length = strlen($this->word);
-        
+
         // If word starts with vowel-vowel, RV is after first consonant
         if ($length >= 2 && $this->isVowelAt(0) && $this->isVowelAt(1)) {
             for ($i = 2; $i < $length; $i++) {
@@ -186,7 +186,7 @@ class FrenchStemmer extends BaseStemmer
             }
             return $length;
         }
-        
+
         // Otherwise, RV is after first vowel after initial consonant
         $foundConsonant = false;
         for ($i = 0; $i < $length; $i++) {
@@ -196,38 +196,38 @@ class FrenchStemmer extends BaseStemmer
                 return $i + 1;
             }
         }
-        
+
         return $length;
     }
-    
+
     private function getR1Position(): int
     {
         $length = strlen($this->word);
-        
+
         // Look for first non-vowel followed by vowel
         for ($i = 0; $i < $length - 1; $i++) {
             if (!$this->isVowelAt($i) && $this->isVowelAt($i + 1)) {
                 return $i + 2;
             }
         }
-        
+
         return $length;
     }
-    
+
     private function getR2Position($r1): int
     {
         $length = strlen($this->word);
-        
+
         // R2 is the region after R1
         for ($i = $r1; $i < $length - 1; $i++) {
             if (!$this->isVowelAt($i) && $this->isVowelAt($i + 1)) {
                 return $i + 2;
             }
         }
-        
+
         return $length;
     }
-    
+
     private function isVowelAt($position): bool
     {
         if ($position < 0 || $position >= strlen($this->word)) {
@@ -235,7 +235,7 @@ class FrenchStemmer extends BaseStemmer
         }
         return in_array($this->word[$position], $this->vowels);
     }
-    
+
     public function getLanguage(): string
     {
         return 'french';

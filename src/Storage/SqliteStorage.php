@@ -22,22 +22,22 @@ class SqliteStorage implements StorageInterface
     private array $spatialEnabledCache = [];
     private bool $externalContentDefault = false;
     private ?QueryCache $queryCache = null;
-    
+
     public function connect(array $config): void
     {
         $this->config = $config;
         // Support both 'database' and 'path' keys for database location
         $dbPath = $config['database'] ?? $config['path'] ?? ':memory:';
-        
+
         // Extract search config if available
         $this->searchConfig = $config['search'] ?? [];
-        
+
         // Only use terms index if Levenshtein fuzzy search is enabled
-        $this->useTermsIndex = ($this->searchConfig['enable_fuzzy'] ?? false) && 
+        $this->useTermsIndex = ($this->searchConfig['enable_fuzzy'] ?? false) &&
                                ($this->searchConfig['fuzzy_algorithm'] ?? 'basic') === 'levenshtein';
         // External-content/doc_id mode (opt-in)
         $this->externalContentDefault = (bool)($config['external_content'] ?? false);
-        
+
         // Create directory if it doesn't exist and path is not :memory:
         if ($dbPath !== ':memory:') {
             $dir = dirname($dbPath);
@@ -47,13 +47,13 @@ class SqliteStorage implements StorageInterface
                 }
             }
         }
-        
+
         try {
             $this->connection = new \PDO("sqlite:{$dbPath}", null, null, [
                 \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
                 \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
             ]);
-            
+
             $this->connection->exec('PRAGMA foreign_keys = ON');
             $this->connection->exec('PRAGMA journal_mode = WAL');
             $this->connection->exec('PRAGMA synchronous = OFF'); // Most aggressive for bulk loading
@@ -63,7 +63,7 @@ class SqliteStorage implements StorageInterface
             if (!empty($this->config['exclusive_lock'])) {
                 $this->connection->exec('PRAGMA locking_mode = EXCLUSIVE');
             }
-            
+
             $this->initializeDatabase();
             // Improve query planning on connect
             $this->connection->exec('PRAGMA optimize');
@@ -75,23 +75,23 @@ class SqliteStorage implements StorageInterface
             } catch (\PDOException $e) {
                 $this->hasMathFunctions = false;
             }
-            
+
             // Initialize query cache if enabled
             $cacheConfig = $config['cache'] ?? [];
             if ($cacheConfig['enabled'] ?? false) {  // Default to disabled for backward compatibility
                 $this->queryCache = new QueryCache($this->connection, $cacheConfig);
             }
-            
+
             // Initialize prepared statement cache
-            $maxStmts = isset($config['prepared_statements']['max_size']) 
-                ? $config['prepared_statements']['max_size'] 
+            $maxStmts = isset($config['prepared_statements']['max_size'])
+                ? $config['prepared_statements']['max_size']
                 : 50;
             $this->stmtCache = new PreparedStatementCache($maxStmts);
         } catch (\PDOException $e) {
             throw new StorageException("Failed to connect to SQLite: " . $e->getMessage());
         }
     }
-    
+
     public function disconnect(): void
     {
         if ($this->stmtCache) {
@@ -99,35 +99,35 @@ class SqliteStorage implements StorageInterface
         }
         $this->connection = null;
     }
-    
+
     public function createIndex(string $name, array $options = []): void
     {
         $this->ensureConnected();
-        
+
         try {
             $useExternal = (bool)($options['external_content'] ?? $this->externalContentDefault);
-            
+
             // Check if we should use multi-column FTS mode (default: true for better performance)
             // NOTE: Multi-column FTS is incompatible with external content when using JSON storage
             $useMultiColumnFts = $options['multi_column_fts'] ?? $this->searchConfig['multi_column_fts'] ?? true;
-            
+
             // Force single-column mode for external content with JSON storage
             if ($useExternal) {
                 $useMultiColumnFts = false;
             }
-            
+
             $ftsColumns = $options['fields'] ?? ['content'];
-            
-            
+
+
             // If multi-column mode is disabled, use single content column
             if (!$useMultiColumnFts) {
                 $ftsColumns = ['content'];
-            } else if (count($ftsColumns) <= 1 && $ftsColumns[0] === 'content' && !isset($options['fields'])) {
+            } elseif (count($ftsColumns) <= 1 && $ftsColumns[0] === 'content' && !isset($options['fields'])) {
                 // If only default 'content' field and no explicit fields provided, keep single-column mode
                 $useMultiColumnFts = false;
             }
             // Otherwise keep the provided fields for multi-column mode
-            
+
             // Ensure per-index meta table exists
             $this->connection->exec("CREATE TABLE IF NOT EXISTS {$name}_meta (key TEXT PRIMARY KEY, value TEXT)");
             // Persist schema mode and FTS configuration
@@ -162,11 +162,11 @@ class SqliteStorage implements StorageInterface
                 ";
                 $this->connection->exec($sql);
             }
-            
+
             $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_language ON {$name}(language)");
             $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_type ON {$name}(type)");
             $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_timestamp ON {$name}(timestamp)");
-            
+
             // Determine FTS configuration
             // Note: $ftsColumns and $useMultiColumnFts were already set above
             // We only need to process them here if they weren't already configured
@@ -185,10 +185,14 @@ class SqliteStorage implements StorageInterface
             }
             // Store FTS columns in meta
             $this->setIndexMeta($name, 'fts_columns', json_encode($ftsColumns));
-            if ($detail) { $this->setIndexMeta($name, 'fts_detail', strtolower($detail)); }
+            if ($detail) {
+                $this->setIndexMeta($name, 'fts_detail', strtolower($detail));
+            }
 
             // Create FTS5 table with configured columns
-            $cols = array_map(function($c){ return $c; }, $ftsColumns);
+            $cols = array_map(function ($c) {
+                return $c;
+            }, $ftsColumns);
             if ($useExternal) {
                 $ftsColsSql = implode(', ', $cols);
                 $sql = "CREATE VIRTUAL TABLE IF NOT EXISTS {$name}_fts USING fts5({$ftsColsSql}, content='{$name}', content_rowid='doc_id', tokenize='unicode61'{$prefixSql}{$detailSql})";
@@ -198,7 +202,7 @@ class SqliteStorage implements StorageInterface
                 $sql = "CREATE VIRTUAL TABLE IF NOT EXISTS {$name}_fts USING fts5({$ftsColsSql}, tokenize='unicode61'{$prefixSql}{$detailSql})";
                 $this->connection->exec($sql);
             }
-            
+
             // Only create terms table if Levenshtein fuzzy search is enabled
             if ($this->useTermsIndex) {
                 $termsSql = "
@@ -212,11 +216,11 @@ class SqliteStorage implements StorageInterface
                     )
                 ";
                 $this->connection->exec($termsSql);
-                
+
                 $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_terms_term ON {$name}_terms(term)");
                 $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_terms_doc ON {$name}_terms(document_id)");
             }
-            
+
             // Create spatial support (R-tree if available, otherwise a normal table for consistency)
             $spatialEnabled = (bool)($options['enable_spatial'] ?? true);
             $this->setIndexMeta($name, 'spatial_enabled', $spatialEnabled ? '1' : '0');
@@ -254,16 +258,15 @@ class SqliteStorage implements StorageInterface
                     $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$name}_id_map_numeric ON {$name}_id_map(numeric_id)");
                 }
             }
-            
         } catch (\PDOException $e) {
             throw new StorageException("Failed to create index '{$name}': " . $e->getMessage());
         }
     }
-    
+
     public function dropIndex(string $name): void
     {
         $this->ensureConnected();
-        
+
         try {
             $this->connection->exec("DROP TABLE IF EXISTS {$name}");
             $this->connection->exec("DROP TABLE IF EXISTS {$name}_fts");
@@ -275,31 +278,31 @@ class SqliteStorage implements StorageInterface
             throw new StorageException("Failed to drop index '{$name}': " . $e->getMessage());
         }
     }
-    
+
     public function indexExists(string $name): bool
     {
         $this->ensureConnected();
-        
+
         $stmt = $this->connection->prepare(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
         );
         $stmt->execute([$name]);
-        
+
         return $stmt->fetch() !== false;
     }
-    
+
     public function insert(string $index, array $document): void
     {
         $this->ensureConnected();
-        
+
         // Invalidate cache for this index when inserting
         if ($this->queryCache) {
             $this->queryCache->invalidate($index);
         }
-        
+
         try {
             $this->connection->beginTransaction();
-            
+
             $id = $document['id'];
             $content = json_encode($document['content']);
             // Persist metadata and, when R-tree or math functions are unavailable, embed geo for JSON fallback
@@ -316,7 +319,7 @@ class SqliteStorage implements StorageInterface
                 }
                 if (isset($document['geo_bounds']) && is_array($document['geo_bounds'])) {
                     $b = $document['geo_bounds'];
-                    if (isset($b['north'],$b['south'],$b['east'],$b['west'])) {
+                    if (isset($b['north'], $b['south'], $b['east'], $b['west'])) {
                         $metadataArr['_geo_bounds'] = [
                             'north' => (float)$b['north'],
                             'south' => (float)$b['south'],
@@ -330,7 +333,7 @@ class SqliteStorage implements StorageInterface
             $language = $document['language'] ?? null;
             $type = $document['type'] ?? 'default';
             $timestamp = $document['timestamp'] ?? time();
-            
+
             $schema = $this->getSchemaMode($index);
             if ($schema === 'external') {
                 $sql = "
@@ -354,7 +357,7 @@ class SqliteStorage implements StorageInterface
                 $stmt = $this->connection->prepare($sql);
                 $stmt->execute([$id, $content, $metadata, $language, $type, $timestamp]);
             }
-            
+
             // Insert into FTS with dynamic columns
             $ftsColumns = $this->getFtsColumns($index);
             if ($schema === 'external') {
@@ -377,38 +380,38 @@ class SqliteStorage implements StorageInterface
                 }
                 $ftsStmt->execute($values);
             }
-            
+
             // Only index terms if Levenshtein fuzzy search is enabled
             if ($this->useTermsIndex) {
                 $this->indexTerms($index, $id, $document['content']);
             }
-            
+
             // Handle spatial indexing
             $this->indexSpatialData($index, $id, $document);
-            
+
             $this->connection->commit();
         } catch (\PDOException $e) {
             $this->connection->rollBack();
             throw new StorageException("Failed to insert document: " . $e->getMessage());
         }
     }
-    
+
     public function insertBatch(string $index, array $documents): void
     {
         $this->ensureConnected();
-        
+
         // Invalidate cache for this index when batch inserting
         if ($this->queryCache) {
             $this->queryCache->invalidate($index);
         }
-        
+
         if (empty($documents)) {
             return;
         }
-        
+
         try {
             $this->connection->beginTransaction();
-            
+
             // Prepare statements once
             $schema = $this->getSchemaMode($index);
             if ($schema === 'external') {
@@ -429,7 +432,7 @@ class SqliteStorage implements StorageInterface
                     VALUES (?, ?, ?, ?, ?, ?)
                 ");
             }
-            
+
             // Prepare FTS insert statement dynamically
             $ftsColumns = $this->getFtsColumns($index);
             if ($schema === 'external') {
@@ -444,20 +447,20 @@ class SqliteStorage implements StorageInterface
                         $validColumns[] = $col;
                     }
                 }
-                
+
                 // Fallback to 'content' if no valid columns
                 if (empty($validColumns)) {
                     $validColumns = ['content'];
                 }
-                
+
                 $columnsSql = 'id, ' . implode(', ', $validColumns);
                 $placeholders = implode(', ', array_fill(0, count($validColumns) + 1, '?'));
                 $ftsStmt = $this->connection->prepare("INSERT OR REPLACE INTO {$index}_fts ({$columnsSql}) VALUES ({$placeholders})");
-                
+
                 // Update ftsColumns to use validated columns
                 $ftsColumns = $validColumns;
             }
-            
+
             $termsStmt = null;
             if ($this->useTermsIndex) {
                 $termsStmt = $this->connection->prepare("
@@ -466,7 +469,7 @@ class SqliteStorage implements StorageInterface
                     VALUES (?, ?, ?, ?, ?)
                 ");
             }
-            
+
             // Process all documents in a single transaction
             foreach ($documents as $document) {
                 $id = $document['id'];
@@ -485,7 +488,7 @@ class SqliteStorage implements StorageInterface
                     }
                     if (isset($document['geo_bounds']) && is_array($document['geo_bounds'])) {
                         $b = $document['geo_bounds'];
-                        if (isset($b['north'],$b['south'],$b['east'],$b['west'])) {
+                        if (isset($b['north'], $b['south'], $b['east'], $b['west'])) {
                             $metadataArr['_geo_bounds'] = [
                                 'north' => (float)$b['north'],
                                 'south' => (float)$b['south'],
@@ -499,10 +502,10 @@ class SqliteStorage implements StorageInterface
                 $language = $document['language'] ?? null;
                 $type = $document['type'] ?? 'default';
                 $timestamp = $document['timestamp'] ?? time();
-                
+
                 // Insert main document
                 $docStmt->execute([$id, $content, $metadata, $language, $type, $timestamp]);
-                
+
                 // Insert FTS content
                 if ($schema === 'external') {
                     // For external content, just insert rowid and combined content
@@ -518,33 +521,33 @@ class SqliteStorage implements StorageInterface
                     }
                     $ftsStmt->execute($values);
                 }
-                
+
                 // Only index terms if Levenshtein fuzzy search is enabled
                 if ($this->useTermsIndex && $termsStmt) {
                     $this->indexTermsWithStatement($termsStmt, $id, $document['content']);
                 }
-                
+
                 // Handle spatial indexing
                 $this->indexSpatialData($index, $id, $document);
             }
-            
+
             $this->connection->commit();
         } catch (\PDOException $e) {
             $this->connection->rollBack();
             throw new StorageException("Failed to insert batch: " . $e->getMessage());
         }
     }
-    
+
     private function indexTermsWithStatement(\PDOStatement $stmt, string $documentId, array $content): void
     {
         foreach ($content as $field => $value) {
             if (!is_string($value)) {
                 continue;
             }
-            
+
             $terms = $this->tokenizeText($value);
             $termFrequencies = array_count_values($terms);
-            
+
             foreach ($termFrequencies as $term => $frequency) {
                 $positions = $this->findTermPositions($value, $term);
                 $stmt->execute([
@@ -557,27 +560,27 @@ class SqliteStorage implements StorageInterface
             }
         }
     }
-    
+
     public function update(string $index, string $id, array $document): void
     {
         // Invalidate cache for this index when updating
         if ($this->queryCache) {
             $this->queryCache->invalidate($index);
         }
-        
+
         $document['id'] = $id;
         $this->insert($index, $document);
     }
-    
+
     public function delete(string $index, string $id): void
     {
         $this->ensureConnected();
-        
+
         // Invalidate cache for this index when deleting
         if ($this->queryCache) {
             $this->queryCache->invalidate($index);
         }
-        
+
         try {
             $this->connection->beginTransaction();
             // Capture doc_id early for external schema
@@ -622,11 +625,11 @@ class SqliteStorage implements StorageInterface
             throw new StorageException("Failed to delete document: " . $e->getMessage());
         }
     }
-    
+
     public function search(string $index, array $query): array
     {
         $this->ensureConnected();
-        
+
         // Check cache first if enabled
         if ($this->queryCache && !($query['bypass_cache'] ?? false)) {
             $cached = $this->queryCache->get($index, $query);
@@ -634,7 +637,7 @@ class SqliteStorage implements StorageInterface
                 return $cached;
             }
         }
-        
+
         $searchQuery = $query['query'] ?? '';
         $filters = $query['filters'] ?? [];
         $limit = $query['limit'] ?? 20;
@@ -643,39 +646,42 @@ class SqliteStorage implements StorageInterface
         $language = $query['language'] ?? null;
         $geoFilters = $query['geoFilters'] ?? [];
         $fieldWeights = $query['field_weights'] ?? [];
-        
+
         // Build spatial query components
         $spatial = $this->buildSpatialQuery($index, $geoFilters);
-        
-        
+
+
         // Check if we have a search query
         $hasSearchQuery = !empty(trim($searchQuery));
-        
-        
+
+
         // Detect if we need PHP-based sorting (FTS5 + distance sorting)
         $needsPhpSort = false;
         $hasSpatialData = !empty($spatial['select']) && (
             strpos($spatial['select'], 'distance') !== false ||
             strpos($spatial['select'], '_centroid_lat') !== false
         );
-        
+
         if ($hasSpatialData && (isset($geoFilters['distance_sort']) || isset($sort['distance']))) {
             $needsPhpSort = true;
         }
-        
+
         // When using field weights, we need to fetch more results to ensure proper scoring
         // Increase the candidate pool significantly to catch documents that might rank high after field weighting
         $effectiveLimit = (!empty($fieldWeights) && $hasSearchQuery) ? min(max($limit * 50, 1000), 5000) : $limit;
-        
-        
+
+
         // Nearest-neighbor mode (k-NN): ignore text, order by distance asc, limit k
         if (isset($geoFilters['nearest'])) {
             $k = is_array($geoFilters['nearest']) ? (int)($geoFilters['nearest']['k'] ?? 10) : (int)$geoFilters['nearest'];
             $k = max(1, min($k, 1000));
             $from = $geoFilters['nearest']['from'] ?? ($geoFilters['distance_sort']['from'] ?? null);
-            if ($from && is_array($from)) { $from = new GeoPoint($from['lat'], $from['lng']); }
+            if ($from && is_array($from)) {
+                $from = new GeoPoint($from['lat'], $from['lng']);
+            }
             if ($from instanceof GeoPoint) {
-                $lat = $from->getLatitude(); $lng = $from->getLongitude();
+                $lat = $from->getLatitude();
+                $lng = $from->getLongitude();
                 $schema = $this->getSchemaMode($index);
                 $join = $schema === 'external'
                     ? " INNER JOIN {$index}_spatial s ON s.id = d.doc_id"
@@ -686,15 +692,29 @@ class SqliteStorage implements StorageInterface
                 if (isset($geoFilters['max_distance'])) {
                     $maxD = (float)$geoFilters['max_distance'];
                     $units = $geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? null);
-                    if (is_string($units)) { $u=strtolower($units); if ($u==='km') $maxD*=1000.0; elseif ($u==='mi'||$u==='mile'||$u==='miles') $maxD*=1609.344; }
-                    $sql .= " AND (".$distanceExpr.") <= ?"; $params[] = $maxD;
+                    if (is_string($units)) {
+                        $u = strtolower($units);
+                        if ($u === 'km') {
+                            $maxD *= 1000.0;
+                        } elseif ($u === 'mi' || $u === 'mile' || $u === 'miles') {
+                            $maxD *= 1609.344;
+                        }
+                    }
+                    $sql .= " AND (" . $distanceExpr . ") <= ?";
+                    $params[] = $maxD;
                 }
                 // Apply standard filters
                 foreach ($filters as $filter) {
-                    $field = $filter['field']; $operator = $filter['operator'] ?? '='; $value = $filter['value'];
-                    if (in_array($field, ['type','language','id','timestamp'])) { $sql .= " AND d.{$field} {$operator} ?"; $params[]=$value; }
+                    $field = $filter['field'];
+                    $operator = $filter['operator'] ?? '=';
+                    $value = $filter['value'];
+                    if (in_array($field, ['type','language','id','timestamp'])) {
+                        $sql .= " AND d.{$field} {$operator} ?";
+                        $params[] = $value;
+                    }
                 }
-                $sql .= " ORDER BY distance ASC LIMIT ?"; $params[] = $k;
+                $sql .= " ORDER BY distance ASC LIMIT ?";
+                $params[] = $k;
 
                 try {
                     $stmt = $this->getPreparedStatement($sql);
@@ -715,12 +735,12 @@ class SqliteStorage implements StorageInterface
                             'centroid_lng' => $row['_centroid_lng'] ?? null,
                         ];
                     }
-                    
+
                     // Cache the results before returning
                     if ($this->queryCache) {
                         $this->queryCache->set($index, $query, $results);
                     }
-                    
+
                     return $results;
                 } catch (\PDOException $e) {
                     throw new StorageException("Search failed: " . $e->getMessage());
@@ -733,14 +753,14 @@ class SqliteStorage implements StorageInterface
             // Compute bm25 weights per FTS column (if available)
             $ftsColumns = $this->getFtsColumns($index);
             $isMultiColumn = $this->getIndexMeta($index, 'multi_column_fts') === '1';
-            
+
             $weights = [];
             if ($isMultiColumn && !empty($fieldWeights)) {
                 // In multi-column mode, apply weights to actual FTS columns
                 foreach ($ftsColumns as $col) {
                     $weights[] = (float)($fieldWeights[$col] ?? 1.0);
                 }
-            } else if (!$isMultiColumn && !empty($fieldWeights)) {
+            } elseif (!$isMultiColumn && !empty($fieldWeights)) {
                 // In single-column mode, BM25 weights don't apply per field
                 // We'll use post-processing field weighting
                 $weights = [1.0];
@@ -750,7 +770,7 @@ class SqliteStorage implements StorageInterface
                     $weights[] = 1.0;
                 }
             }
-            
+
             // Use table name for bm25() (SQLite expects the FTS table name)
             $bm25 = 'bm25(' . $index . '_fts' . (count($weights) ? ', ' . implode(', ', $weights) : '') . ') as rank';
             $schema = $this->getSchemaMode($index);
@@ -763,7 +783,14 @@ class SqliteStorage implements StorageInterface
             if (isset($geoFilters['near']) && !empty($spatial['select']) && strpos($spatial['select'], 'distance') !== false) {
                 $radius = (float)$geoFilters['near']['radius'];
                 $units = $geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? null);
-                if (is_string($units)) { $u=strtolower($units); if ($u==='km') $radius*=1000.0; elseif(in_array($u,['mi','mile','miles'])) $radius*=1609.344; }
+                if (is_string($units)) {
+                    $u = strtolower($units);
+                    if ($u === 'km') {
+                        $radius *= 1000.0;
+                    } elseif (in_array($u, ['mi','mile','miles'])) {
+                        $radius *= 1609.344;
+                    }
+                }
                 $sql = "SELECT * FROM (" . $inner . ") t WHERE t.distance <= ?";
                 $params[] = $radius;
             } else {
@@ -775,24 +802,24 @@ class SqliteStorage implements StorageInterface
                 SELECT 
                     d.id, d.content, d.metadata, d.language, d.type, d.timestamp,
                     0 as rank" . $spatial['select'] . "
-                FROM {$index} d" . 
+                FROM {$index} d" .
                 (!empty($spatial['join']) ? $spatial['join'] : "") . "
                 WHERE 1=1" . $spatial['where'] . "
             ";
             $params = $spatial['params'];
         }
-        
-        
+
+
         if ($language) {
             $sql .= " AND d.language = ?";
             $params[] = $language;
         }
-        
+
         foreach ($filters as $filter) {
             $field = $filter['field'];
             $operator = $filter['operator'] ?? '=';
             $value = $filter['value'];
-            
+
             if (in_array($field, ['type', 'language', 'id', 'timestamp'])) {
                 // Direct column filtering
                 $sql .= " AND d.{$field} {$operator} ?";
@@ -800,7 +827,7 @@ class SqliteStorage implements StorageInterface
             } elseif (strpos($field, 'metadata.') === 0) {
                 // Metadata field filtering using JSON extraction
                 $metaField = substr($field, 9); // Remove 'metadata.' prefix
-                
+
                 // Use SQLite's JSON extraction
                 switch ($operator) {
                     case '=':
@@ -840,7 +867,7 @@ class SqliteStorage implements StorageInterface
                 $params[] = $value;
             }
         }
-        
+
         // Handle sorting
         if ($needsPhpSort) {
             // For PHP sorting, we need to fetch more results to ensure accurate pagination
@@ -849,7 +876,7 @@ class SqliteStorage implements StorageInterface
             if (isset($geoFilters['candidate_cap'])) {
                 $fetchLimit = min($fetchLimit, max(10, (int)$geoFilters['candidate_cap']));
             }
-            
+
             // Apply basic ordering by rank to get most relevant results first
             $sql .= " ORDER BY rank ASC";
             $sql .= " LIMIT ?";
@@ -883,12 +910,12 @@ class SqliteStorage implements StorageInterface
                 }
                 $sql .= " ORDER BY " . implode(', ', $orderClauses);
             }
-            
+
             $sql .= " LIMIT ? OFFSET ?";
             $params[] = $effectiveLimit;
             $params[] = $offset;
         }
-        
+
         try {
             // Debug mode: return SQL and params without executing
             if (!empty($query['_debug_sql'])) {
@@ -902,24 +929,27 @@ class SqliteStorage implements StorageInterface
 
             $stmt = $this->connection->prepare($sql);
             $stmt->execute($params);
-            
+
             $results = [];
             $radiusFilter = null;
-            
+
             // Check if we're using multi-column FTS
             $isMultiColumn = $this->getIndexMeta($index, 'multi_column_fts') === '1';
-            
+
             // Check if we need to do radius post-filtering (ensure meters)
             if (isset($geoFilters['near'])) {
                 $radiusFilter = (float)$geoFilters['near']['radius'];
                 $units = $geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? null);
                 if (is_string($units)) {
                     $u = strtolower($units);
-                    if ($u === 'km') { $radiusFilter *= 1000.0; }
-                    elseif ($u === 'mi' || $u === 'mile' || $u === 'miles') { $radiusFilter *= 1609.344; }
+                    if ($u === 'km') {
+                        $radiusFilter *= 1000.0;
+                    } elseif ($u === 'mi' || $u === 'mile' || $u === 'miles') {
+                        $radiusFilter *= 1609.344;
+                    }
                 }
             }
-            
+
             $rowCount = 0;
             // Determine a reference point for distance if needed
             $refPoint = null;
@@ -935,19 +965,18 @@ class SqliteStorage implements StorageInterface
                 $rowCount++;
                 $content = json_decode($row['content'], true);
                 $baseScore = abs($row['rank']);
-                
+
                 // Apply field weights if provided
                 // Even in multi-column mode, we should apply additional weighting for exact matches
                 if (!empty($fieldWeights) && $hasSearchQuery && is_array($content)) {
                     // Apply post-processing field weights for better exact match scoring
                     $weightedScore = $this->calculateFieldWeightedScore($searchQuery, $content, $fieldWeights, $baseScore);
                     $finalScore = $weightedScore;
-                    
                 } else {
                     // No field weights configured
                     $finalScore = $baseScore;
                 }
-                
+
                 // Merge content fields directly into result
                 $result = array_merge($content ?: [], [
                     'id' => $row['id'],
@@ -957,7 +986,7 @@ class SqliteStorage implements StorageInterface
                     'type' => $row['type'],
                     'timestamp' => $row['timestamp']
                 ]);
-                
+
                 // Add or compute distance
                 $distance = null;
                 if (isset($row['distance'])) {
@@ -967,78 +996,80 @@ class SqliteStorage implements StorageInterface
                     $distance = $refPoint->distanceTo($pt);
                 }
                 if ($distance !== null) {
-                    if ($radiusFilter !== null && $distance > $radiusFilter) { continue; }
+                    if ($radiusFilter !== null && $distance > $radiusFilter) {
+                        continue;
+                    }
                     $result['distance'] = $distance;
                 }
-                
+
                 $results[] = $result;
             }
-            
+
             // Re-sort results if field weights were applied (only in single-column mode)
             if (!$isMultiColumn && !empty($fieldWeights) && $hasSearchQuery) {
-                usort($results, function($a, $b) {
+                usort($results, function ($a, $b) {
                     // Sort by score descending (highest score first)
                     return $b['score'] <=> $a['score'];
                 });
-                
+
                 // Apply the actual limit after sorting
                 $results = array_slice($results, 0, $limit);
             }
-            
+
             // Apply PHP sorting if needed
             if ($needsPhpSort) {
                 // Determine sort field and direction
                 $sortField = 'distance';
                 $sortDir = 'ASC';
-                
+
                 if (isset($geoFilters['distance_sort'])) {
                     $sortDir = strtoupper($geoFilters['distance_sort']['direction']) === 'DESC' ? 'DESC' : 'ASC';
                 } elseif (isset($sort['distance'])) {
                     $sortDir = strtoupper($sort['distance']) === 'DESC' ? 'DESC' : 'ASC';
                 }
-                
+
                 // Sort results by distance
-                usort($results, function($a, $b) use ($sortDir) {
+                usort($results, function ($a, $b) use ($sortDir) {
                     $distA = $a['distance'] ?? PHP_FLOAT_MAX;
                     $distB = $b['distance'] ?? PHP_FLOAT_MAX;
-                    
+
                     if ($sortDir === 'ASC') {
                         return $distA <=> $distB;
                     } else {
                         return $distB <=> $distA;
                     }
                 });
-                
+
                 // Apply pagination after sorting
                 $results = array_slice($results, $offset, $limit);
             }
-            
+
             // Cache the results before returning
             if ($this->queryCache) {
                 $this->queryCache->set($index, $query, $results);
             }
-            
+
             return $results;
         } catch (\PDOException $e) {
             throw new StorageException("Search failed: " . $e->getMessage());
         }
     }
-    
+
     public function count(string $index, array $query): int
     {
         $this->ensureConnected();
-        
+
         $searchQuery = $query['query'] ?? '';
         $filters = $query['filters'] ?? [];
         $language = $query['language'] ?? null;
         $geoFilters = $query['geoFilters'] ?? [];
-        
+
         // Build spatial query components
         $spatial = $this->buildSpatialQuery($index, $geoFilters);
-        
+
         // Check if we have a search query
         $hasSearchQuery = !empty(trim($searchQuery));
-        
+
         if ($hasSearchQuery) {
             $schema = $this->getSchemaMode($index);
             if ($schema === 'external') {
@@ -1063,12 +1094,24 @@ class SqliteStorage implements StorageInterface
                 } elseif (strpos($field, 'metadata.') === 0) {
                     $metaField = substr($field, 9);
                     switch ($operator) {
-                        case '=':     $inner .= " AND json_extract(d.metadata, '$.{$metaField}') = ?"; break;
-                        case '!=':    $inner .= " AND json_extract(d.metadata, '$.{$metaField}') != ?"; break;
-                        case '>':     $inner .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) > ?"; break;
-                        case '<':     $inner .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) < ?"; break;
-                        case '>=':    $inner .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) >= ?"; break;
-                        case '<=':    $inner .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) <= ?"; break;
+                        case '=':
+                            $inner .= " AND json_extract(d.metadata, '$.{$metaField}') = ?";
+                            break;
+                        case '!=':
+                            $inner .= " AND json_extract(d.metadata, '$.{$metaField}') != ?";
+                            break;
+                        case '>':
+                            $inner .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) > ?";
+                            break;
+                        case '<':
+                            $inner .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) < ?";
+                            break;
+                        case '>=':
+                            $inner .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) >= ?";
+                            break;
+                        case '<=':
+                            $inner .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) <= ?";
+                            break;
                         case 'in':
                             if (is_array($value)) {
                                 $placeholders = implode(',', array_fill(0, count($value), '?'));
@@ -1094,7 +1137,14 @@ class SqliteStorage implements StorageInterface
             if (isset($geoFilters['near']) && !empty($spatial['select']) && strpos($spatial['select'], 'distance') !== false) {
                 $radius = (float)$geoFilters['near']['radius'];
                 $units = $geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? null);
-                if (is_string($units)) { $u=strtolower($units); if ($u==='km') $radius*=1000.0; elseif(in_array($u,['mi','mile','miles'])) $radius*=1609.344; }
+                if (is_string($units)) {
+                    $u = strtolower($units);
+                    if ($u === 'km') {
+                        $radius *= 1000.0;
+                    } elseif (in_array($u, ['mi','mile','miles'])) {
+                        $radius *= 1609.344;
+                    }
+                }
                 $sql = "SELECT COUNT(*) as total FROM (" . $inner . ") t WHERE t.distance <= ?";
                 $params[] = $radius;
             } else {
@@ -1103,7 +1153,7 @@ class SqliteStorage implements StorageInterface
         } else {
             $sql = "
                 SELECT COUNT(*) as total
-                FROM {$index} d" . 
+                FROM {$index} d" .
                 (!empty($spatial['join']) ? $spatial['join'] : "") . "
                 WHERE 1=1" . $spatial['where'] . "
             ";
@@ -1122,12 +1172,24 @@ class SqliteStorage implements StorageInterface
                 } elseif (strpos($field, 'metadata.') === 0) {
                     $metaField = substr($field, 9);
                     switch ($operator) {
-                        case '=':     $sql .= " AND json_extract(d.metadata, '$.{$metaField}') = ?"; break;
-                        case '!=':    $sql .= " AND json_extract(d.metadata, '$.{$metaField}') != ?"; break;
-                        case '>':     $sql .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) > ?"; break;
-                        case '<':     $sql .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) < ?"; break;
-                        case '>=':    $sql .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) >= ?"; break;
-                        case '<=':    $sql .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) <= ?"; break;
+                        case '=':
+                            $sql .= " AND json_extract(d.metadata, '$.{$metaField}') = ?";
+                            break;
+                        case '!=':
+                            $sql .= " AND json_extract(d.metadata, '$.{$metaField}') != ?";
+                            break;
+                        case '>':
+                            $sql .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) > ?";
+                            break;
+                        case '<':
+                            $sql .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) < ?";
+                            break;
+                        case '>=':
+                            $sql .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) >= ?";
+                            break;
+                        case '<=':
+                            $sql .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) <= ?";
+                            break;
                         case 'in':
                             if (is_array($value)) {
                                 $placeholders = implode(',', array_fill(0, count($value), '?'));
@@ -1148,29 +1210,29 @@ class SqliteStorage implements StorageInterface
                 }
             }
         }
-        
+
         try {
             $stmt = $this->connection->prepare($sql);
             $stmt->execute($params);
-            
+
             return (int) $stmt->fetchColumn();
         } catch (\PDOException $e) {
             throw new StorageException("Count failed: " . $e->getMessage());
         }
     }
-    
+
     public function getDocument(string $index, string $id): ?array
     {
         $this->ensureConnected();
-        
+
         $stmt = $this->connection->prepare("SELECT * FROM {$index} WHERE id = ?");
         $stmt->execute([$id]);
-        
+
         $row = $stmt->fetch();
         if (!$row) {
             return null;
         }
-        
+
         return [
             'id' => $row['id'],
             'content' => json_decode($row['content'], true),
@@ -1180,11 +1242,11 @@ class SqliteStorage implements StorageInterface
             'timestamp' => $row['timestamp']
         ];
     }
-    
+
     public function optimize(string $index): void
     {
         $this->ensureConnected();
-        
+
         try {
             $this->connection->exec("INSERT INTO {$index}_fts({$index}_fts) VALUES('optimize')");
             $this->connection->exec("VACUUM");
@@ -1193,22 +1255,22 @@ class SqliteStorage implements StorageInterface
             throw new StorageException("Optimization failed: " . $e->getMessage());
         }
     }
-    
+
     public function getIndexStats(string $index): array
     {
         $this->ensureConnected();
-        
+
         $stats = [
             'document_count' => 0,
             'index_size' => 0,
             'languages' => [],
             'types' => []
         ];
-        
+
         try {
             $stmt = $this->connection->query("SELECT COUNT(*) FROM {$index}");
             $stats['document_count'] = (int) $stmt->fetchColumn();
-            
+
             $stmt = $this->connection->query("
                 SELECT language, COUNT(*) as count 
                 FROM {$index} 
@@ -1218,7 +1280,7 @@ class SqliteStorage implements StorageInterface
             while ($row = $stmt->fetch()) {
                 $stats['languages'][$row['language']] = $row['count'];
             }
-            
+
             $stmt = $this->connection->query("
                 SELECT type, COUNT(*) as count 
                 FROM {$index} 
@@ -1227,11 +1289,10 @@ class SqliteStorage implements StorageInterface
             while ($row = $stmt->fetch()) {
                 $stats['types'][$row['type']] = $row['count'];
             }
-            
         } catch (\PDOException $e) {
             // Ignore stats errors
         }
-        
+
         return $stats;
     }
 
@@ -1278,13 +1339,13 @@ class SqliteStorage implements StorageInterface
         // Rebuild FTS after structure change
         $this->rebuildFts($index);
     }
-    
+
     public function listIndices(): array
     {
         $this->ensureConnected();
-        
+
         $indices = [];
-        
+
         try {
             // Query for all tables that match our index pattern
             $stmt = $this->connection->query("
@@ -1296,10 +1357,10 @@ class SqliteStorage implements StorageInterface
                 AND name NOT LIKE 'sqlite_%'
                 ORDER BY name
             ");
-            
+
             while ($row = $stmt->fetch()) {
                 $tableName = $row['name'];
-                
+
                 // Verify this is a valid index by checking for corresponding FTS table
                 $ftsExists = $this->connection->query("
                     SELECT COUNT(*) 
@@ -1307,7 +1368,7 @@ class SqliteStorage implements StorageInterface
                     WHERE type = 'table' 
                     AND name = '{$tableName}_fts'
                 ")->fetchColumn() > 0;
-                
+
                 if ($ftsExists) {
                     // Get additional metadata about the index
                     $stats = $this->getIndexStats($tableName);
@@ -1319,95 +1380,93 @@ class SqliteStorage implements StorageInterface
                     ];
                 }
             }
-            
         } catch (\PDOException $e) {
             throw new StorageException("Failed to list indices: " . $e->getMessage());
         }
-        
+
         return $indices;
     }
-    
+
     public function getStats(string $index): array
     {
         return $this->getIndexStats($index);
     }
-    
+
     public function clear(string $index): void
     {
         $this->ensureConnected();
-        
+
         try {
             $this->connection->beginTransaction();
-            
+
             // Delete all documents from the index
             $this->connection->exec("DELETE FROM {$index}");
-            
+
             // Delete from FTS table
             $this->connection->exec("DELETE FROM {$index}_fts");
-            
+
             // Delete from spatial table if exists
             if ($this->hasSpatialIndex($index)) {
                 $this->connection->exec("DELETE FROM {$index}_spatial");
             }
-            
+
             // Delete from terms table if exists
             if ($this->useTermsIndex) {
                 $this->connection->exec("DELETE FROM {$index}_terms");
             }
-            
+
             $this->connection->commit();
         } catch (\PDOException $e) {
             $this->connection->rollBack();
             throw new StorageException("Failed to clear index: " . $e->getMessage());
         }
     }
-    
+
     public function searchMultiple(array $indices, array $query): array
     {
         $this->ensureConnected();
-        
+
         $allResults = [];
         $totalCount = 0;
         $searchTime = microtime(true);
-        
+
         // Search each index
         foreach ($indices as $indexName) {
             if (!$this->indexExists($indexName)) {
                 continue;
             }
-            
+
             try {
                 $results = $this->search($indexName, $query);
-                
+
                 // Add index name to each result
                 foreach ($results as &$result) {
                     $result['_index'] = $indexName;
                 }
-                
+
                 $allResults = array_merge($allResults, $results);
-                
             } catch (\Exception $e) {
                 // Log error but continue with other indices
                 // In production, you might want to log this error
                 continue;
             }
         }
-        
+
         // Sort merged results by score/rank
-        usort($allResults, function($a, $b) {
+        usort($allResults, function ($a, $b) {
             $scoreA = $a['rank'] ?? $a['_score'] ?? 0;
             $scoreB = $b['rank'] ?? $b['_score'] ?? 0;
             return $scoreB <=> $scoreA; // Descending order
         });
-        
+
         // Apply limit and offset to merged results
         $limit = $query['limit'] ?? 20;
         $offset = $query['offset'] ?? 0;
         $allResults = array_slice($allResults, $offset, $limit);
-        
+
         // Calculate search time
         $searchTime = round((microtime(true) - $searchTime) * 1000, 2);
-        
+
         // Return results in a format similar to single index search
         return [
             'results' => $allResults,
@@ -1416,20 +1475,20 @@ class SqliteStorage implements StorageInterface
             'indices_searched' => array_filter($indices, [$this, 'indexExists'])
         ];
     }
-    
+
     private function ensureConnected(): void
     {
         if ($this->connection === null) {
             throw new StorageException("Not connected to database");
         }
     }
-    
+
     private function hasSpatialIndex(string $index): bool
     {
         if (!$this->connection) {
             return false;
         }
-        
+
         try {
             $stmt = $this->connection->prepare(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
@@ -1440,11 +1499,11 @@ class SqliteStorage implements StorageInterface
             return false;
         }
     }
-    
+
     private function getPreparedStatement(string $sql): \PDOStatement
     {
         $key = md5($sql);
-        
+
         // Check cache first
         if ($this->stmtCache) {
             $stmt = $this->stmtCache->get($key);
@@ -1452,18 +1511,18 @@ class SqliteStorage implements StorageInterface
                 return $stmt;
             }
         }
-        
+
         // Prepare new statement
         $stmt = $this->connection->prepare($sql);
-        
+
         // Cache it
         if ($this->stmtCache) {
             $this->stmtCache->set($key, $stmt);
         }
-        
+
         return $stmt;
     }
-    
+
     private function initializeDatabase(): void
     {
         $sql = "
@@ -1509,7 +1568,9 @@ class SqliteStorage implements StorageInterface
             $stmt = $this->connection->prepare("SELECT doc_id FROM {$index} WHERE id = ?");
             $stmt->execute([$stringId]);
             $val = $stmt->fetchColumn();
-            if ($val === false || $val === null) { return null; }
+            if ($val === false || $val === null) {
+                return null;
+            }
             return (int)$val;
         } catch (\PDOException $e) {
             return null;
@@ -1546,7 +1607,9 @@ class SqliteStorage implements StorageInterface
             $vals = [];
             if ($schema === 'external') {
                 $docId = $this->getDocId($index, $id);
-                if ($docId === null) { continue; }
+                if ($docId === null) {
+                    continue;
+                }
                 $vals[] = $docId;
             } else {
                 $vals[] = $id;
@@ -1588,7 +1651,7 @@ class SqliteStorage implements StorageInterface
         // Check if we're in multi-column mode
         $isMultiColumn = $this->getIndexMeta($index, 'multi_column_fts') === '1';
         $cols = $this->getFtsColumns($index);
-        
+
         // If in single-column mode (['content']), aggregate all fields
         if (!$isMultiColumn && count($cols) === 1 && $cols[0] === 'content' && $field === 'content') {
             return $this->extractSearchableContent($content);
@@ -1597,19 +1660,23 @@ class SqliteStorage implements StorageInterface
         // In multi-column mode, return the specific field value
         if (isset($content[$field])) {
             $v = $content[$field];
-            if (is_string($v)) return $v;
-            if (is_array($v)) return $this->extractSearchableContent($v);
+            if (is_string($v)) {
+                return $v;
+            }
+            if (is_array($v)) {
+                return $this->extractSearchableContent($v);
+            }
             return (string)$v;
         }
-        
+
         // If field doesn't exist in content, return empty string
         return '';
     }
-    
+
     private function extractSearchableContent(array $content): string
     {
         $searchable = [];
-        
+
         foreach ($content as $field => $value) {
             if (is_string($value)) {
                 $searchable[] = $value;
@@ -1617,31 +1684,31 @@ class SqliteStorage implements StorageInterface
                 $searchable[] = $this->extractSearchableContent($value);
             }
         }
-        
+
         return implode(' ', $searchable);
     }
-    
+
     private function indexTerms(string $index, string $documentId, array $content): void
     {
         $deleteStmt = $this->connection->prepare(
             "DELETE FROM {$index}_terms WHERE document_id = ?"
         );
         $deleteStmt->execute([$documentId]);
-        
+
         $insertStmt = $this->connection->prepare("
             INSERT OR REPLACE INTO {$index}_terms 
             (term, document_id, field, frequency, positions)
             VALUES (?, ?, ?, ?, ?)
         ");
-        
+
         foreach ($content as $field => $value) {
             if (!is_string($value)) {
                 continue;
             }
-            
+
             $terms = $this->tokenizeText($value);
             $termFrequencies = array_count_values($terms);
-            
+
             foreach ($termFrequencies as $term => $frequency) {
                 $positions = $this->findTermPositions($value, $term);
                 $insertStmt->execute([
@@ -1654,31 +1721,31 @@ class SqliteStorage implements StorageInterface
             }
         }
     }
-    
+
     private function tokenizeText(string $text): array
     {
         $text = strtolower($text);
         $text = preg_replace('/[^\p{L}\p{N}\s]/u', ' ', $text);
         $tokens = preg_split('/\s+/', $text, -1, PREG_SPLIT_NO_EMPTY);
-        
+
         return array_filter($tokens, function ($token) {
             return strlen($token) > 2;
         });
     }
-    
+
     private function findTermPositions(string $text, string $term): array
     {
         $positions = [];
         $offset = 0;
-        
+
         while (($pos = stripos($text, $term, $offset)) !== false) {
             $positions[] = $pos;
             $offset = $pos + 1;
         }
-        
+
         return $positions;
     }
-    
+
     private function indexSpatialData(string $index, string $id, array $document): void
     {
         // Skip if spatial disabled via config
@@ -1687,7 +1754,7 @@ class SqliteStorage implements StorageInterface
         }
         // Ensure spatial table exists (handles both R-tree and fallback)
         $this->ensureSpatialTableExists($index);
-        
+
         // Fast-path exit: if no geo/bounds, skip any ID computation or deletes
         $hasGeo = isset($document['geo']) || isset($document['geo_bounds']);
         if (!$hasGeo) {
@@ -1698,7 +1765,9 @@ class SqliteStorage implements StorageInterface
         $schema = $this->getSchemaMode($index);
         if ($schema === 'external') {
             $docId = $this->getDocId($index, $id);
-            if ($docId === null) { return; }
+            if ($docId === null) {
+                return;
+            }
             $spatialId = (int)$docId;
         } else {
             // R-tree requires integer IDs, so we create a numeric hash of the string ID
@@ -1708,10 +1777,10 @@ class SqliteStorage implements StorageInterface
         // Delete any existing spatial data for this document
         $deleteStmt = $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?");
         $deleteStmt->execute([$spatialId]);
-        
-        
+
+
         $minLat = $maxLat = $minLng = $maxLng = null;
-        
+
         // Handle point data
         if (isset($document['geo']) && is_array($document['geo'])) {
             $geo = $document['geo'];
@@ -1720,22 +1789,23 @@ class SqliteStorage implements StorageInterface
                 $minLng = $maxLng = (float)$geo['lng'];
             }
         }
-        
+
         // Handle bounds data (overrides point if both present)
         if (isset($document['geo_bounds']) && is_array($document['geo_bounds'])) {
             $bounds = $document['geo_bounds'];
-            if (isset($bounds['north']) && isset($bounds['south']) && 
-                isset($bounds['east']) && isset($bounds['west'])) {
+            if (
+                isset($bounds['north']) && isset($bounds['south']) &&
+                isset($bounds['east']) && isset($bounds['west'])
+            ) {
                 $minLat = (float)$bounds['south'];
                 $maxLat = (float)$bounds['north'];
                 $minLng = (float)$bounds['west'];
                 $maxLng = (float)$bounds['east'];
             }
         }
-        
+
         // Insert into spatial index if we have valid coordinates
         if ($minLat !== null && $maxLat !== null && $minLng !== null && $maxLng !== null) {
-            
             // Store the ID mapping (legacy schema only)
             if ($schema !== 'external') {
                 $mapStmt = $this->connection->prepare("
@@ -1744,7 +1814,7 @@ class SqliteStorage implements StorageInterface
                 ");
                 $mapStmt->execute([$id, $spatialId]);
             }
-            
+
             // Insert spatial data (works for both R-tree and fallback table)
             $spatialStmt = $this->connection->prepare("
                 INSERT OR REPLACE INTO {$index}_spatial (id, minLat, maxLat, minLng, maxLng)
@@ -1753,14 +1823,14 @@ class SqliteStorage implements StorageInterface
             $spatialStmt->execute([$spatialId, $minLat, $maxLat, $minLng, $maxLng]);
         }
     }
-    
+
     private function getNumericId(string $id): int
     {
         // Create a stable numeric ID from string ID using CRC32
         // We use abs() to ensure positive integer for R-tree
         return abs(crc32($id));
     }
-    
+
     private function buildSpatialQuery(string $index, array $geoFilters): array
     {
         $spatialSql = '';
@@ -1768,7 +1838,7 @@ class SqliteStorage implements StorageInterface
         $spatialJoin = '';
         $distanceSelect = '';
         $centroidSelect = '';
-        
+
         // If spatial is disabled entirely, bail out
         if (!$this->isSpatialEnabled($index)) {
             return [ 'join' => '', 'where' => '', 'params' => [], 'select' => '' ];
@@ -1794,7 +1864,14 @@ class SqliteStorage implements StorageInterface
                 $point = is_array($near['point']) ? new GeoPoint($near['point']['lat'], $near['point']['lng']) : $near['point'];
                 $radius = (float)$near['radius'];
                 $units = $geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? null);
-                if (is_string($units)) { $u=strtolower($units); if ($u==='km') $radius*=1000.0; elseif (in_array($u,['mi','mile','miles'])) $radius*=1609.344; }
+                if (is_string($units)) {
+                    $u = strtolower($units);
+                    if ($u === 'km') {
+                        $radius *= 1000.0;
+                    } elseif (in_array($u, ['mi','mile','miles'])) {
+                        $radius *= 1609.344;
+                    }
+                }
                 // Bounding box approximation with lon scaling by cos(lat)
                 $degLat = $radius / 111000.0;
                 $latRad = deg2rad($point->getLatitude());
@@ -1810,7 +1887,10 @@ class SqliteStorage implements StorageInterface
             if (isset($geoFilters['within'])) {
                 $b = $geoFilters['within']['bounds'];
                 $bounds = is_array($b) ? GeoBounds::fromArray($b) : $b;
-                $north=$bounds->getNorth(); $south=$bounds->getSouth(); $east=$bounds->getEast(); $west=$bounds->getWest();
+                $north = $bounds->getNorth();
+                $south = $bounds->getSouth();
+                $east = $bounds->getEast();
+                $west = $bounds->getWest();
                 // Intersection test using stored bbox
                 if ($west > $east) {
                     $where .= " AND ((s.maxLat >= ? AND s.minLat <= ?) AND ((s.minLng <= ? AND s.maxLng >= -180) OR (s.minLng <= 180 AND s.maxLng >= ?)))";
@@ -1823,12 +1903,18 @@ class SqliteStorage implements StorageInterface
 
             if (isset($geoFilters['distance_sort']) && isset($geoFilters['distance_sort']['from'])) {
                 $from = $geoFilters['distance_sort']['from'];
-                if (is_array($from)) { $from = new GeoPoint($from['lat'], $from['lng']); }
+                if (is_array($from)) {
+                    $from = new GeoPoint($from['lat'], $from['lng']);
+                }
                 // Centroid already selected
                 if (isset($geoFilters['max_distance'])) {
                     $maxD = (float)$geoFilters['max_distance'];
                     $u = strtolower($geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? 'm'));
-                    if ($u==='km') $maxD*=1000.0; elseif (in_array($u,['mi','mile','miles'])) $maxD*=1609.344;
+                    if ($u === 'km') {
+                        $maxD *= 1000.0;
+                    } elseif (in_array($u, ['mi','mile','miles'])) {
+                        $maxD *= 1609.344;
+                    }
                     $degLat = $maxD / 111000.0;
                     $latRad = deg2rad($from->getLatitude());
                     $cosLat = max(0.000001, cos($latRad));
@@ -1843,7 +1929,7 @@ class SqliteStorage implements StorageInterface
 
             return [ 'join' => $spatialJoin, 'where' => $where, 'params' => $params, 'select' => $select ];
         }
-        
+
         // Check if we need distance calculation for sorting
         $needsDistance = isset($geoFilters['distance_sort']) && !isset($geoFilters['near']);
         if ($needsDistance && isset($geoFilters['distance_sort']['from'])) {
@@ -1874,13 +1960,17 @@ class SqliteStorage implements StorageInterface
                 $units = $geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? null);
                 if (is_string($units)) {
                     $u = strtolower($units);
-                    if ($u === 'km') $maxD *= 1000.0; elseif ($u === 'mi' || $u === 'mile' || $u==='miles') $maxD *= 1609.344;
+                    if ($u === 'km') {
+                        $maxD *= 1000.0;
+                    } elseif ($u === 'mi' || $u === 'mile' || $u === 'miles') {
+                        $maxD *= 1609.344;
+                    }
                 }
                 $spatialSql .= " AND (" . $this->getDistanceExpression($lat, $lng) . ") <= ?";
                 $spatialParams[] = $maxD;
             }
         }
-        
+
         if (isset($geoFilters['near'])) {
             $near = $geoFilters['near'];
             $point = is_array($near['point']) ? new GeoPoint($near['point']['lat'], $near['point']['lng']) : $near['point'];
@@ -1895,17 +1985,17 @@ class SqliteStorage implements StorageInterface
                     $radius *= 1609.344;
                 }
             }
-            
+
             // Calculate bounding box for initial R-tree filtering
             $bounds = $point->getBoundingBox($radius);
-            
+
             $schema = $this->getSchemaMode($index);
             if ($schema === 'external') {
                 $spatialJoin = " INNER JOIN {$index}_spatial s ON s.id = d.doc_id";
             } else {
                 $spatialJoin = " INNER JOIN {$index}_id_map m ON m.string_id = d.id INNER JOIN {$index}_spatial s ON s.id = m.numeric_id";
             }
-            
+
             // R-tree bounding box filter with dateline handling
             $north = $bounds->getNorth();
             $south = $bounds->getSouth();
@@ -1920,7 +2010,7 @@ class SqliteStorage implements StorageInterface
                 $spatialSql = " AND s.minLat <= ? AND s.maxLat >= ? AND s.minLng <= ? AND s.maxLng >= ?";
                 $spatialParams = [$north, $south, $east, $west];
             }
-            
+
             // Add distance calculation for post-filtering and sorting
             $lat = $point->getLatitude();
             $lng = $point->getLongitude();
@@ -1930,11 +2020,10 @@ class SqliteStorage implements StorageInterface
             // Also filter by radius in SQL
             $spatialSql .= " AND (" . $distanceExpr . ") <= ?";
             $spatialParams[] = (float)$radius; // radius expected in meters
-        }
-        elseif (isset($geoFilters['within'])) {
+        } elseif (isset($geoFilters['within'])) {
             $boundsData = $geoFilters['within']['bounds'];
             $bounds = is_array($boundsData) ? GeoBounds::fromArray($boundsData) : $boundsData;
-            
+
             $schema = $this->getSchemaMode($index);
             if ($schema === 'external') {
                 $spatialJoin = " INNER JOIN {$index}_spatial s ON s.id = d.doc_id";
@@ -1942,7 +2031,7 @@ class SqliteStorage implements StorageInterface
                 $spatialJoin = " INNER JOIN {$index}_id_map m ON m.string_id = d.id INNER JOIN {$index}_spatial s ON s.id = m.numeric_id";
             }
             $centroidSelect = ", ((s.minLat+s.maxLat)/2.0) AS _centroid_lat, ((s.minLng+s.maxLng)/2.0) AS _centroid_lng";
-            
+
             // R-tree intersection query with dateline handling
             $north = $bounds->getNorth();
             $south = $bounds->getSouth();
@@ -1956,7 +2045,7 @@ class SqliteStorage implements StorageInterface
                 $spatialParams = [$north, $south, $east, $west];
             }
         }
-        
+
         return [
             'join' => $spatialJoin,
             'where' => $spatialSql,
@@ -1964,7 +2053,7 @@ class SqliteStorage implements StorageInterface
             'select' => $distanceSelect . $centroidSelect
         ];
     }
-    
+
     private function getNumericIdExpression(string $field): string
     {
         // For SQLite, we need a different approach since we can't reliably compute CRC32 in SQL
@@ -1977,7 +2066,7 @@ class SqliteStorage implements StorageInterface
              unicode(substr({$field}, 4, 1)))
         AS INTEGER)";
     }
-    
+
     private function getDistanceExpression(float $lat, float $lng, bool $useTablePrefix = true): string
     {
         // Prefer accurate Haversine if math functions are available; otherwise fallback to planar approx
@@ -2020,31 +2109,31 @@ class SqliteStorage implements StorageInterface
             $t1 = "(" . $lng . " * (pi()/180.0))";
             $r2 = "(" . $latCol . " * (pi()/180.0))";
             $t2 = "(" . $lngCol . " * (pi()/180.0))";
-            $a  = "(pow(sin((".$r2."-".$r1.")/2.0),2) + cos(".$r1.")*cos(".$r2.")*pow(sin((".$t2."-".$t1.")/2.0),2))";
-            $distanceKm = "(2.0*6371.0*asin(min(1, sqrt(".$a."))))";
-            return "(".$distanceKm." * 1000.0)";
+            $a  = "(pow(sin((" . $r2 . "-" . $r1 . ")/2.0),2) + cos(" . $r1 . ")*cos(" . $r2 . ")*pow(sin((" . $t2 . "-" . $t1 . ")/2.0),2))";
+            $distanceKm = "(2.0*6371.0*asin(min(1, sqrt(" . $a . "))))";
+            return "(" . $distanceKm . " * 1000.0)";
         }
         // Planar fallback
         $degToKm = 111.12;
         return "\n            SQRT(\n                POWER(({$lat} - ({$latCol})) * {$degToKm}, 2) +\n                POWER(({$lng} - ({$lngCol})) * {$degToKm} * COS(({$latCol}) * 0.0174533), 2)\n            ) * 1000.0\n        ";
     }
-    
+
     public function ensureSpatialTableExists(string $name): void
     {
         $this->ensureConnected();
-        
+
         // Skip if R-tree support is not available
         if (!$this->hasRTreeSupport()) {
             return;
         }
-        
+
         try {
             // Check if spatial table exists
             $stmt = $this->connection->prepare(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
             );
             $stmt->execute(["{$name}_spatial"]);
-            
+
             if ($stmt->fetch() === false) {
                 // Create R-tree spatial index if it doesn't exist
                 $spatialSql = "
@@ -2056,7 +2145,7 @@ class SqliteStorage implements StorageInterface
                 ";
                 $this->connection->exec($spatialSql);
             }
-            
+
             // Also ensure ID mapping table exists (legacy mode only)
             if ($this->getSchemaMode($name) !== 'external') {
                 $stmt->execute(["{$name}_id_map"]);
@@ -2075,16 +2164,16 @@ class SqliteStorage implements StorageInterface
             throw new StorageException("Failed to ensure spatial table exists for '{$name}': " . $e->getMessage());
         }
     }
-    
+
     private function hasRTreeSupport(): bool
     {
         if ($this->rtreeSupport !== null) {
             return $this->rtreeSupport;
         }
-        
+
         // Ensure we have a connection
         $this->ensureConnected();
-        
+
         try {
             // Try to create a temporary 2D R-tree table to test support
             // A valid R-tree needs id plus min/max for each dimension (5 columns for 2D)
@@ -2096,13 +2185,13 @@ class SqliteStorage implements StorageInterface
         } catch (\PDOException $e) {
             $this->rtreeSupport = false;
         }
-        
+
         return $this->rtreeSupport;
     }
-    
+
     /**
      * Get all index names from the database
-     * 
+     *
      * @return array Array of index names
      */
     private function getIndexNames(): array
@@ -2119,13 +2208,13 @@ class SqliteStorage implements StorageInterface
             AND name NOT LIKE 'sqlite_%'
             AND name != 'yetisearch_metadata'
         ");
-        
+
         return $stmt->fetchAll(\PDO::FETCH_COLUMN);
     }
-    
+
     /**
      * Get unique indexed terms from the database
-     * 
+     *
      * @param string|null $indexName Specific index to query, or null for all
      * @param int $minFrequency Minimum frequency threshold
      * @param int $limit Maximum number of terms to return
@@ -2134,25 +2223,25 @@ class SqliteStorage implements StorageInterface
     public function getIndexedTerms(?string $indexName = null, int $minFrequency = 2, int $limit = 10000): array
     {
         $this->ensureConnected();
-        
+
         try {
             if ($indexName && !$this->indexExists($indexName)) {
                 return [];
             }
-            
+
             $tables = $indexName ? [$indexName] : $this->getIndexNames();
             $allTerms = [];
-            
+
             foreach ($tables as $table) {
                 $termsTable = "{$table}_terms";
-                
+
                 // Check if terms table exists
                 $stmt = $this->connection->prepare("
                     SELECT name FROM sqlite_master 
                     WHERE type='table' AND name=:table
                 ");
                 $stmt->execute([':table' => $termsTable]);
-                
+
                 if ($stmt->fetch()) {
                     // Use existing terms table (Levenshtein mode)
                     $sql = "
@@ -2163,27 +2252,27 @@ class SqliteStorage implements StorageInterface
                         ORDER BY frequency DESC
                         LIMIT :limit
                     ";
-                    
+
                     $stmt = $this->connection->prepare($sql);
                     $stmt->execute([
                         ':min_freq' => $minFrequency,
                         ':limit' => $limit
                     ]);
-                    
+
                     while ($row = $stmt->fetch(\PDO::FETCH_ASSOC)) {
                         $allTerms[$row['term']] = ($allTerms[$row['term']] ?? 0) + $row['frequency'];
                     }
                 } else {
                     // No terms table - try FTS5 vocabulary for other fuzzy algorithms
                     $vocabTable = "{$table}_fts_vocab";
-                    
+
                     // Check if vocab table exists
                     $stmt = $this->connection->prepare("
                         SELECT name FROM sqlite_master 
                         WHERE type='table' AND name=:table
                     ");
                     $stmt->execute([':table' => $vocabTable]);
-                    
+
                     if (!$stmt->fetch()) {
                         // Create vocab table if it doesn't exist
                         try {
@@ -2193,7 +2282,7 @@ class SqliteStorage implements StorageInterface
                             continue;
                         }
                     }
-                    
+
                     // Query vocab table
                     $sql = "
                         SELECT term, doc as frequency
@@ -2202,27 +2291,26 @@ class SqliteStorage implements StorageInterface
                         ORDER BY doc DESC
                         LIMIT ?
                     ";
-                    
+
                     $stmt = $this->connection->prepare($sql);
                     $stmt->bindValue(1, $minFrequency, \PDO::PARAM_INT);
                     $stmt->bindValue(2, $limit, \PDO::PARAM_INT);
                     $stmt->execute();
-                    
+
                     while ($row = $stmt->fetch(\PDO::FETCH_ASSOC)) {
                         $allTerms[$row['term']] = ($allTerms[$row['term']] ?? 0) + $row['frequency'];
                     }
                 }
             }
-            
+
             // Sort by frequency and return terms with their frequencies
             arsort($allTerms);
             return array_slice($allTerms, 0, $limit, true);
-            
         } catch (\PDOException $e) {
             throw new StorageException("Failed to get indexed terms: " . $e->getMessage());
         }
     }
-    
+
     /**
      * Calculate field-weighted score based on which fields contain the search terms
      */
@@ -2232,40 +2320,40 @@ class SqliteStorage implements StorageInterface
         // Example: ("star wars" OR star OR wars) -> extract both phrase and individual terms
         $searchTerms = [];
         $exactPhrases = [];
-        
+
         // Extract quoted phrases first
         if (preg_match_all('/"([^"]+)"/', $searchQuery, $matches)) {
             foreach ($matches[1] as $phrase) {
                 $exactPhrases[] = strtolower($phrase);
             }
         }
-        
+
         // Clean up query to extract base terms (remove NEAR, OR, parentheses, etc.)
         $cleanQuery = preg_replace('/NEAR\([^)]+\)/', '', $searchQuery);
         $cleanQuery = preg_replace('/["\(\)]/', ' ', $cleanQuery);
         $allTerms = array_map('trim', explode(' ', strtolower($cleanQuery)));
-        
+
         // Filter out operators, wildcards and empty terms
-        $searchTerms = array_filter($allTerms, function($term) {
+        $searchTerms = array_filter($allTerms, function ($term) {
             return $term !== 'or' && $term !== 'and' && !empty($term) && strpos($term, '*') === false;
         });
-        
+
         // Remove duplicates
         $searchTerms = array_unique(array_values($searchTerms));
-        
+
         // If no exact phrases were found but we have multiple terms, check for them as phrase
         if (empty($exactPhrases) && count($searchTerms) > 1) {
             $exactPhrases[] = implode(' ', $searchTerms);
         }
-        
+
         $bestFieldScore = 0.0;
         $fieldScores = [];
-        
+
         // Check each field for search terms
         foreach ($fieldWeights as $field => $weight) {
             // Check both top-level and nested content fields
             $fieldValue = null;
-            
+
             // First check if it's a direct field
             if (isset($content[$field]) && is_string($content[$field])) {
                 $fieldValue = $content[$field];
@@ -2281,19 +2369,19 @@ class SqliteStorage implements StorageInterface
                     $fieldValue = $content['content'][$field];
                 }
             }
-            
+
             if ($fieldValue === null) {
                 continue;
             }
-            
+
             $fieldText = strtolower(trim($fieldValue));
             if (empty($fieldText)) {
                 continue;
             }
-            
+
             $fieldScore = 0.0;
             $matchType = 'none';
-            
+
             // Check for exact full field match (highest priority)
             $cleanFieldText = trim(preg_replace('/[^\w\s]/', '', $fieldText));
             foreach ($exactPhrases as $phrase) {
@@ -2305,7 +2393,7 @@ class SqliteStorage implements StorageInterface
                     break;
                 }
             }
-            
+
             // Check for exact phrase match within field
             if ($matchType === 'none') {
                 foreach ($exactPhrases as $phrase) {
@@ -2313,7 +2401,7 @@ class SqliteStorage implements StorageInterface
                         // Exact phrase found - high boost
                         $fieldScore = 50.0;
                         $matchType = 'exact_phrase';
-                        
+
                         // Additional boost for shorter fields (more relevant)
                         $phraseRatio = strlen($phrase) / strlen($fieldText);
                         if ($phraseRatio > 0.8) {
@@ -2325,12 +2413,12 @@ class SqliteStorage implements StorageInterface
                     }
                 }
             }
-            
+
             // Check for all individual terms present
             if ($matchType === 'none' && !empty($searchTerms)) {
                 $termMatches = 0;
                 $termPositions = [];
-                
+
                 foreach ($searchTerms as $term) {
                     $pos = strpos($fieldText, $term);
                     if ($pos !== false) {
@@ -2338,18 +2426,18 @@ class SqliteStorage implements StorageInterface
                         $termPositions[] = $pos;
                     }
                 }
-                
+
                 if ($termMatches === count($searchTerms)) {
                     // All terms present
                     $fieldScore = 20.0;
                     $matchType = 'all_terms';
-                    
+
                     // Boost if terms are close together (proximity bonus)
                     if (count($termPositions) > 1) {
                         sort($termPositions);
                         $maxGap = 0;
                         for ($i = 1; $i < count($termPositions); $i++) {
-                            $gap = $termPositions[$i] - $termPositions[$i-1];
+                            $gap = $termPositions[$i] - $termPositions[$i - 1];
                             $maxGap = max($maxGap, $gap);
                         }
                         // If all terms within 50 characters, add proximity bonus
@@ -2357,7 +2445,7 @@ class SqliteStorage implements StorageInterface
                             $fieldScore += 10.0 * (1.0 - $maxGap / 50.0);
                         }
                     }
-                    
+
                     // Check if field is just the terms (nothing else)
                     $termsOnly = implode(' ', $searchTerms);
                     if ($cleanFieldText === $termsOnly) {
@@ -2369,33 +2457,33 @@ class SqliteStorage implements StorageInterface
                     $matchType = 'partial_terms';
                 }
             }
-            
+
             // Apply field weight and store
             if ($fieldScore > 0) {
                 // Primary fields (title, h1, name, etc.) get extra weight multiplier
                 $isPrimaryField = in_array($field, ['title', 'h1', 'name', 'label']) || $weight >= 5.0;
                 $primaryMultiplier = $isPrimaryField ? 2.0 : 1.0;
-                
+
                 $weightedScore = $fieldScore * $weight * $primaryMultiplier;
-                
+
                 $fieldScores[$field] = [
                     'score' => $weightedScore,
                     'match_type' => $matchType,
                     'weight' => $weight
                 ];
-                
+
                 if ($weightedScore > $bestFieldScore) {
                     $bestFieldScore = $weightedScore;
                 }
             }
         }
-        
+
         // Calculate final score
         if ($bestFieldScore > 0) {
             // Use exponential scaling for field scores to make differences more pronounced
             // This ensures high-scoring field matches significantly outrank lower ones
             $scaledFieldScore = pow($bestFieldScore / 10.0, 1.5);
-            
+
             // Combine with base BM25 score, but give much more weight to field scores
             // when we have strong field matches
             if ($bestFieldScore >= 100.0) {
@@ -2409,7 +2497,7 @@ class SqliteStorage implements StorageInterface
                 return $baseScore * (1.0 + $scaledFieldScore * 2.0);
             }
         }
-        
+
         // Fallback to base score if no matches in weighted fields
         return $baseScore;
     }

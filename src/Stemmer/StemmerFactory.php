@@ -13,7 +13,7 @@ use YetiSearch\Stemmer\Languages\SpanishStemmer;
 class StemmerFactory
 {
     private static array $stemmers = [];
-    
+
     /**
      * Supported languages and their aliases
      */
@@ -21,23 +21,23 @@ class StemmerFactory
         'english' => 'english',
         'en' => 'english',
         'eng' => 'english',
-        
+
         'french' => 'french',
         'fr' => 'french',
         'fra' => 'french',
         'francais' => 'french',
-        
+
         'german' => 'german',
         'de' => 'german',
         'deu' => 'german',
         'deutsch' => 'german',
-        
+
         'spanish' => 'spanish',
         'es' => 'spanish',
         'spa' => 'spanish',
         'espanol' => 'spanish',
     ];
-    
+
     /**
      * Create or get a stemmer for the specified language
      *
@@ -48,19 +48,19 @@ class StemmerFactory
     public static function create(string $language): StemmerInterface
     {
         $language = strtolower(trim($language));
-        
+
         // Map language alias to canonical name
         if (!isset(self::$languageMap[$language])) {
             throw new \InvalidArgumentException("Unsupported language: $language");
         }
-        
+
         $canonicalLanguage = self::$languageMap[$language];
-        
+
         // Return cached instance if available
         if (isset(self::$stemmers[$canonicalLanguage])) {
             return self::$stemmers[$canonicalLanguage];
         }
-        
+
         // Create new instance
         switch ($canonicalLanguage) {
             case 'english':
@@ -76,10 +76,10 @@ class StemmerFactory
                 self::$stemmers[$canonicalLanguage] = new SpanishStemmer();
                 break;
         }
-        
+
         return self::$stemmers[$canonicalLanguage];
     }
-    
+
     /**
      * Get list of supported languages
      *
@@ -89,7 +89,7 @@ class StemmerFactory
     {
         return array_unique(array_values(self::$languageMap));
     }
-    
+
     /**
      * Check if a language is supported
      *
@@ -100,7 +100,7 @@ class StemmerFactory
     {
         return isset(self::$languageMap[strtolower(trim($language))]);
     }
-    
+
     /**
      * Clear the stemmer cache
      */

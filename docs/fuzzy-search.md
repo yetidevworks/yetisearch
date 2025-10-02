@@ -4,6 +4,19 @@
 
 YetiSearch supports multiple fuzzy search algorithms to provide typo tolerance and improve search accuracy. These algorithms help find matches even when search terms contain spelling errors, character transpositions, or other common mistakes.
 
+### 🆕 Enhanced Fuzzy Search (v2.2+)
+
+YetiSearch 2.2+ includes **enhanced fuzzy search with modern typo correction** that behaves like Google and Elasticsearch:
+
+- **Automatic typo correction** using multi-algorithm consensus scoring
+- **Phonetic matching** for sound-alike typos (fone→phone, thier→their)  
+- **Keyboard proximity analysis** for fat-finger errors (qyick→quick)
+- **Enhanced "Did You Mean?" suggestions** with confidence scores
+
+For detailed information about the enhanced fuzzy search features, see the [Enhanced Fuzzy Search Guide](enhanced-fuzzy-search.md).
+
+The enhanced features are **enabled by default** in v2.2+ and work alongside the traditional fuzzy algorithms described below.
+
 ## Available Fuzzy Algorithms
 
 ### 1. Trigram (Default)
