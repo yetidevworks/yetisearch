@@ -5,6 +5,7 @@ parameters:
     excludePaths:
         - src/Contracts/*
     reportUnmatchedIgnoredErrors: false
+    phpVersion: 70400
     ignoreErrors:
         -
             identifier: missingType.iterableValue

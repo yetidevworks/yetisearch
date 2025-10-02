@@ -240,7 +240,7 @@ class YetiSearch
         ];
     }
 
-    public function indexDocument(string $name, string $id, mixed $content, array $options = []): void
+    public function indexDocument(string $name, string $id, $content, array $options = []): void
     {
         $indexer = $this->getIndex($name) ?? $this->createIndex($name);
 
@@ -272,13 +272,13 @@ class YetiSearch
         $storage->delete($name, $id);
     }
 
-    public function updateDocument(string $name, string $id, mixed $content, array $options = []): void
+    public function updateDocument(string $name, string $id, $content, array $options = []): void
     {
         $this->indexDocument($name, $id, $content, $options);
     }
 
     // Alias for backward compatibility - handles both signatures
-    public function update(string $name, mixed $documentOrId, mixed $content = null, array $options = []): void
+    public function update(string $name, $documentOrId, $content = null, array $options = []): void
     {
         // Handle both old signature (id, content) and new signature (document array)
         if (is_array($documentOrId) && $content === null) {
