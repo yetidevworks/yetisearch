@@ -108,6 +108,23 @@
 - **Field aliasing**: Map user-friendly names to actual database field names
 - **CLI integration**: New commands `search-dsl` and `search-url` for testing DSL queries
 
+#### Advanced Content Field Filtering
+- **Generic content field filtering**: Filter on any field within the document content using `content.fieldname` syntax
+  - Example: `content.version = "v3"` or `content.category = "guides"`
+  - Backward compatible: bare field names (like `version`) automatically map to content fields
+
+- **New `=?` operator**: "Equals OR empty/null" operator for optional taxonomy fields
+  - Matches documents where field equals the value OR where the field is empty/null
+  - Perfect for versioned content where some documents don't have the field set
+  - DSL syntax: `version =? "v3"` (matches version v3 OR unversioned documents)
+  - URL syntax: `filter[version][eqor]=v3`
+  - Works with any content or metadata field, not just `version`
+
+- **Refactored filter processing**: All filter logic consolidated into reusable `buildFilterClause()` method
+  - Cleaner, more maintainable codebase
+  - Consistent operator support across all filter locations
+  - Support for `content.*` fields alongside existing `metadata.*` fields
+
 ### Components Added
 - `src/Cache/QueryCache.php` - Query result caching implementation with SQLite storage
 - `src/Storage/PreparedStatementCache.php` - PDO prepared statement caching for reuse

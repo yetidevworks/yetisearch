@@ -241,6 +241,7 @@ class URLQueryParser
     {
         $operatorMap = [
             'eq' => '=',
+            'eqor' => '=?', // Equals value OR empty/null - useful for optional taxonomy fields
             'neq' => '!=',
             'ne' => '!=',
             'gt' => '>',

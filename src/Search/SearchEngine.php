@@ -98,7 +98,7 @@ class SearchEngine implements SearchEngineInterface
         $originalConfig = $this->config;
         $this->config = array_merge($this->config, $options);
 
-        $cacheKey = $this->getCacheKey($query);
+        $cacheKey = $this->getCacheKey($query, $options);
 
         $this->logger->debug('SearchEngine::search called', [
             'query_text' => $query->getQuery(),
@@ -2004,9 +2004,14 @@ class SearchEngine implements SearchEngineInterface
         return min(1.0, $consensusScore);
     }
 
-    private function getCacheKey(SearchQuery $query): string
+    private function getCacheKey(SearchQuery $query, array $options = []): string
     {
-        return md5(json_encode($query->toArray()));
+        $keyData = $query->toArray();
+        // Include cache-relevant options that affect result shape
+        if (!empty($options['unique_by_route'])) {
+            $keyData['_unique_by_route'] = true;
+        }
+        return md5(json_encode($keyData));
     }
 
     private function isCached(string $key): bool

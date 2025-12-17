@@ -705,12 +705,10 @@ class SqliteStorage implements StorageInterface
                 }
                 // Apply standard filters
                 foreach ($filters as $filter) {
-                    $field = $filter['field'];
-                    $operator = $filter['operator'] ?? '=';
-                    $value = $filter['value'];
-                    if (in_array($field, ['type','language','id','timestamp'])) {
-                        $sql .= " AND d.{$field} {$operator} ?";
-                        $params[] = $value;
+                    [$filterSql, $filterParams] = $this->buildFilterClause($filter);
+                    if ($filterSql !== '') {
+                        $sql .= $filterSql;
+                        $params = array_merge($params, $filterParams);
                     }
                 }
                 $sql .= " ORDER BY distance ASC LIMIT ?";
@@ -816,55 +814,10 @@ class SqliteStorage implements StorageInterface
         }
 
         foreach ($filters as $filter) {
-            $field = $filter['field'];
-            $operator = $filter['operator'] ?? '=';
-            $value = $filter['value'];
-
-            if (in_array($field, ['type', 'language', 'id', 'timestamp'])) {
-                // Direct column filtering
-                $sql .= " AND d.{$field} {$operator} ?";
-                $params[] = $value;
-            } elseif (strpos($field, 'metadata.') === 0) {
-                // Metadata field filtering using JSON extraction
-                $metaField = substr($field, 9); // Remove 'metadata.' prefix
-
-                // Use SQLite's JSON extraction
-                switch ($operator) {
-                    case '=':
-                        $sql .= " AND json_extract(d.metadata, '$.{$metaField}') = ?";
-                        break;
-                    case '!=':
-                        $sql .= " AND json_extract(d.metadata, '$.{$metaField}') != ?";
-                        break;
-                    case '>':
-                        $sql .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) > ?";
-                        break;
-                    case '<':
-                        $sql .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) < ?";
-                        break;
-                    case '>=':
-                        $sql .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) >= ?";
-                        break;
-                    case '<=':
-                        $sql .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) <= ?";
-                        break;
-                    case 'in':
-                        if (is_array($value)) {
-                            $placeholders = implode(',', array_fill(0, count($value), '?'));
-                            $sql .= " AND json_extract(d.metadata, '$.{$metaField}') IN ({$placeholders})";
-                            $params = array_merge($params, $value);
-                            continue 2; // Skip adding single value to params
-                        }
-                        break;
-                    case 'contains':
-                        $sql .= " AND json_extract(d.metadata, '$.{$metaField}') LIKE ?";
-                        $value = '%' . $value . '%';
-                        break;
-                    case 'exists':
-                        $sql .= " AND json_extract(d.metadata, '$.{$metaField}') IS NOT NULL";
-                        continue 2; // No value needed
-                }
-                $params[] = $value;
+            [$filterSql, $filterParams] = $this->buildFilterClause($filter);
+            if ($filterSql !== '') {
+                $sql .= $filterSql;
+                $params = array_merge($params, $filterParams);
             }
         }
 
@@ -1085,52 +1038,10 @@ class SqliteStorage implements StorageInterface
                 $params[] = $language;
             }
             foreach ($filters as $filter) {
-                $field = $filter['field'];
-                $operator = $filter['operator'] ?? '=';
-                $value = $filter['value'];
-                if (in_array($field, ['type','language','id','timestamp'])) {
-                    $inner .= " AND d.{$field} {$operator} ?";
-                    $params[] = $value;
-                } elseif (strpos($field, 'metadata.') === 0) {
-                    $metaField = substr($field, 9);
-                    switch ($operator) {
-                        case '=':
-                            $inner .= " AND json_extract(d.metadata, '$.{$metaField}') = ?";
-                            break;
-                        case '!=':
-                            $inner .= " AND json_extract(d.metadata, '$.{$metaField}') != ?";
-                            break;
-                        case '>':
-                            $inner .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) > ?";
-                            break;
-                        case '<':
-                            $inner .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) < ?";
-                            break;
-                        case '>=':
-                            $inner .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) >= ?";
-                            break;
-                        case '<=':
-                            $inner .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) <= ?";
-                            break;
-                        case 'in':
-                            if (is_array($value)) {
-                                $placeholders = implode(',', array_fill(0, count($value), '?'));
-                                $inner .= " AND json_extract(d.metadata, '$.{$metaField}') IN ({$placeholders})";
-                                $params = array_merge($params, $value);
-                                continue 2;
-                            }
-                            break;
-                        case 'contains':
-                            $inner .= " AND json_extract(d.metadata, '$.{$metaField}') LIKE ?";
-                            $value = '%' . $value . '%';
-                            break;
-                        case 'exists':
-                            $inner .= " AND json_extract(d.metadata, '$.{$metaField}') IS NOT NULL";
-                            $value = null; // will be skipped by continue 2
-                            $params = $params; // no-op to keep style
-                            continue 2;
-                    }
-                    $params[] = $value;
+                [$filterSql, $filterParams] = $this->buildFilterClause($filter);
+                if ($filterSql !== '') {
+                    $inner .= $filterSql;
+                    $params = array_merge($params, $filterParams);
                 }
             }
 
@@ -1163,50 +1074,10 @@ class SqliteStorage implements StorageInterface
                 $params[] = $language;
             }
             foreach ($filters as $filter) {
-                $field = $filter['field'];
-                $operator = $filter['operator'] ?? '=';
-                $value = $filter['value'];
-                if (in_array($field, ['type','language','id','timestamp'])) {
-                    $sql .= " AND d.{$field} {$operator} ?";
-                    $params[] = $value;
-                } elseif (strpos($field, 'metadata.') === 0) {
-                    $metaField = substr($field, 9);
-                    switch ($operator) {
-                        case '=':
-                            $sql .= " AND json_extract(d.metadata, '$.{$metaField}') = ?";
-                            break;
-                        case '!=':
-                            $sql .= " AND json_extract(d.metadata, '$.{$metaField}') != ?";
-                            break;
-                        case '>':
-                            $sql .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) > ?";
-                            break;
-                        case '<':
-                            $sql .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) < ?";
-                            break;
-                        case '>=':
-                            $sql .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) >= ?";
-                            break;
-                        case '<=':
-                            $sql .= " AND CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) <= ?";
-                            break;
-                        case 'in':
-                            if (is_array($value)) {
-                                $placeholders = implode(',', array_fill(0, count($value), '?'));
-                                $sql .= " AND json_extract(d.metadata, '$.{$metaField}') IN ({$placeholders})";
-                                $params = array_merge($params, $value);
-                                continue 2;
-                            }
-                            break;
-                        case 'contains':
-                            $sql .= " AND json_extract(d.metadata, '$.{$metaField}') LIKE ?";
-                            $value = '%' . $value . '%';
-                            break;
-                        case 'exists':
-                            $sql .= " AND json_extract(d.metadata, '$.{$metaField}') IS NOT NULL";
-                            continue 2;
-                    }
-                    $params[] = $value;
+                [$filterSql, $filterParams] = $this->buildFilterClause($filter);
+                if ($filterSql !== '') {
+                    $sql .= $filterSql;
+                    $params = array_merge($params, $filterParams);
                 }
             }
         }
@@ -2500,5 +2371,147 @@ class SqliteStorage implements StorageInterface
 
         // Fallback to base score if no matches in weighted fields
         return $baseScore;
+    }
+
+    /**
+     * Build SQL clause for a single filter.
+     *
+     * Supports filtering on:
+     * - Direct columns: type, language, id, timestamp
+     * - Content fields: content.fieldname or bare fieldname (e.g., version -> content.version)
+     * - Metadata fields: metadata.fieldname
+     *
+     * Special operators:
+     * - '=?' means "equals value OR is empty/null" - useful for optional taxonomy fields
+     *
+     * @param array $filter Filter with 'field', 'value', and optional 'operator'
+     * @return array [sql_string, params_array]
+     */
+    private function buildFilterClause(array $filter): array
+    {
+        $field = $filter['field'];
+        $operator = $filter['operator'] ?? '=';
+        $value = $filter['value'];
+        $sql = '';
+        $params = [];
+
+        // Direct column filtering (type, language, id, timestamp)
+        if (in_array($field, ['type', 'language', 'id', 'timestamp'])) {
+            $sql = " AND d.{$field} {$operator} ?";
+            $params[] = $value;
+            return [$sql, $params];
+        }
+
+        // Content field filtering (content.fieldname)
+        if (strpos($field, 'content.') === 0) {
+            $contentField = substr($field, 8); // Remove 'content.' prefix
+            return $this->buildJsonFilterClause('d.content', $contentField, $operator, $value);
+        }
+
+        // Metadata field filtering (metadata.fieldname)
+        if (strpos($field, 'metadata.') === 0) {
+            $metaField = substr($field, 9); // Remove 'metadata.' prefix
+            return $this->buildJsonFilterClause('d.metadata', $metaField, $operator, $value);
+        }
+
+        // Bare field name that's not a direct column -> treat as content field (backward compat for 'version')
+        return $this->buildJsonFilterClause('d.content', $field, $operator, $value);
+    }
+
+    /**
+     * Build SQL clause for JSON field filtering with various operators.
+     *
+     * @param string $column The JSON column (d.content or d.metadata)
+     * @param string $field The field name within the JSON
+     * @param string $operator The comparison operator
+     * @param mixed $value The value to compare against
+     * @return array [sql_string, params_array]
+     */
+    private function buildJsonFilterClause(string $column, string $field, string $operator, $value): array
+    {
+        $sql = '';
+        $params = [];
+        $jsonPath = "json_extract({$column}, '$.{$field}')";
+
+        switch ($operator) {
+            case '=':
+                $sql = " AND {$jsonPath} = ?";
+                $params[] = $value;
+                break;
+
+            case '=?':
+                // Special operator: equals value OR is empty/null
+                // Useful for optional taxonomy fields where you want to include documents
+                // that don't have the field set at all
+                $sql = " AND ({$jsonPath} = ? OR {$jsonPath} IS NULL OR {$jsonPath} = '')";
+                $params[] = $value;
+                break;
+
+            case '!=':
+                $sql = " AND {$jsonPath} != ?";
+                $params[] = $value;
+                break;
+
+            case '>':
+                $sql = " AND CAST({$jsonPath} AS REAL) > ?";
+                $params[] = $value;
+                break;
+
+            case '<':
+                $sql = " AND CAST({$jsonPath} AS REAL) < ?";
+                $params[] = $value;
+                break;
+
+            case '>=':
+                $sql = " AND CAST({$jsonPath} AS REAL) >= ?";
+                $params[] = $value;
+                break;
+
+            case '<=':
+                $sql = " AND CAST({$jsonPath} AS REAL) <= ?";
+                $params[] = $value;
+                break;
+
+            case 'in':
+                if (is_array($value)) {
+                    $placeholders = implode(',', array_fill(0, count($value), '?'));
+                    $sql = " AND {$jsonPath} IN ({$placeholders})";
+                    $params = $value;
+                }
+                break;
+
+            case 'not in':
+                if (is_array($value)) {
+                    $placeholders = implode(',', array_fill(0, count($value), '?'));
+                    $sql = " AND {$jsonPath} NOT IN ({$placeholders})";
+                    $params = $value;
+                }
+                break;
+
+            case 'like':
+            case 'contains':
+                $sql = " AND {$jsonPath} LIKE ?";
+                $params[] = $operator === 'contains' ? '%' . $value . '%' : $value;
+                break;
+
+            case 'exists':
+                $sql = " AND {$jsonPath} IS NOT NULL";
+                // No params needed
+                break;
+
+            case 'not exists':
+            case 'is null':
+                $sql = " AND {$jsonPath} IS NULL";
+                // No params needed
+                break;
+
+            default:
+                // Allow custom operators to pass through for advanced use cases
+                $sql = " AND {$jsonPath} {$operator} ?";
+                $params[] = $value;
+                break;
+        }
+
+        return [$sql, $params];
     }
 }

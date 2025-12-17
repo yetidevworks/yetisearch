@@ -313,6 +313,7 @@ foreach ($results['results'] as $result) {
 $results = $search->search('products', 'laptop', [
     'filters' => [
         ['field' => 'category', 'value' => 'Electronics', 'operator' => '='],      // Exact match
+        ['field' => 'version', 'value' => 'v3', 'operator' => '=?'],               // Equals OR empty/null (great for optional fields)
         ['field' => 'price', 'value' => 500, 'operator' => '<'],                   // Less than
         ['field' => 'price', 'value' => 100, 'operator' => '>'],                   // Greater than
         ['field' => 'rating', 'value' => 4, 'operator' => '>='],                   // Greater or equal
@@ -321,6 +322,7 @@ $results = $search->search('products', 'laptop', [
         ['field' => 'tags', 'value' => ['laptop', 'gaming'], 'operator' => 'in'],  // In array
         ['field' => 'title', 'value' => 'Pro', 'operator' => 'contains'],          // Contains text
         ['field' => 'metadata.warranty', 'operator' => 'exists'],                  // Field exists
+        ['field' => 'content.version', 'value' => 'v3', 'operator' => '='],        // Filter on content field (explicit)
     ]
 ]);
 
@@ -2032,12 +2034,16 @@ $count = $builder->query('golang')
 
 ### DSL Features
 
-- **Operators**: `=`, `!=`, `>`, `<`, `>=`, `<=`, `LIKE`, `IN`, `NOT IN`
+- **Operators**: `=`, `!=`, `>`, `<`, `>=`, `<=`, `LIKE`, `IN`, `NOT IN`, `=?`
+- **Special `=?` operator**: Matches value OR empty/null - perfect for optional taxonomy fields
+  - DSL: `version =? "v3"` - matches documents with version "v3" OR no version set
+  - URL: `filter[version][eqor]=v3` - same behavior via REST API
 - **Logical**: `AND`, `OR`, grouped conditions with parentheses
 - **Keywords**: `FIELDS`, `SORT`, `PAGE`, `LIMIT`, `OFFSET`, `FUZZY`, `NEAR`, `WITHIN`
 - **Geo Queries**: Support for location-based filtering and sorting
 - **Field Aliases**: Map user-friendly names to actual field names
-- **Metadata Fields**: Automatic handling of filterable/sortable attributes
+- **Content Fields**: Filter on content using `content.fieldname` or bare field names
+- **Metadata Fields**: Automatic handling of filterable/sortable attributes with `metadata.fieldname`
 - **Negation**: Use `-` prefix to negate conditions
 
 ### Metadata Fields

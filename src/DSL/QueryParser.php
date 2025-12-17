@@ -57,7 +57,7 @@ class QueryParser
         $tokens = [];
         $pattern = '/
             (?P<string>"[^"]*"|\'[^\']*\')           | # Quoted strings
-            (?P<operator>=|!=|>=|<=|>|<|LIKE|IN|NOT\s+IN|AND|OR) | # Operators (check before field)
+            (?P<operator>=\?|!=|>=|<=|>|<|=|LIKE|IN|NOT\s+IN|AND|OR) | # Operators (=? before = for precedence)
             (?P<keyword>FIELDS|SORT|PAGE|LIMIT|OFFSET|FUZZY|HIGHLIGHT|NEAR|WITHIN) | # Keywords
             (?P<field>\w+(?:\.\w+)*)                 | # Field names (with dots for nested)
             (?P<bracket>\[|\])                       | # Array brackets
@@ -492,6 +492,11 @@ class QueryParser
 
     private function normalizeOperator(string $operator): string
     {
+        // Handle =? specially (equals OR empty/null)
+        if ($operator === '=?') {
+            return '=?';
+        }
+
         $map = [
             '=' => '=',
             '!=' => '!=',
@@ -512,6 +517,7 @@ class QueryParser
         $map = [
             '=' => '!=',
             '!=' => '=',
+            '=?' => '!=', // Negating =? falls back to regular inequality
             '>' => '<=',
             '<' => '>=',
             '>=' => '<',
