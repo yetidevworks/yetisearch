@@ -1,6 +1,6 @@
 # Changelog
 
-## [2.2.0] - 2025-01-XX
+## [2.1.0] - 2025-12-24
 
 ### New Features
 
@@ -11,19 +11,19 @@
   - LRU (Least Recently Used) eviction when cache size limit is reached
   - Configurable TTL (Time To Live) for cache entries
   - Hit tracking and statistics for monitoring cache effectiveness
-  
+
 - **Performance improvements**: 10-100x faster for cached queries
   - First query: 5-30ms (depending on complexity)
   - Cached query: 0.1-0.5ms
   - No impact on indexing performance
   - Minimal memory overhead (cache stored in SQLite table)
-  
+
 - **Cache management API**:
   - `getCacheStats()` - Get hit rate, total entries, and other metrics
   - `clearCache()` - Manually clear cache for an index
   - `warmUpCache()` - Pre-populate cache with common queries
   - `getCacheInfo()` - Detailed cache entry information
-  
+
 - **Configuration options**:
   ```php
   'cache' => [
@@ -78,7 +78,7 @@
   ]
   ```
 
-- **Performance improvements**: 
+- **Performance improvements**:
   - Consensus scoring with early validation for faster processing
   - Improved frequency weighting for better correction accuracy
   - Cached indexed terms for reduced database queries
@@ -88,23 +88,23 @@
   - Example: `author = "John" AND status IN [published] SORT -created_at LIMIT 10`
   - Supports complex conditions with AND/OR logic, grouped conditions, and negation
   - Keywords: FIELDS, SORT, PAGE, LIMIT, OFFSET, FUZZY, NEAR, WITHIN
-  
+
 - **JSON API-compliant URL parameters**: Parse standard REST API query patterns
   - Filter syntax: `filter[field][operator]=value`
   - Pagination: `page[limit]=10&page[offset]=20` or `page[number]=2&page[size]=10`
   - Sorting: `sort=-created_at,title` with `-` prefix for descending
   - Full compliance with JSON API specification
-  
+
 - **Fluent query builder interface**: Build queries programmatically with chainable methods
   - Methods like `where()`, `whereIn()`, `whereBetween()`, `orderBy()`, `fuzzy()`, etc.
   - Support for geo queries: `nearPoint()`, `withinBounds()`, `sortByDistance()`
   - Get results, first item, or count with `get()`, `first()`, `count()` methods
-  
+
 - **Metadata fields configuration**: Configurable metadata field recognition for DSL
   - Auto-prefixing of recognized metadata fields with 'metadata.' in queries
   - Customizable field lists for third-party applications
   - Support for both content fields and metadata fields in queries
-  
+
 - **Field aliasing**: Map user-friendly names to actual database field names
 - **CLI integration**: New commands `search-dsl` and `search-url` for testing DSL queries
 
@@ -125,44 +125,13 @@
   - Consistent operator support across all filter locations
   - Support for `content.*` fields alongside existing `metadata.*` fields
 
-### Components Added
-- `src/Cache/QueryCache.php` - Query result caching implementation with SQLite storage
-- `src/Storage/PreparedStatementCache.php` - PDO prepared statement caching for reuse
-- `src/DSL/QueryParser.php` - Natural language DSL parser with tokenization and AST building
-- `src/DSL/URLQueryParser.php` - JSON API-compliant URL parameter parser
-- `src/DSL/QueryBuilder.php` - Main DSL interface with three query methods
-- `tests/DSL/QueryParserTest.php` - Comprehensive test coverage for all parsers
-- `tests/PreChunkedDocumentTest.php` - Tests for pre-chunked document indexing
-- `docs/DSL.md` - Complete documentation with examples and migration guide
-- `examples/apartment-search-simple.php` - Comprehensive tutorial demonstrating all YetiSearch features
-- `examples/apartment-search-tutorial.php` - Extended version with custom fields configuration
-- `examples/pre-chunked-indexing.php` - Demonstrates custom document chunking with semantic boundaries
-
-### Bug Fixes
-- **FTS5 external content deletion**: Fixed critical bug where deleting documents with external content tables failed
-  - Now uses FTS5 'rebuild' command to properly sync deletions
-  - Automatically disables multi-column FTS when using external content with JSON storage
-- **DSL filter parsing**: Fixed IN operator being incorrectly parsed as field name
-- **Metadata sorting**: Fixed ORDER BY for metadata fields using proper JSON extraction
-- **insertBatch validation**: Added column name sanitization to prevent SQL errors with invalid field names
-- **Search result structure**: Fixed content field access in search results
-
-### Improvements
-- **Enhanced CLI**: Added examples for DSL usage in help output
-- **Documentation**: Updated README with DSL section and links to example files
-- **Geo search display**: Fixed distance units conversion from meters to miles in examples
-
-## [2.1.0] - 2024-01-04
-
-### Major Improvements
-
 #### Search Result Quality & Consistency
 - **Fixed fuzzy search inconsistency**: Exact matches now consistently rank higher than fuzzy matches
   - Restructured query building to use NEAR queries and parentheses for exact match prioritization
   - Query structure: `(exact_phrase OR NEAR(exact_terms)) OR (fuzzy_terms)`
   - Enhanced fuzzy penalty calculation with graduated penalties based on match quality
   - Added configuration options: `exact_match_boost` (default: 2.0), `exact_terms_boost` (default: 1.5)
-  
+
 #### Field Weighting Effectiveness
 - **Significantly improved field weighting**: Documents with matches in high-weight fields (title, h1) now rank much higher
   - Enhanced `calculateFieldWeightedScore()` with exact match detection
@@ -188,6 +157,21 @@
   - Toggle via `two_pass_search` configuration (default: false for performance)
   - Configuration: `primary_fields` and `primary_field_limit`
 
+### Components Added
+- `src/Cache/QueryCache.php` - Query result caching implementation with SQLite storage
+- `src/Storage/PreparedStatementCache.php` - PDO prepared statement caching for reuse
+- `src/DSL/QueryParser.php` - Natural language DSL parser with tokenization and AST building
+- `src/DSL/URLQueryParser.php` - JSON API-compliant URL parameter parser
+- `src/DSL/QueryBuilder.php` - Main DSL interface with three query methods
+- `src/Search/PhoneticMatcher.php` - Phonetic similarity using Metaphone algorithms
+- `src/Search/KeyboardProximity.php` - QWERTY keyboard layout analysis for typo detection
+- `tests/DSL/QueryParserTest.php` - Comprehensive test coverage for all parsers
+- `tests/PreChunkedDocumentTest.php` - Tests for pre-chunked document indexing
+- `docs/DSL.md` - Complete documentation with examples and migration guide
+- `examples/apartment-search-simple.php` - Comprehensive tutorial demonstrating all YetiSearch features
+- `examples/apartment-search-tutorial.php` - Extended version with custom fields configuration
+- `examples/pre-chunked-indexing.php` - Demonstrates custom document chunking with semantic boundaries
+
 ### Configuration
 - Multi-column FTS now **enabled by default** for new indexes
 - New default search configuration options:
@@ -201,12 +185,30 @@
   'primary_field_limit' => 100
   ```
 
+### Bug Fixes
+- **FTS5 external content deletion**: Fixed critical bug where deleting documents with external content tables failed
+  - Now uses FTS5 'rebuild' command to properly sync deletions
+  - Automatically disables multi-column FTS when using external content with JSON storage
+- **DSL filter parsing**: Fixed IN operator being incorrectly parsed as field name
+- **Metadata sorting**: Fixed ORDER BY for metadata fields using proper JSON extraction
+- **insertBatch validation**: Added column name sanitization to prevent SQL errors with invalid field names
+- **Search result structure**: Fixed content field access in search results
+- **Fuzzy highlighting**: Fixed support for fuzzy term highlighting in search results
+- **Apostrophe handling**: Improved handling of quotes and apostrophes in exact matches
+- **Chunk scoring**: Improved scoring for pages with more matching chunks
+- **PHP 7.4 compatibility**: Removed mixed type hints for broader PHP version support
+
 ### Performance Improvements
 - A/B testing results show multi-column FTS provides best performance:
   - Baseline: 7.09ms average
-  - Multi-column FTS: **6.76ms average** ✨
+  - Multi-column FTS: **6.76ms average**
   - Two-pass search: 16.36ms average (higher precision, lower speed)
   - Combined: 16.86ms average
+
+### Improvements
+- **Enhanced CLI**: Added examples for DSL usage in help output
+- **Documentation**: Updated README with DSL section and links to example files
+- **Geo search display**: Fixed distance units conversion from meters to miles in examples
 
 ### Migration Notes
 - Existing indexes continue to work with single-column mode
@@ -214,6 +216,12 @@
   1. Recreate the index with `multi_column_fts => true`
   2. Re-index your documents
 - No code changes required for basic usage
+
+### Dependencies Updated
+- phpstan/phpstan: 2.1.18 → 2.1.33
+- squizlabs/php_codesniffer: 3.13.2 → 4.0.1
+- actions/checkout: 4 → 6
+- actions/cache: 4 → 5
 
 ## [2.0.0] - 2025-09-01
 
