@@ -1566,8 +1566,6 @@ class SearchEngine implements SearchEngineInterface
                     continue;
                 }
 
-
-
                 // Quick length filter - skip terms that are too different in length
                 $lenDiff = abs(mb_strlen($term) - mb_strlen($indexedTerm));
                 if ($lenDiff > 2) {
@@ -1605,22 +1603,33 @@ class SearchEngine implements SearchEngineInterface
 
                 // Only keep candidates that meet minimum threshold
                 if ($consensusScore >= $correctionThreshold * 0.7) { // Lower threshold for individual algorithms
+                    $candidate['consensus_score'] = $consensusScore;
                     $candidates[] = $candidate;
                 }
             }
 
-            // Sort by final score
+            // Sort by CONSENSUS score first (similarity), then by final_score as tiebreaker
+            // This prevents common words from outranking the correct similar term
             usort($candidates, function ($a, $b) {
+                // Primary: sort by consensus score (similarity)
+                $consensusDiff = $b['consensus_score'] <=> $a['consensus_score'];
+                if ($consensusDiff !== 0) {
+                    return $consensusDiff;
+                }
+                // Secondary: sort by final score (includes frequency)
                 return $b['final_score'] <=> $a['final_score'];
             });
 
-            // Select best candidate
-            if (!empty($candidates)) {
-                $bestCandidate = $candidates[0];
-
+            // Try candidates in order until one passes validation
+            foreach ($candidates as $idx => $candidate) {
                 // Additional validation checks
-                if ($this->validateCorrection($term, $bestCandidate, $termExistsInIndex, $termFrequency)) {
-                    return $bestCandidate['term'];
+                if ($this->validateCorrection($term, $candidate, $termExistsInIndex, $termFrequency)) {
+                    return $candidate['term'];
+                }
+
+                // Only try first 10 candidates to avoid performance issues
+                if ($idx >= 9) {
+                    break;
                 }
             }
         } catch (\Exception $e) {
@@ -1651,6 +1660,7 @@ class SearchEngine implements SearchEngineInterface
         $weightedScore = 0.0;
         $totalWeight = 0.0;
         $validScoreCount = 0;
+        $allAlgorithmsWeight = array_sum($weights); // Total weight of all algorithms
 
         foreach ($scores as $algorithm => $score) {
             // Skip invalid scores
@@ -1665,11 +1675,14 @@ class SearchEngine implements SearchEngineInterface
             }
         }
 
-        // Defensive check against division by zero - no valid scores
-        if ($validScoreCount === 0 || $totalWeight <= 0) {
+        // Require at least 2 algorithms to have positive scores for a valid correction
+        // This prevents a single algorithm (like phonetic) from dominating the consensus
+        if ($validScoreCount < 2 || $totalWeight <= 0) {
             return 0.0;
         }
 
+        // Use the weight of algorithms that matched, not all algorithms
+        // This ensures proper normalization
         $consensusScore = $weightedScore / $totalWeight;
 
         // Bonus for multiple algorithms agreeing
