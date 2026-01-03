@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.1.1] - 2026-01-03
+
+### Bug Fixes
+- **Fuzzy penalty calculation with external content**: Fixed `calculateFuzzyPenalty()` not extracting document content when using `external_content => true` storage mode. The method now properly reads content from `$result['document']` for external content schemas, ensuring fuzzy matches are correctly penalized based on actual document content.
+- **Valid term over-correction**: Fixed `findBestCorrection()` incorrectly "correcting" valid terms that exist in the index. Previously, valid terms with low frequency (< 3) could be incorrectly replaced with similar higher-frequency terms. Now any term that exists in the index is preserved, preventing proper nouns and domain-specific terms from being changed.
+
+### Tests Added
+- **Comprehensive fuzzy search test suite**: Added `tests/Integration/Fuzzy/MoviesFuzzySearchTest.php` with 32 tests covering:
+  - Exact match baseline verification
+  - Longer word typo handling (transpositions, keyboard errors, common misspellings)
+  - Double/missing letter typos
+  - Multi-word search scenarios
+  - Prefix suggestions with various lengths
+  - Ranking verification (exact matches rank first)
+  - Performance benchmarks for fuzzy search and suggestions
+  - Edge cases (empty queries, special characters, case insensitivity, numbers)
+  - Genre search with and without typos
+  - Algorithm comparison tests (trigram vs jaro-winkler)
+
 ## [2.1.0] - 2025-12-24
 
 ### New Features

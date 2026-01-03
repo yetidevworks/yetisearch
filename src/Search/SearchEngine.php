@@ -840,12 +840,22 @@ class SearchEngine implements SearchEngineInterface
         // Try to determine which terms matched in this result
         // This is a simplified approach - ideally we'd parse the FTS match info
         $documentText = '';
-        // Extract content fields for scoring
-        $contentFields = array_diff_key($result, array_flip(['id', 'score', 'metadata', 'language', 'type', 'timestamp', 'distance']));
-        if (!empty($contentFields)) {
-            foreach ($contentFields as $field => $value) {
+
+        // Handle external_content mode where content is nested under 'document' key
+        if (isset($result['document']) && is_array($result['document'])) {
+            foreach ($result['document'] as $field => $value) {
                 if (is_string($value)) {
                     $documentText .= ' ' . strtolower($value);
+                }
+            }
+        } else {
+            // Legacy mode: extract content fields directly from result
+            $contentFields = array_diff_key($result, array_flip(['id', 'score', 'metadata', 'language', 'type', 'timestamp', 'distance', 'highlights']));
+            if (!empty($contentFields)) {
+                foreach ($contentFields as $field => $value) {
+                    if (is_string($value)) {
+                        $documentText .= ' ' . strtolower($value);
+                    }
                 }
             }
         }
@@ -1554,8 +1564,9 @@ class SearchEngine implements SearchEngineInterface
                 }
             }
 
-            // If term exists and is reasonably common, don't correct it
-            if ($termExistsInIndex && $termFrequency >= 3) {
+            // If term exists in the index at all, don't correct it - user typed a valid term
+            // This prevents "correcting" proper nouns or domain-specific terms to similar common words
+            if ($termExistsInIndex) {
                 return $term;
             }
 

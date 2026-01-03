@@ -2188,7 +2188,7 @@ class SqliteStorage implements StorageInterface
     private function calculateFieldWeightedScore(string $searchQuery, array $content, array $fieldWeights, float $baseScore): float
     {
         // Handle complex queries with phrases and OR operators
-        // Example: ("star wars" OR star OR wars) -> extract both phrase and individual terms
+        // Example: ("hello world" OR hello OR world) -> extract both phrase and individual terms
         $searchTerms = [];
         $exactPhrases = [];
 
