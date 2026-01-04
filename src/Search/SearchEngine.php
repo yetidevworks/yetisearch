@@ -405,6 +405,11 @@ class SearchEngine implements SearchEngineInterface
         // Check if we should use correction mode (new approach) or expansion mode (old approach)
         $useCorrectionMode = $this->config['fuzzy_correction_mode'] ?? true;
 
+        // Try merging adjacent tokens if enabled (e.g., "robo cop" -> "robocop")
+        if ($query->isFuzzy() && $this->config['enable_fuzzy'] && ($this->config['enable_word_merge'] ?? true)) {
+            $tokens = $this->tryMergeTokens($tokens);
+        }
+
         $processedTokens = [];
         $correctedTokens = [];
         $tokenCount = count($tokens);
@@ -1512,12 +1517,179 @@ class SearchEngine implements SearchEngineInterface
     }
 
     /**
+     * Try to merge adjacent tokens if the merged form exists in the index
+     * E.g., ["robo", "cop"] -> ["robocop"] if "robocop" is indexed
+     */
+    private function tryMergeTokens(array $tokens): array
+    {
+        if (count($tokens) < 2) {
+            return $tokens;
+        }
+
+        // Load indexed terms
+        $cacheTimeout = $this->config['indexed_terms_cache_ttl'] ?? 300;
+        $now = time();
+
+        if ($this->indexedTermsCache === null || ($now - $this->indexedTermsCacheTime) > $cacheTimeout) {
+            $minFrequency = $this->config['min_term_frequency'] ?? 2;
+            $termLimit = $this->config['max_indexed_terms'] ?? 20000;
+            $this->indexedTermsCache = $this->storage->getIndexedTerms($this->indexName, $minFrequency, $termLimit);
+            $this->indexedTermsCacheTime = $now;
+        }
+
+        $indexedTerms = $this->indexedTermsCache;
+
+        // Build lowercase lookup
+        $indexedLower = [];
+        foreach ($indexedTerms as $t => $freq) {
+            $indexedLower[strtolower($t)] = $freq;
+        }
+
+        $result = [];
+        $i = 0;
+
+        while ($i < count($tokens)) {
+            // Try merging current token with next token
+            if ($i < count($tokens) - 1) {
+                $merged = strtolower($tokens[$i]) . strtolower($tokens[$i + 1]);
+                if (isset($indexedLower[$merged])) {
+                    $this->logger->debug('Merged adjacent tokens', [
+                        'token1' => $tokens[$i],
+                        'token2' => $tokens[$i + 1],
+                        'merged' => $merged
+                    ]);
+                    $result[] = $merged;
+                    $this->fuzzyTermMap[strtolower($merged)] = [
+                        'type' => 'merge',
+                        'original' => $tokens[$i] . ' ' . $tokens[$i + 1]
+                    ];
+                    $i += 2; // Skip both tokens
+                    continue;
+                }
+            }
+
+            $result[] = $tokens[$i];
+            $i++;
+        }
+
+        return $result;
+    }
+
+    /**
+     * Find a quick fuzzy match with similarity score
+     * Returns both the match and its trigram similarity for comparison with compound split
+     */
+    private function findQuickFuzzyMatchWithScore(string $term, array $indexedTerms): ?array
+    {
+        $termLower = strtolower($term);
+        $termLen = mb_strlen($termLower);
+
+        // Only check for similar-length terms (within 1 character difference)
+        $bestMatch = null;
+        $bestScore = 0;
+        $bestSimilarity = 0;
+
+        foreach ($indexedTerms as $indexedTerm => $frequency) {
+            $indexedLower = strtolower($indexedTerm);
+            $indexedLen = mb_strlen($indexedLower);
+
+            // Only check terms within 1 character of same length
+            if (abs($indexedLen - $termLen) > 1) {
+                continue;
+            }
+
+            // Calculate edit distance (Levenshtein)
+            $editDist = Levenshtein::distance($termLower, $indexedLower);
+
+            // Only consider matches with edit distance <= 1 (single character difference)
+            if ($editDist > 1) {
+                continue;
+            }
+
+            // Calculate trigram similarity for scoring
+            $similarity = Trigram::similarity($termLower, $indexedLower);
+
+            // Require minimum similarity of 0.4 for single-edit matches
+            if ($similarity >= 0.4) {
+                // Calculate a combined score with frequency weighting
+                $score = $similarity * (1 + log(1 + $frequency) / 10);
+                if ($score > $bestScore) {
+                    $bestScore = $score;
+                    $bestMatch = $indexedTerm;
+                    $bestSimilarity = $similarity;
+                }
+            }
+        }
+
+        if ($bestMatch !== null) {
+            return [
+                'term' => $bestMatch,
+                'similarity' => $bestSimilarity,
+                'score' => $bestScore
+            ];
+        }
+
+        return null;
+    }
+
+    /**
+     * Try to split a compound word into valid indexed terms
+     * Returns the split version if found, null otherwise
+     */
+    private function tryCompoundWordSplit(string $term, array $indexedTerms): ?string
+    {
+        $termLower = strtolower($term);
+        $termLen = mb_strlen($termLower);
+
+        // Only try splits for words of reasonable length
+        if ($termLen < 6 || $termLen > 20) {
+            return null;
+        }
+
+        // Build a set of lowercase indexed terms for quick lookup
+        $indexedLower = [];
+        foreach ($indexedTerms as $t => $freq) {
+            $indexedLower[strtolower($t)] = $freq;
+        }
+
+        // Try splitting at each position
+        $bestSplit = null;
+        $bestScore = 0;
+        $minPartLength = 3;
+        $minPartFrequency = 5; // Require both parts to have reasonable frequency
+
+        for ($i = $minPartLength; $i <= $termLen - $minPartLength; $i++) {
+            $part1 = mb_substr($termLower, 0, $i);
+            $part2 = mb_substr($termLower, $i);
+
+            // Check if both parts exist in index with sufficient frequency
+            $freq1 = $indexedLower[$part1] ?? 0;
+            $freq2 = $indexedLower[$part2] ?? 0;
+
+            // Skip if either part is too rare (likely false positive)
+            if ($freq1 < $minPartFrequency || $freq2 < $minPartFrequency) {
+                continue;
+            }
+
+            // Both parts are valid terms - prefer higher combined frequency
+            $score = log($freq1 + 1) + log($freq2 + 1);
+            if ($score > $bestScore) {
+                $bestScore = $score;
+                $bestSplit = $part1 . ' ' . $part2;
+            }
+        }
+
+        return $bestSplit;
+    }
+
+    /**
      * Find the single best correction for a potentially misspelled term
      * Uses multi-algorithm consensus for improved accuracy
      * Returns the original term if no good correction is found
      */
     private function findBestCorrection(string $term): string
     {
+
         // Skip short terms or if fuzzy is disabled
         if (mb_strlen($term) <= 3 || !$this->config['enable_fuzzy']) {
             return $term;
@@ -1526,10 +1698,6 @@ class SearchEngine implements SearchEngineInterface
         // Quick check for common phonetic typos first
         $quickPhonetic = PhoneticMatcher::quickPhoneticCorrection($term);
         if ($quickPhonetic !== null) {
-            $this->logger->debug('Quick phonetic correction applied', [
-                'original' => $term,
-                'correction' => $quickPhonetic
-            ]);
             return $quickPhonetic;
         }
 
@@ -1542,7 +1710,6 @@ class SearchEngine implements SearchEngineInterface
             $now = time();
 
             if ($this->indexedTermsCache === null || ($now - $this->indexedTermsCacheTime) > $cacheTimeout) {
-                $this->logger->debug('Loading indexed terms for typo correction');
                 $termLimit = $this->config['max_indexed_terms'] ?? 20000;
                 $this->indexedTermsCache = $this->storage->getIndexedTerms($this->indexName, $minFrequency, $termLimit);
                 $this->indexedTermsCacheTime = $now;
@@ -1568,6 +1735,94 @@ class SearchEngine implements SearchEngineInterface
             // This prevents "correcting" proper nouns or domain-specific terms to similar common words
             if ($termExistsInIndex) {
                 return $term;
+            }
+
+            // Try prefix matching FIRST - if the term is a clear prefix of an indexed word
+            if (($this->config['enable_prefix_matching'] ?? true) && mb_strlen($term) >= 4) {
+                $prefixMatch = $this->findBestPrefixMatch($term, $indexedTerms);
+                if ($prefixMatch !== null) {
+                    return $prefixMatch;
+                }
+            }
+
+            // Try BOTH quick fuzzy match AND compound split, then compare scores
+            // This allows choosing the best interpretation:
+            // - "batmen" → "batman" (fuzzy wins: similar trigrams, typo correction)
+            // - "madmax" → "mad max" (compound wins: exact split into valid words)
+            $quickFuzzyMatch = $this->findQuickFuzzyMatchWithScore($term, $indexedTerms);
+            $compoundSplit = null;
+
+            if ($this->config['enable_compound_word_split'] ?? true) {
+                $compoundSplit = $this->tryCompoundWordSplit($term, $indexedTerms);
+            }
+
+            // If we have both candidates, use frequency analysis to decide
+            if ($quickFuzzyMatch !== null && $compoundSplit !== null) {
+                $fuzzyMatch = $quickFuzzyMatch['term'];
+
+                // Get frequency of fuzzy match
+                $fuzzyFreq = 0;
+                foreach ($indexedTerms as $t => $freq) {
+                    if (strtolower($t) === strtolower($fuzzyMatch)) {
+                        $fuzzyFreq = (int)$freq;
+                        break;
+                    }
+                }
+
+                // Get frequencies of compound split parts
+                $parts = explode(' ', $compoundSplit);
+                $indexedLower = [];
+                foreach ($indexedTerms as $t => $freq) {
+                    $indexedLower[strtolower($t)] = (int)$freq;
+                }
+                $partFreqs = [];
+                foreach ($parts as $part) {
+                    $partFreqs[] = $indexedLower[strtolower($part)] ?? 0;
+                }
+                $minPartFreq = min($partFreqs);
+                $maxPartFreq = max($partFreqs);
+
+                // Check if compound split is "balanced" - both parts have similar frequencies
+                // Unbalanced splits like "scare face" (35 vs 694) suggest false positive
+                // Balanced splits like "mad max" (130 vs 161) are likely real compounds
+                $freqRatio = ($maxPartFreq > 0) ? $minPartFreq / $maxPartFreq : 0;
+                $isBalancedCompound = $freqRatio >= 0.15; // At least 15% ratio
+
+                // Check if this is a pure substitution with high similarity
+                // Pure substitutions like "supermen" → "superman" (sim=0.538) should prefer fuzzy
+                // But "madmax" → "madman" (sim=0.455) should allow compound "mad max"
+                $fuzzySimilarity = $quickFuzzyMatch['similarity'];
+                $isHighSimilaritySubstitution =
+                    mb_strlen($term) === mb_strlen($fuzzyMatch) && $fuzzySimilarity >= 0.5;
+
+                // Key insights:
+                // 1. If fuzzy match is MORE common than the rarest compound part,
+                //    it's likely the correct single term (typo correction)
+                //    e.g., "batmen" → "batman" (55) > "bat" (24)
+                // 2. If high-similarity same-length substitution, prefer fuzzy
+                //    e.g., "supermen" → "superman" (sim=0.538) over "super men"
+                //    but NOT "madmax" → "madman" (sim=0.455), allow "mad max"
+                // 3. If compound is unbalanced (one very common word like "face", "men"),
+                //    prefer fuzzy match as the compound is likely spurious
+                //    e.g., "scareface" → "scarface" vs "scare face" (35 vs 694)
+                // 4. If compound is balanced AND fuzzy match is less common,
+                //    prefer compound split (words run together)
+                //    e.g., "madmax" → "mad max" (130 vs 161)
+                if ($fuzzyFreq > $minPartFreq) {
+                    return $fuzzyMatch;
+                } elseif ($isHighSimilaritySubstitution && $fuzzyFreq > 0) {
+                    // High similarity substitution with valid fuzzy = prefer fuzzy
+                    return $fuzzyMatch;
+                } elseif (!$isBalancedCompound && $fuzzyFreq > 0) {
+                    // Unbalanced compound with a valid fuzzy match - prefer fuzzy
+                    return $fuzzyMatch;
+                } else {
+                    return $compoundSplit;
+                }
+            } elseif ($quickFuzzyMatch !== null) {
+                return $quickFuzzyMatch['term'];
+            } elseif ($compoundSplit !== null) {
+                return $compoundSplit;
             }
 
             // Generate candidates using multiple algorithms
@@ -1619,6 +1874,7 @@ class SearchEngine implements SearchEngineInterface
                 }
             }
 
+
             // Sort by CONSENSUS score first (similarity), then by final_score as tiebreaker
             // This prevents common words from outranking the correct similar term
             usort($candidates, function ($a, $b) {
@@ -1652,6 +1908,68 @@ class SearchEngine implements SearchEngineInterface
 
         // No good correction found, return original
         return $term;
+    }
+
+    /**
+     * Find the best prefix match for a term
+     * Returns a term that starts with the input if found
+     */
+    private function findBestPrefixMatch(string $term, array $indexedTerms): ?string
+    {
+        $termLower = strtolower($term);
+        $termLen = mb_strlen($termLower);
+        $inputIsCapitalized = $term !== $termLower && ctype_upper(mb_substr($term, 0, 1));
+
+        // Only match prefixes for terms of reasonable length
+        if ($termLen < 4 || $termLen > 10) {
+            return null;
+        }
+
+        $matches = [];
+
+        foreach ($indexedTerms as $indexedTerm => $frequency) {
+            $indexedLower = strtolower($indexedTerm);
+            $indexedLen = mb_strlen($indexedLower);
+
+            // Check if the indexed term starts with our query
+            if ($indexedLen > $termLen && str_starts_with($indexedLower, $termLower)) {
+                // Prefer matches that are not too much longer (1-5 chars more)
+                $extraLen = $indexedLen - $termLen;
+                if ($extraLen <= 5) {
+                    // Check if indexed term looks like a proper noun (capitalized)
+                    $isProperNoun = ctype_upper(mb_substr($indexedTerm, 0, 1));
+
+                    $matches[] = [
+                        'term' => $indexedTerm,
+                        'frequency' => (int)$frequency,
+                        'extra_len' => $extraLen,
+                        'is_proper_noun' => $isProperNoun
+                    ];
+                }
+            }
+        }
+
+        if (empty($matches)) {
+            return null;
+        }
+
+        // Language-agnostic sorting with frequency consideration
+        // If a longer match has significantly higher frequency, prefer it
+        usort($matches, function ($a, $b) {
+            // Calculate a score that considers both length and frequency
+            // Prefer shorter extensions unless longer one has much higher frequency
+            $aScore = $a['frequency'] / (1.0 + $a['extra_len'] * 0.5);
+            $bScore = $b['frequency'] / (1.0 + $b['extra_len'] * 0.5);
+
+            // If scores are close, prefer shorter extension
+            if (abs($aScore - $bScore) < max($aScore, $bScore) * 0.3) {
+                return $a['extra_len'] <=> $b['extra_len'];
+            }
+
+            return $bScore <=> $aScore;
+        });
+
+        return $matches[0]['term'];
     }
 
     /**
