@@ -2,356 +2,374 @@
 /**
  * YetiSearch Benchmark Script
  *
- * This script benchmarks the YetiSearch library by indexing a dataset of movies
- * and performing search queries with and without fuzzy matching.
+ * Validates performance and correctness of YetiSearch across indexing and search operations.
+ * Results are saved as JSON for historical comparison.
  *
  * Usage:
- * php benchmark.php [--skip-indexing] [--external=0|1] [--multi-column=0|1] [--prefix=2,3] [--spatial=0|1] [--fts-detail=full|column|none]
- *
- * Options:
- * --skip-indexing: Skip the indexing step and only run searches on existing data.
+ *   php benchmark.php                 # Full benchmark (index + search)
+ *   php benchmark.php --skip-indexing # Search only (use existing index)
+ *   php benchmark.php --save          # Save results to baseline
+ *   php benchmark.php --compare       # Compare against saved baseline
  */
 
-// Use the existing vendor autoloader
 require_once __DIR__ . '/../vendor/autoload.php';
 
 use YetiSearch\YetiSearch;
 
-// Check command line arguments
+// ============================================================================
+// Configuration
+// ============================================================================
+
+const INDEX_NAME = 'benchmark_movies';
+const MOVIES_FILE = __DIR__ . '/movies.json';
+const DB_FILE = __DIR__ . '/benchmark.db';
+const BASELINE_FILE = __DIR__ . '/baseline.json';
+const BATCH_SIZE = 250;
+
+// ============================================================================
+// CLI Arguments
+// ============================================================================
+
 $skipIndexing = in_array('--skip-indexing', $argv);
-$external = null; $multiCol = null; $prefixArg = null; $spatial = null; $ftsDetail = null;
-foreach ($argv as $a) {
-    if (strpos($a, '--external=') === 0) {
-        $external = (int)substr($a, strlen('--external=')) === 1;
-    } elseif (strpos($a, '--multi-column=') === 0) {
-        $multiCol = (int)substr($a, strlen('--multi-column=')) === 1;
-    } elseif (strpos($a, '--prefix=') === 0) {
-        $prefixArg = substr($a, strlen('--prefix='));
-    } elseif (strpos($a, '--spatial=') === 0) {
-        $spatial = (int)substr($a, strlen('--spatial=')) === 1;
-    } elseif (strpos($a, '--fts-detail=') === 0) {
-        $ftsDetail = substr($a, strlen('--fts-detail='));
-    }
+$saveBaseline = in_array('--save', $argv);
+$compareBaseline = in_array('--compare', $argv);
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+function formatTime(float $ms): string {
+    return $ms < 1 ? sprintf('%.2fms', $ms) : sprintf('%.1fms', $ms);
 }
 
-// Start timing
-$startTime = microtime(true);
-$startMemory = memory_get_usage();
-$fuzzy_algorithm = 'trigram'; // basic | jaro_winkler | trigram | levenshtein
-
-echo "YetiSearch Benchmark Test\n";
-echo "========================\n";
-echo "Using $fuzzy_algorithm fuzzy search algorithm\n\n";
-
-if (!$skipIndexing) {
-    // Load the movies data
-    $jsonFile = __DIR__ . '/movies.json';
-    
-    // Download movies.json if it doesn't exist
-    if (!file_exists($jsonFile)) {
-        echo "movies.json not found. Downloading from MeiliSearch...\n";
-        $downloadStart = microtime(true);
-        
-        $movieData = @file_get_contents('https://www.meilisearch.com/movies.json');
-        if ($movieData === false) {
-            die("Error: Failed to download movies.json from https://www.meilisearch.com/movies.json\n");
-        }
-        
-        if (@file_put_contents($jsonFile, $movieData) === false) {
-            die("Error: Failed to save movies.json to $jsonFile\n");
-        }
-        
-        $downloadTime = microtime(true) - $downloadStart;
-        $fileSize = filesize($jsonFile) / 1024 / 1024; // Convert to MB
-        echo "Downloaded " . number_format($fileSize, 2) . " MB in " . number_format($downloadTime, 2) . " seconds\n\n";
-    }
-    
-    echo "Loading movies.json... ";
-    $jsonContent = file_get_contents($jsonFile);
-    $movies = json_decode($jsonContent, true);
-    
-    if ($movies === null) {
-        die("Error: Failed to parse movies.json\n");
-    }
-    
-    $loadTime = microtime(true) - $startTime;
-    echo "Done! (" . count($movies) . " movies loaded in " . number_format($loadTime, 4) . " seconds)\n\n";
+function formatRate(float $rate): string {
+    return number_format($rate, 0) . '/sec';
 }
+
+function formatMemory(int $bytes): string {
+    return number_format($bytes / 1024 / 1024, 1) . 'MB';
+}
+
+function printHeader(string $title): void {
+    echo "\n" . str_repeat('=', 60) . "\n";
+    echo " $title\n";
+    echo str_repeat('=', 60) . "\n\n";
+}
+
+function printResult(string $label, string $value, string $status = ''): void {
+    $statusIcon = match($status) {
+        'pass' => "\033[32m✓\033[0m",
+        'fail' => "\033[31m✗\033[0m",
+        'warn' => "\033[33m!\033[0m",
+        default => ' '
+    };
+    printf("  %s %-35s %s\n", $statusIcon, $label . ':', $value);
+}
+
+function downloadMovies(): void {
+    if (file_exists(MOVIES_FILE)) {
+        return;
+    }
+
+    echo "Downloading movies.json... ";
+    $start = microtime(true);
+
+    $data = @file_get_contents('https://www.meilisearch.com/movies.json');
+    if ($data === false) {
+        die("Failed to download movies.json\n");
+    }
+
+    file_put_contents(MOVIES_FILE, $data);
+    $elapsed = (microtime(true) - $start) * 1000;
+    $size = filesize(MOVIES_FILE) / 1024 / 1024;
+    echo sprintf("Done (%.1fMB in %.0fms)\n", $size, $elapsed);
+}
+
+// ============================================================================
+// Main Benchmark
+// ============================================================================
+
+echo "\n  YetiSearch Benchmark\n";
+echo "  ====================\n";
+echo "  PHP " . PHP_VERSION . " | SQLite " . \SQLite3::version()['versionString'] . "\n";
+
+$results = [
+    'timestamp' => date('c'),
+    'php_version' => PHP_VERSION,
+    'sqlite_version' => \SQLite3::version()['versionString'],
+    'indexing' => null,
+    'search' => [],
+    'fuzzy' => [],
+    'summary' => []
+];
+
+// Download movies if needed
+downloadMovies();
 
 // Initialize YetiSearch
-echo "Initializing YetiSearch... ";
-$indexStartTime = microtime(true);
-$config = [
-    'storage' => [
-        'path' => __DIR__ . '/benchmark.db'
-    ],
-    'analyzer' => [
-        'min_word_length' => 2,
-        'strip_html' => true,
-        'remove_stop_words' => true
-    ],
+$search = new YetiSearch([
+    'storage' => ['path' => DB_FILE, 'external_content' => true],
     'indexer' => [
+        'batch_size' => BATCH_SIZE,
         'fields' => [
-            'title' => ['boost' => 3.0, 'store' => true],
-            'overview' => ['boost' => 1.0, 'store' => true],  // Add overview field
+            'title' => ['boost' => 5.0, 'store' => true],
+            'overview' => ['boost' => 1.0, 'store' => true],
             'genres' => ['boost' => 2.0, 'store' => true]
-        ],
-        'fts' => [
-            'multi_column' => true,
-            'prefix' => [2,3]
         ]
     ],
     'search' => [
         'enable_fuzzy' => true,
-        'fuzzy_algorithm' => $fuzzy_algorithm,    // Use Jaro-Winkler for better name/title matching
-        'jaro_winkler_threshold' => 0.92,       // Very high threshold to reduce false matches
-        'jaro_winkler_prefix_scale' => 0.1,     // Standard prefix bonus weight
-        'min_term_frequency' => 2,              // Include moderately common terms
-        'max_indexed_terms' => 10000,           // Balance between performance and coverage
-        'max_fuzzy_variations' => 5,            // Limit variations for performance
-        'fuzzy_score_penalty' => 0.3,           // Moderate penalty since we now prioritize exact matches in query
-        'indexed_terms_cache_ttl' => 300,       // Cache indexed terms for 5 minutes
-        'fuzzy_last_token_only' => true,
-        'prefix_last_token' => true
+        'fuzzy_algorithm' => 'trigram',
+        'trigram_threshold' => 0.3,
+        'cache_ttl' => 0
     ]
-    // Note: Jaro-Winkler is 2.5x faster than Levenshtein and better for names/titles
-];
-$search = new YetiSearch($config);
+]);
 
-// Allow overriding schema mode from CLI
-if ($external !== null) { $config['storage']['external_content'] = $external; }
-// Recreate with explicit storage/storage extras if provided
-if ($external !== null) { $search = new YetiSearch($config); }
-echo "Done!\n";
+// ============================================================================
+// Indexing Benchmark
+// ============================================================================
 
 if (!$skipIndexing) {
-    // Create index for movies (will use existing if available)
-    $createOptions = [
-        'fts' => [
-            'multi_column' => ($multiCol ?? true),
-        ],
-    ];
-    if ($prefixArg !== null) {
-        $createOptions['fts']['prefix'] = ($prefixArg === '' ? [] : array_map('intval', explode(',', $prefixArg)));
-    }
-    if ($spatial !== null) { $createOptions['enable_spatial'] = $spatial; }
-    if ($ftsDetail !== null) { $createOptions['fts']['detail'] = $ftsDetail; }
-    $indexer = $search->createIndex('movies', $createOptions);
-    
-    // Clear existing index data
-    echo "Clearing existing index... ";
+    printHeader('Indexing Benchmark');
+
+    // Load movies
+    echo "  Loading movies.json... ";
+    $loadStart = microtime(true);
+    $movies = json_decode(file_get_contents(MOVIES_FILE), true);
+    $loadTime = (microtime(true) - $loadStart) * 1000;
+    echo "Done (" . count($movies) . " movies in " . formatTime($loadTime) . ")\n\n";
+
+    // Drop and recreate index
     try {
-        $search->clear('movies');
-        echo "Done!\n";
-    } catch (Exception $e) {
-        echo "Error clearing index: " . $e->getMessage() . "\n";
-    }
+        $search->dropIndex(INDEX_NAME);
+    } catch (Exception $e) {}
 
-    // Index all movies
-    echo "Indexing movies...\n";
+    $indexer = $search->createIndex(INDEX_NAME);
+
+    // Index movies
+    echo "  Indexing...\n";
+    $indexStart = microtime(true);
+    $startMemory = memory_get_usage();
     $indexed = 0;
-    $errors = 0;
-    $progressInterval = 1000; // Show progress every 1000 movies
     $batch = [];
-    $batchSize = 250; // Process in batches of 100
 
-    foreach ($movies as $index => $movie) {
-        try {
-            // Create document structure for indexing
-            $document = [
-                'id' => 'movie-' . $movie['id'],
-                'content' => [
-                    'title' => $movie['title'],
-                    'overview' => $movie['overview'],
-                    'genres' => implode(' ', $movie['genres'] ?? [])
-                ],
-                'metadata' => [
-                    'poster' => $movie['poster'] ?? '',
-                    'release_date' => $movie['release_date'] ?? 0,
-                    'genres' => $movie['genres'] ?? []
-                ]
-            ];
-            
-            // Add to batch
-            $batch[] = $document;
-            
-            // Process batch when it reaches the size limit or at the end
-            if (count($batch) >= $batchSize || $index === count($movies) - 1) {
-                $indexer->insert($batch);
-                $indexed += count($batch);
-                $batch = []; // Reset batch
-                
-                // Show progress
-                if ($indexed % $progressInterval === 0 || $index === count($movies) - 1) {
-                    $elapsed = microtime(true) - $indexStartTime;
-                    $rate = $indexed / $elapsed;
-                    echo "  Indexed: " . $indexed . " movies | Rate: " . number_format($rate, 0) . " movies/sec | Elapsed: " . number_format($elapsed, 2) . "s\n";
-                }
+    foreach ($movies as $i => $movie) {
+        $batch[] = [
+            'id' => 'movie_' . $movie['id'],
+            'content' => [
+                'title' => $movie['title'],
+                'overview' => $movie['overview'] ?? '',
+                'genres' => is_array($movie['genres']) ? implode(', ', $movie['genres']) : ''
+            ],
+            'metadata' => ['original_id' => $movie['id']]
+        ];
+
+        if (count($batch) >= BATCH_SIZE || $i === count($movies) - 1) {
+            $indexer->insert($batch);
+            $indexed += count($batch);
+            $batch = [];
+
+            // Progress every 5000 docs
+            if ($indexed % 5000 === 0 || $i === count($movies) - 1) {
+                $elapsed = microtime(true) - $indexStart;
+                $rate = $indexed / $elapsed;
+                printf("    %d docs | %s | %.1fs elapsed\n", $indexed, formatRate($rate), $elapsed);
             }
-        } catch (Exception $e) {
-            $errors++;
-            echo "  Error indexing movie ID {$movie['id']}: " . $e->getMessage() . "\n";
         }
     }
 
-    // Flush to ensure all documents are written
     $indexer->flush();
+    $indexTime = (microtime(true) - $indexStart) * 1000;
+    $indexMemory = memory_get_usage() - $startMemory;
+    $peakMemory = memory_get_peak_usage();
+    $indexRate = $indexed / ($indexTime / 1000);
+
+    echo "\n";
+    printResult('Documents indexed', number_format($indexed));
+    printResult('Indexing time', formatTime($indexTime));
+    printResult('Indexing rate', formatRate($indexRate));
+    printResult('Memory used', formatMemory($indexMemory));
+    printResult('Peak memory', formatMemory($peakMemory));
+
+    $results['indexing'] = [
+        'documents' => $indexed,
+        'time_ms' => round($indexTime, 2),
+        'rate' => round($indexRate, 1),
+        'memory_bytes' => $indexMemory,
+        'peak_memory_bytes' => $peakMemory
+    ];
 } else {
-    echo "Skipping indexing (--skip-indexing flag provided)\n\n";
+    echo "\n  Skipping indexing (--skip-indexing)\n";
 }
 
-// Calculate final statistics
-$totalTime = microtime(true) - $startTime;
-$endMemory = memory_get_usage();
-$memoryUsed = ($endMemory - $startMemory) / 1024 / 1024; // Convert to MB
-$peakMemory = memory_get_peak_usage() / 1024 / 1024; // Convert to MB
+// ============================================================================
+// Search Benchmarks
+// ============================================================================
 
-if (!$skipIndexing) {
-    $indexTime = microtime(true) - $indexStartTime;
-    echo "\nBenchmark Results\n";
-    echo "=================\n";
-    echo "Total movies processed: " . count($movies) . "\n";
-    echo "Successfully indexed: $indexed\n";
-    echo "Errors: $errors\n";
-    echo "Total time: " . number_format($totalTime, 4) . " seconds\n";
-    echo "Loading time: " . number_format($loadTime, 4) . " seconds\n";
-    echo "Indexing time: " . number_format($indexTime, 4) . " seconds\n";
-    echo "Average indexing rate: " . number_format($indexed / $indexTime, 2) . " movies/second\n";
-    echo "Memory used: " . number_format($memoryUsed, 2) . " MB\n";
-    echo "Peak memory: " . number_format($peakMemory, 2) . " MB\n";
-}
+printHeader('Search Benchmark (Standard)');
 
-// Test search functionality
-echo "\nTesting Search Functionality\n";
-echo "===========================\n";
-
-$testQueries = [
-    'star wars',
-    'action',
-    'drama crime',
-    'nemo',
-    'matrix',
-    'Anakin Skywalker',
-    'Harry Potter',
+$searchTests = [
+    ['query' => 'star wars', 'min_results' => 1, 'expected' => 'Star Wars'],
+    ['query' => 'action', 'min_results' => 1, 'expected' => null],
+    ['query' => 'nemo', 'min_results' => 1, 'expected' => 'Finding Nemo'],
+    ['query' => 'matrix', 'min_results' => 1, 'expected' => 'Matrix'],
+    ['query' => 'Anakin Skywalker', 'min_results' => 1, 'expected' => 'Star Wars'],
+    ['query' => 'drama crime', 'min_results' => 1, 'expected' => null],
 ];
 
-// First test with fuzzy OFF
-echo "\n--- Standard Search (fuzzy: OFF) ---\n";
-foreach ($testQueries as $query) {
-    $searchStart = microtime(true);
-    
-    $searchOptions = [
-        'limit' => 5,
-        'fuzzy' => false
-    ];
-    
-    $results = $search->search('movies', $query, $searchOptions);
-    
-    $searchTime = microtime(true) - $searchStart;
-    
-    echo "\nQuery: '$query' (took " . number_format($searchTime * 1000, 2) . " ms)\n";
-    echo "Results found: " . count($results['results']) . " (Total hits: " . ($results['total'] ?? 0) . ")\n";
-    
-    if (count($results['results']) > 0) {
-        foreach ($results['results'] as $i => $result) {
-            $doc = $result['document'] ?? [];
-            $title = $doc['title'] ?? 'Unknown';
-            $score = $result['score'] ?? 0;
-            echo "  " . ($i + 1) . ". " . $title . " (Score: " . number_format($score, 4) . ")\n";
-        }
+$totalSearchTime = 0;
+$searchPassed = 0;
+
+foreach ($searchTests as $test) {
+    $start = microtime(true);
+    $res = $search->search(INDEX_NAME, $test['query'], ['limit' => 5, 'fuzzy' => false]);
+    $elapsed = (microtime(true) - $start) * 1000;
+    $totalSearchTime += $elapsed;
+
+    $passed = $res['total'] >= $test['min_results'];
+    if ($test['expected'] && $passed) {
+        $titles = array_map(fn($r) => $r['document']['title'] ?? '', $res['results']);
+        $found = array_filter($titles, fn($t) => stripos($t, $test['expected']) !== false);
+        $passed = !empty($found);
     }
+
+    $status = $passed ? 'pass' : 'fail';
+    if ($passed) $searchPassed++;
+
+    $info = sprintf("%.1fms | %d results", $elapsed, $res['total']);
+    printResult("'{$test['query']}'", $info, $status);
+
+    $results['search'][] = [
+        'query' => $test['query'],
+        'time_ms' => round($elapsed, 2),
+        'total' => $res['total'],
+        'passed' => $passed
+    ];
 }
 
-// Then test with fuzzy ON
-echo "\n\n--- Fuzzy Search (fuzzy: ON) ---\n";
-foreach ($testQueries as $query) {
-    $searchStart = microtime(true);
-    
-    $searchOptions = [
+echo "\n";
+$avgSearchTime = $totalSearchTime / count($searchTests);
+printResult('Average search time', formatTime($avgSearchTime));
+printResult('Tests passed', "$searchPassed/" . count($searchTests), $searchPassed === count($searchTests) ? 'pass' : 'warn');
+
+// ============================================================================
+// Fuzzy Search Benchmarks
+// ============================================================================
+
+printHeader('Fuzzy Search Benchmark');
+
+$fuzzyTests = [
+    ['query' => 'Starwars', 'expected' => 'Star Wars', 'desc' => 'missing space'],
+    ['query' => 'The Godfathr', 'expected' => 'Godfather', 'desc' => 'missing e'],
+    ['query' => 'Gladiater', 'expected' => 'Gladiator', 'desc' => 'er->or'],
+    ['query' => 'Forest Gump', 'expected' => 'Forrest Gump', 'desc' => 'missing r'],
+    ['query' => 'Pulp Fictin', 'expected' => 'Pulp Fiction', 'desc' => 'missing o'],
+    ['query' => 'Dark Knigh', 'expected' => 'Dark Knight', 'desc' => 'missing t'],
+    ['query' => 'Shawshank Redemtion', 'expected' => 'Shawshank', 'desc' => 'missing p'],
+    ['query' => 'Interstelar', 'expected' => 'Interstellar', 'desc' => 'missing l'],
+    ['query' => 'Finding Nem', 'expected' => 'Finding Nemo', 'desc' => 'missing o'],
+    ['query' => 'Toy Stry', 'expected' => 'Toy Story', 'desc' => 'missing o'],
+];
+
+$totalFuzzyTime = 0;
+$fuzzyPassed = 0;
+
+foreach ($fuzzyTests as $test) {
+    $start = microtime(true);
+    $res = $search->search(INDEX_NAME, $test['query'], [
         'limit' => 5,
         'fuzzy' => true,
         'fuzzy_algorithm' => 'trigram',
-        'fuzzy_correction_mode' => true,  // Use correction mode for cleaner results
-        'trigram_threshold' => 0.3,
-        'correction_threshold' => 0.3,
-        'min_term_frequency' => 1
+        'trigram_threshold' => 0.25
+    ]);
+    $elapsed = (microtime(true) - $start) * 1000;
+    $totalFuzzyTime += $elapsed;
+
+    $titles = array_map(fn($r) => $r['document']['title'] ?? '', $res['results']);
+    $found = array_filter($titles, fn($t) => stripos($t, $test['expected']) !== false);
+    $passed = !empty($found);
+
+    $status = $passed ? 'pass' : 'fail';
+    if ($passed) $fuzzyPassed++;
+
+    $info = sprintf("%.1fms | %s", $elapsed, $passed ? 'Found' : 'NOT found');
+    printResult("'{$test['query']}' -> '{$test['expected']}'", $info, $status);
+
+    $results['fuzzy'][] = [
+        'query' => $test['query'],
+        'expected' => $test['expected'],
+        'description' => $test['desc'],
+        'time_ms' => round($elapsed, 2),
+        'found' => $passed,
+        'top_result' => $titles[0] ?? null
     ];
-    
-    $results = $search->search('movies', $query, $searchOptions);
-    
-    $searchTime = microtime(true) - $searchStart;
-    
-    echo "\nQuery: '$query' (took " . number_format($searchTime * 1000, 2) . " ms)\n";
-    echo "Results found: " . count($results['results']) . " (Total hits: " . ($results['total'] ?? 0) . ")\n";
-    
-    if (count($results['results']) > 0) {
-        foreach ($results['results'] as $i => $result) {
-            $doc = $result['document'] ?? [];
-            $title = $doc['title'] ?? 'Unknown';
-            $score = $result['score'] ?? 0;
-            echo "  " . ($i + 1) . ". " . $title . " (Score: " . number_format($score, 4) . ")\n";
-        }
-    }
 }
 
-// Additional fuzzy search tests
-echo "\n\nFuzzy Search Tests\n";
-echo "=============================\n";
+echo "\n";
+$avgFuzzyTime = $totalFuzzyTime / count($fuzzyTests);
+printResult('Average fuzzy time', formatTime($avgFuzzyTime));
+printResult('Fuzzy tests passed', "$fuzzyPassed/" . count($fuzzyTests), $fuzzyPassed >= count($fuzzyTests) * 0.7 ? 'pass' : 'warn');
 
-$fuzzyTests = [
-    // Realistic typos that fuzzy search should handle
-    ['query' => 'Starwars', 'expected' => 'Star Wars'],
-    ['query' => 'Star War', 'expected' => 'Star Wars'],
-    ['query' => 'The Godfathr', 'expected' => 'The Godfather'],
-    ['query' => 'Inceptio', 'expected' => 'Inception'],
-    ['query' => 'Dark Knight', 'expected' => 'The Dark Knight'],
-    ['query' => 'Pulp Fction', 'expected' => 'Pulp Fiction'],
-    ['query' => 'Forest Gump', 'expected' => 'Forrest Gump'],
-    ['query' => 'Shawshank', 'expected' => 'The Shawshank Redemption'],
-    ['query' => 'Finding Nem', 'expected' => 'Finding Nemo'],
-    ['query' => 'Toy Stry', 'expected' => 'Toy Story'],
-    ['query' => 'Christoper Nolan', 'expected' => 'Christopher Nolan'],
+// ============================================================================
+// Summary
+// ============================================================================
+
+printHeader('Summary');
+
+$results['summary'] = [
+    'indexing_rate' => $results['indexing']['rate'] ?? null,
+    'avg_search_ms' => round($avgSearchTime, 2),
+    'avg_fuzzy_ms' => round($avgFuzzyTime, 2),
+    'search_pass_rate' => $searchPassed / count($searchTests),
+    'fuzzy_pass_rate' => $fuzzyPassed / count($fuzzyTests),
+    'peak_memory_mb' => isset($peakMemory) ? round($peakMemory / 1024 / 1024, 1) : null
 ];
 
-foreach ($fuzzyTests as $test) {
-    $searchStart = microtime(true);
-    
-    // Use a balanced configuration for realistic typos
-    // Search primarily in title field for better relevance
-    $results = $search->search('movies', $test['query'], [
-        'limit' => 5,
-        'fields' => ['title'],  // Focus on title field for these tests
-        'fuzzy' => true,
-        'fuzzy_algorithm' => 'jaro_winkler',
-        'fuzzy_correction_mode' => false,  // Use expansion mode since correction may be too strict
-        'jaro_winkler_threshold' => 0.85,
-        'max_fuzzy_variations' => 3,
-        'min_term_frequency' => 1,
-        'fuzzy_score_penalty' => 0.15
-    ]);
-    
-    $searchTime = microtime(true) - $searchStart;
-    
-    echo "\nQuery: '{$test['query']}' (took " . number_format($searchTime * 1000, 2) . " ms)\n";
-    echo "Results found: " . count($results['results']) . " (Total hits: " . ($results['total'] ?? 0) . ")\n";
-    echo "[Looking for: '{$test['expected']}']\n";
-    
-    if (count($results['results']) > 0) {
-        foreach ($results['results'] as $i => $result) {
-            // Get document data
-            $doc = $result['document'] ?? [];
-            $title = $doc['title'] ?? 'Unknown';
-            $score = $result['score'] ?? 0;
-            echo "  " . ($i + 1) . ". " . $title . " (Score: " . number_format($score, 4) . ")\n";
-            
-            // Check if we found what we expected
-            if (stripos($title, $test['expected']) !== false || 
-                stripos($doc['overview'] ?? '', $test['expected']) !== false) {
-                echo "     *** Found expected result! ***\n";
-            }
-        }
-    }
+if ($results['indexing']) {
+    printResult('Indexing rate', formatRate($results['indexing']['rate']));
+}
+printResult('Avg search time', formatTime($avgSearchTime));
+printResult('Avg fuzzy time', formatTime($avgFuzzyTime));
+printResult('Search accuracy', sprintf('%.0f%%', $results['summary']['search_pass_rate'] * 100));
+printResult('Fuzzy accuracy', sprintf('%.0f%%', $results['summary']['fuzzy_pass_rate'] * 100));
+
+// ============================================================================
+// Baseline Comparison
+// ============================================================================
+
+if ($saveBaseline) {
+    file_put_contents(BASELINE_FILE, json_encode($results, JSON_PRETTY_PRINT));
+    echo "\n  Baseline saved to " . basename(BASELINE_FILE) . "\n";
 }
 
-echo "\nBenchmark complete!\n";
-echo "\nNote: Database file saved at: " . realpath(__DIR__ . '/benchmark.db') . "\n";
+if ($compareBaseline && file_exists(BASELINE_FILE)) {
+    printHeader('Baseline Comparison');
+
+    $baseline = json_decode(file_get_contents(BASELINE_FILE), true);
+    $bs = $baseline['summary'] ?? [];
+    $cs = $results['summary'];
+
+    $compare = function($label, $current, $baseline, $lowerBetter = true) {
+        if ($baseline === null) return;
+        $diff = $current - $baseline;
+        $pct = $baseline > 0 ? ($diff / $baseline) * 100 : 0;
+        $better = $lowerBetter ? $diff < 0 : $diff > 0;
+        $status = abs($pct) < 5 ? '' : ($better ? 'pass' : 'warn');
+        $arrow = $diff > 0 ? '+' : '';
+        printResult($label, sprintf('%.1f (was %.1f, %s%.1f%%)', $current, $baseline, $arrow, $pct), $status);
+    };
+
+    if ($cs['indexing_rate'] && ($bs['indexing_rate'] ?? null)) {
+        $compare('Indexing rate', $cs['indexing_rate'], $bs['indexing_rate'], false);
+    }
+    $compare('Avg search time (ms)', $cs['avg_search_ms'], $bs['avg_search_ms'] ?? null);
+    $compare('Avg fuzzy time (ms)', $cs['avg_fuzzy_ms'], $bs['avg_fuzzy_ms'] ?? null);
+
+    echo "\n  Baseline from: " . ($baseline['timestamp'] ?? 'unknown') . "\n";
+}
+
+// Save results
+file_put_contents(__DIR__ . '/results.json', json_encode($results, JSON_PRETTY_PRINT));
+
+echo "\n  Results saved to results.json\n";
+echo "\n  Benchmark complete!\n\n";

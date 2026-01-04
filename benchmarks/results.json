@@ -1,0 +1,134 @@
+{
+    "timestamp": "2026-01-04T10:55:38+00:00",
+    "php_version": "8.4.16",
+    "sqlite_version": "3.51.1",
+    "indexing": null,
+    "search": [
+        {
+            "query": "star wars",
+            "time_ms": 8.73,
+            "total": 925,
+            "passed": true
+        },
+        {
+            "query": "action",
+            "time_ms": 5.99,
+            "total": 5728,
+            "passed": true
+        },
+        {
+            "query": "nemo",
+            "time_ms": 0.19,
+            "total": 9,
+            "passed": true
+        },
+        {
+            "query": "matrix",
+            "time_ms": 0.18,
+            "total": 20,
+            "passed": true
+        },
+        {
+            "query": "Anakin Skywalker",
+            "time_ms": 0.37,
+            "total": 18,
+            "passed": true
+        },
+        {
+            "query": "drama crime",
+            "time_ms": 14.84,
+            "total": 14105,
+            "passed": true
+        }
+    ],
+    "fuzzy": [
+        {
+            "query": "Starwars",
+            "expected": "Star Wars",
+            "description": "missing space",
+            "time_ms": 274.07,
+            "found": false,
+            "top_result": "The People Under the Stairs"
+        },
+        {
+            "query": "The Godfathr",
+            "expected": "Godfather",
+            "description": "missing e",
+            "time_ms": 203.02,
+            "found": true,
+            "top_result": "I Knew It Was You: Rediscovering John Cazale"
+        },
+        {
+            "query": "Gladiater",
+            "expected": "Gladiator",
+            "description": "er->or",
+            "time_ms": 193.08,
+            "found": true,
+            "top_result": "Gladiator Eroticvs: The Lesbian Warriors"
+        },
+        {
+            "query": "Forest Gump",
+            "expected": "Forrest Gump",
+            "description": "missing r",
+            "time_ms": 164.53,
+            "found": false,
+            "top_result": null
+        },
+        {
+            "query": "Pulp Fictin",
+            "expected": "Pulp Fiction",
+            "description": "missing o",
+            "time_ms": 156.24,
+            "found": true,
+            "top_result": "Plump Fiction"
+        },
+        {
+            "query": "Dark Knigh",
+            "expected": "Dark Knight",
+            "description": "missing t",
+            "time_ms": 107.77,
+            "found": true,
+            "top_result": "Batman: Gotham Knight"
+        },
+        {
+            "query": "Shawshank Redemtion",
+            "expected": "Shawshank",
+            "description": "missing p",
+            "time_ms": 384.96,
+            "found": true,
+            "top_result": "The Shawshank Redemption"
+        },
+        {
+            "query": "Interstelar",
+            "expected": "Interstellar",
+            "description": "missing l",
+            "time_ms": 127.99,
+            "found": true,
+            "top_result": "Interstellar"
+        },
+        {
+            "query": "Finding Nem",
+            "expected": "Finding Nemo",
+            "description": "missing o",
+            "time_ms": 33.13,
+            "found": false,
+            "top_result": null
+        },
+        {
+            "query": "Toy Stry",
+            "expected": "Toy Story",
+            "description": "missing o",
+            "time_ms": 136.29,
+            "found": false,
+            "top_result": null
+        }
+    ],
+    "summary": {
+        "indexing_rate": null,
+        "avg_search_ms": 5.05,
+        "avg_fuzzy_ms": 178.11,
+        "search_pass_rate": 1,
+        "fuzzy_pass_rate": 0.6,
+        "peak_memory_mb": null
+    }
+}
