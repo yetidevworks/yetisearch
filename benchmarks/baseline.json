@@ -1,84 +1,60 @@
 {
-    "timestamp": "2026-01-04T10:55:20+00:00",
+    "timestamp": "2026-01-04T11:01:45+00:00",
     "php_version": "8.4.16",
     "sqlite_version": "3.51.1",
     "indexing": null,
     "search": [
         {
             "query": "star wars",
-            "time_ms": 8.34,
-            "total": 791,
+            "time_ms": 67.56,
+            "total": 925,
             "passed": true
         },
         {
             "query": "action",
-            "time_ms": 5.12,
-            "total": 5094,
+            "time_ms": 16.18,
+            "total": 5728,
             "passed": true
         },
         {
             "query": "nemo",
-            "time_ms": 0.19,
+            "time_ms": 0.47,
             "total": 9,
             "passed": true
         },
         {
             "query": "matrix",
-            "time_ms": 0.18,
+            "time_ms": 0.21,
             "total": 20,
             "passed": true
         },
         {
             "query": "Anakin Skywalker",
-            "time_ms": 0.32,
-            "total": 16,
+            "time_ms": 0.56,
+            "total": 18,
             "passed": true
         },
         {
             "query": "drama crime",
-            "time_ms": 12.97,
-            "total": 12439,
+            "time_ms": 16.52,
+            "total": 14105,
             "passed": true
         }
     ],
     "fuzzy": [
         {
-            "query": "Starwars",
-            "expected": "Star Wars",
-            "description": "missing space",
-            "time_ms": 274.48,
-            "found": false,
-            "top_result": "The People Under the Stairs"
-        },
-        {
             "query": "The Godfathr",
             "expected": "Godfather",
             "description": "missing e",
-            "time_ms": 215.47,
+            "time_ms": 275.44,
             "found": true,
             "top_result": "I Knew It Was You: Rediscovering John Cazale"
-        },
-        {
-            "query": "Gladiater",
-            "expected": "Gladiator",
-            "description": "er->or",
-            "time_ms": 208.49,
-            "found": true,
-            "top_result": "Gladiator Eroticvs: The Lesbian Warriors"
-        },
-        {
-            "query": "Forest Gump",
-            "expected": "Forrest Gump",
-            "description": "missing r",
-            "time_ms": 170.96,
-            "found": false,
-            "top_result": null
         },
         {
             "query": "Pulp Fictin",
             "expected": "Pulp Fiction",
             "description": "missing o",
-            "time_ms": 165.08,
+            "time_ms": 154.19,
             "found": true,
             "top_result": "Plump Fiction"
         },
@@ -86,7 +62,7 @@
             "query": "Dark Knigh",
             "expected": "Dark Knight",
             "description": "missing t",
-            "time_ms": 114.74,
+            "time_ms": 105.99,
             "found": true,
             "top_result": "Batman: Gotham Knight"
         },
@@ -94,7 +70,7 @@
             "query": "Shawshank Redemtion",
             "expected": "Shawshank",
             "description": "missing p",
-            "time_ms": 403.71,
+            "time_ms": 379.18,
             "found": true,
             "top_result": "The Shawshank Redemption"
         },
@@ -102,33 +78,377 @@
             "query": "Interstelar",
             "expected": "Interstellar",
             "description": "missing l",
-            "time_ms": 131.23,
+            "time_ms": 126.08,
             "found": true,
             "top_result": "Interstellar"
         },
         {
-            "query": "Finding Nem",
-            "expected": "Finding Nemo",
-            "description": "missing o",
-            "time_ms": 34.22,
+            "query": "Jurrasic Park",
+            "expected": "Jurassic",
+            "description": "missing s+extra r",
+            "time_ms": 199.97,
+            "found": true,
+            "top_result": "Jurassic World"
+        },
+        {
+            "query": "Batmn",
+            "expected": "Batman",
+            "description": "missing a",
+            "time_ms": 107.89,
+            "found": true,
+            "top_result": "LEGO DC Comics Super Heroes Batman Be-Leaguered"
+        },
+        {
+            "query": "Termintor",
+            "expected": "Terminator",
+            "description": "missing a",
+            "time_ms": 188.56,
+            "found": true,
+            "top_result": "Terminator: Dark Fate"
+        },
+        {
+            "query": "Avengers Endgam",
+            "expected": "Endgame",
+            "description": "missing e",
+            "time_ms": 153.03,
+            "found": true,
+            "top_result": "Avengers: Endgame"
+        },
+        {
+            "query": "Lord of Rings",
+            "expected": "Rings",
+            "description": "missing the",
+            "time_ms": 0.53,
+            "found": true,
+            "top_result": "Ringers - Lord of the Fans"
+        },
+        {
+            "query": "Gladiatorr",
+            "expected": "Gladiator",
+            "description": "extra r",
+            "time_ms": 165.05,
+            "found": true,
+            "top_result": "Gladiator Eroticvs: The Lesbian Warriors"
+        },
+        {
+            "query": "Matrixx",
+            "expected": "Matrix",
+            "description": "extra x",
+            "time_ms": 184.43,
+            "found": true,
+            "top_result": "The Matrix Revisited"
+        },
+        {
+            "query": "Titannic",
+            "expected": "Titanic",
+            "description": "extra n",
+            "time_ms": 199.83,
+            "found": true,
+            "top_result": "Titanic: The Aftermath"
+        },
+        {
+            "query": "Avatarr",
+            "expected": "Avatar",
+            "description": "extra r",
+            "time_ms": 183.39,
+            "found": true,
+            "top_result": "Avatar: Scene Deconstruction"
+        },
+        {
+            "query": "Inceptionn",
+            "expected": "Inception",
+            "description": "extra n",
+            "time_ms": 163.68,
+            "found": true,
+            "top_result": "Inception: The Cobol Job"
+        },
+        {
+            "query": "Gladaitor",
+            "expected": "Gladiator",
+            "description": "transposed ia",
+            "time_ms": 189.68,
+            "found": true,
+            "top_result": "Gladiator Eroticvs: The Lesbian Warriors"
+        },
+        {
+            "query": "Inetrstellar",
+            "expected": "Interstellar",
+            "description": "transposed nt",
+            "time_ms": 88.35,
+            "found": true,
+            "top_result": "Interstellar"
+        },
+        {
+            "query": "Froest Gump",
+            "expected": "Forrest",
+            "description": "transposed or",
+            "time_ms": 442.22,
             "found": false,
             "top_result": null
         },
         {
-            "query": "Toy Stry",
-            "expected": "Toy Story",
-            "description": "missing o",
-            "time_ms": 144.28,
+            "query": "Teh Matrix",
+            "expected": "Matrix",
+            "description": "transposed he",
+            "time_ms": 31.94,
             "found": false,
             "top_result": null
+        },
+        {
+            "query": "Pirrates",
+            "expected": "Pirates",
+            "description": "transposed ir+extra r",
+            "time_ms": 202.72,
+            "found": true,
+            "top_result": "Scooby-Doo! Pirates Ahoy!"
+        },
+        {
+            "query": "Gladiater",
+            "expected": "Gladiator",
+            "description": "er->or",
+            "time_ms": 190.15,
+            "found": true,
+            "top_result": "Gladiator Eroticvs: The Lesbian Warriors"
+        },
+        {
+            "query": "Spiderman",
+            "expected": "Spider-Man",
+            "description": "missing hyphen",
+            "time_ms": 189.66,
+            "found": false,
+            "top_result": "Making 'Superman': Filming the Legend"
+        },
+        {
+            "query": "Terminetor",
+            "expected": "Terminator",
+            "description": "e->a",
+            "time_ms": 164.59,
+            "found": true,
+            "top_result": "Terminator: Dark Fate"
+        },
+        {
+            "query": "Batmen",
+            "expected": "Batman",
+            "description": "e->a",
+            "time_ms": 154.91,
+            "found": true,
+            "top_result": "LEGO DC Comics Super Heroes Batman Be-Leaguered"
+        },
+        {
+            "query": "Supermen",
+            "expected": "Superman",
+            "description": "e->a",
+            "time_ms": 200.47,
+            "found": true,
+            "top_result": "Making 'Superman': Filming the Legend"
+        },
+        {
+            "query": "Stir Wars",
+            "expected": "Star Wars",
+            "description": "i->a",
+            "time_ms": 52.06,
+            "found": false,
+            "top_result": null
+        },
+        {
+            "query": "Juressic Park",
+            "expected": "Jurassic",
+            "description": "e->a",
+            "time_ms": 200.86,
+            "found": true,
+            "top_result": "Jurassic World"
+        },
+        {
+            "query": "Die Herd",
+            "expected": "Die Hard",
+            "description": "e->a",
+            "time_ms": 26.71,
+            "found": false,
+            "top_result": null
+        },
+        {
+            "query": "Iren Man",
+            "expected": "Iron Man",
+            "description": "e->o",
+            "time_ms": 69.55,
+            "found": false,
+            "top_result": "My Man Godfrey"
+        },
+        {
+            "query": "Blek Panther",
+            "expected": "Black Panther",
+            "description": "e->a",
+            "time_ms": 169.28,
+            "found": false,
+            "top_result": null
+        },
+        {
+            "query": "Starwars",
+            "expected": "Star Wars",
+            "description": "missing space",
+            "time_ms": 201.29,
+            "found": false,
+            "top_result": "The People Under the Stairs"
+        },
+        {
+            "query": "Toystory",
+            "expected": "Toy Story",
+            "description": "missing space",
+            "time_ms": 201,
+            "found": false,
+            "top_result": "The Last Station"
+        },
+        {
+            "query": "Ironman",
+            "expected": "Iron Man",
+            "description": "missing space",
+            "time_ms": 183.04,
+            "found": false,
+            "top_result": "Septembers of Shiraz"
+        },
+        {
+            "query": "Findingnemo",
+            "expected": "Finding Nemo",
+            "description": "missing space",
+            "time_ms": 294.44,
+            "found": false,
+            "top_result": null
+        },
+        {
+            "query": "Madmax",
+            "expected": "Mad Max",
+            "description": "missing space",
+            "time_ms": 151.99,
+            "found": false,
+            "top_result": "Madman"
+        },
+        {
+            "query": "Scareface",
+            "expected": "Scarface",
+            "description": "phonetic",
+            "time_ms": 187.82,
+            "found": true,
+            "top_result": "The Making of 'Scarface'"
+        },
+        {
+            "query": "Alien vs Prediter",
+            "expected": "Predator",
+            "description": "phonetic er->or",
+            "time_ms": 200.29,
+            "found": true,
+            "top_result": "Aliens vs Predator: Requiem"
+        },
+        {
+            "query": "Robo Cop",
+            "expected": "RoboCop",
+            "description": "extra space",
+            "time_ms": 27.04,
+            "found": false,
+            "top_result": null
+        },
+        {
+            "query": "X Men",
+            "expected": "X-Men",
+            "description": "space vs hyphen",
+            "time_ms": 0.34,
+            "found": true,
+            "top_result": "X-Factor: The Look of X-Men"
+        },
+        {
+            "query": "Jurrassic World",
+            "expected": "Jurassic",
+            "description": "extra r",
+            "time_ms": 190.39,
+            "found": true,
+            "top_result": "Jurassic World"
+        },
+        {
+            "query": "Incept",
+            "expected": "Inception",
+            "description": "prefix only",
+            "time_ms": 154.54,
+            "found": false,
+            "top_result": "The Foot Fist Way"
+        },
+        {
+            "query": "Gladi",
+            "expected": "Gladiator",
+            "description": "prefix only",
+            "time_ms": 108.88,
+            "found": false,
+            "top_result": "Pollyanna"
+        },
+        {
+            "query": "Interst",
+            "expected": "Interstellar",
+            "description": "prefix only",
+            "time_ms": 187.37,
+            "found": false,
+            "top_result": "My Favorite Five"
+        },
+        {
+            "query": "Avata",
+            "expected": "Avatar",
+            "description": "prefix only",
+            "time_ms": 107.42,
+            "found": true,
+            "top_result": "Avatar: Scene Deconstruction"
+        },
+        {
+            "query": "Termin",
+            "expected": "Terminator",
+            "description": "prefix only",
+            "time_ms": 155.12,
+            "found": false,
+            "top_result": "Terminal Velocity"
+        },
+        {
+            "query": "The Godfather Part 2",
+            "expected": "Godfather",
+            "description": "exact multi-word",
+            "time_ms": 65.51,
+            "found": false,
+            "top_result": null
+        },
+        {
+            "query": "Star Trek Into Darknes",
+            "expected": "Darkness",
+            "description": "missing s",
+            "time_ms": 188.25,
+            "found": true,
+            "top_result": "Star Trek Into Darkness"
+        },
+        {
+            "query": "Pirates of Carribean",
+            "expected": "Caribbean",
+            "description": "missing b",
+            "time_ms": 191.25,
+            "found": true,
+            "top_result": "Pirates of the Caribbean: Dead Man's Chest"
+        },
+        {
+            "query": "Lord of the Ring",
+            "expected": "Rings",
+            "description": "missing s",
+            "time_ms": 0.44,
+            "found": true,
+            "top_result": "The Lord of the Rings"
+        },
+        {
+            "query": "Harry Poter",
+            "expected": "Harry Potter",
+            "description": "missing t",
+            "time_ms": 110.57,
+            "found": true,
+            "top_result": "Discovering the Real World of Harry Potter"
         }
     ],
     "summary": {
         "indexing_rate": null,
-        "avg_search_ms": 4.52,
-        "avg_fuzzy_ms": 186.27,
+        "avg_search_ms": 16.92,
+        "avg_fuzzy_ms": 157.35,
         "search_pass_rate": 1,
-        "fuzzy_pass_rate": 0.6,
+        "fuzzy_pass_rate": 0.64,
         "peak_memory_mb": null
     }
 }

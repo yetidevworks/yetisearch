@@ -259,16 +259,71 @@ printResult('Tests passed', "$searchPassed/" . count($searchTests), $searchPasse
 printHeader('Fuzzy Search Benchmark');
 
 $fuzzyTests = [
-    ['query' => 'Starwars', 'expected' => 'Star Wars', 'desc' => 'missing space'],
+    // Missing letter tests (10)
     ['query' => 'The Godfathr', 'expected' => 'Godfather', 'desc' => 'missing e'],
-    ['query' => 'Gladiater', 'expected' => 'Gladiator', 'desc' => 'er->or'],
-    ['query' => 'Forest Gump', 'expected' => 'Forrest Gump', 'desc' => 'missing r'],
     ['query' => 'Pulp Fictin', 'expected' => 'Pulp Fiction', 'desc' => 'missing o'],
     ['query' => 'Dark Knigh', 'expected' => 'Dark Knight', 'desc' => 'missing t'],
     ['query' => 'Shawshank Redemtion', 'expected' => 'Shawshank', 'desc' => 'missing p'],
     ['query' => 'Interstelar', 'expected' => 'Interstellar', 'desc' => 'missing l'],
-    ['query' => 'Finding Nem', 'expected' => 'Finding Nemo', 'desc' => 'missing o'],
-    ['query' => 'Toy Stry', 'expected' => 'Toy Story', 'desc' => 'missing o'],
+    ['query' => 'Jurrasic Park', 'expected' => 'Jurassic', 'desc' => 'missing s+extra r'],
+    ['query' => 'Batmn', 'expected' => 'Batman', 'desc' => 'missing a'],
+    ['query' => 'Termintor', 'expected' => 'Terminator', 'desc' => 'missing a'],
+    ['query' => 'Avengers Endgam', 'expected' => 'Endgame', 'desc' => 'missing e'],
+    ['query' => 'Lord of Rings', 'expected' => 'Rings', 'desc' => 'missing the'],
+
+    // Extra letter tests (5)
+    ['query' => 'Gladiatorr', 'expected' => 'Gladiator', 'desc' => 'extra r'],
+    ['query' => 'Matrixx', 'expected' => 'Matrix', 'desc' => 'extra x'],
+    ['query' => 'Titannic', 'expected' => 'Titanic', 'desc' => 'extra n'],
+    ['query' => 'Avatarr', 'expected' => 'Avatar', 'desc' => 'extra r'],
+    ['query' => 'Inceptionn', 'expected' => 'Inception', 'desc' => 'extra n'],
+
+    // Transposition tests (5)
+    ['query' => 'Gladaitor', 'expected' => 'Gladiator', 'desc' => 'transposed ia'],
+    ['query' => 'Inetrstellar', 'expected' => 'Interstellar', 'desc' => 'transposed nt'],
+    ['query' => 'Froest Gump', 'expected' => 'Forrest', 'desc' => 'transposed or'],
+    ['query' => 'Teh Matrix', 'expected' => 'Matrix', 'desc' => 'transposed he'],
+    ['query' => 'Pirrates', 'expected' => 'Pirates', 'desc' => 'transposed ir+extra r'],
+
+    // Wrong letter tests (10)
+    ['query' => 'Gladiater', 'expected' => 'Gladiator', 'desc' => 'er->or'],
+    ['query' => 'Spiderman', 'expected' => 'Spider-Man', 'desc' => 'missing hyphen'],
+    ['query' => 'Terminetor', 'expected' => 'Terminator', 'desc' => 'e->a'],
+    ['query' => 'Batmen', 'expected' => 'Batman', 'desc' => 'e->a'],
+    ['query' => 'Supermen', 'expected' => 'Superman', 'desc' => 'e->a'],
+    ['query' => 'Stir Wars', 'expected' => 'Star Wars', 'desc' => 'i->a'],
+    ['query' => 'Juressic Park', 'expected' => 'Jurassic', 'desc' => 'e->a'],
+    ['query' => 'Die Herd', 'expected' => 'Die Hard', 'desc' => 'e->a'],
+    ['query' => 'Iren Man', 'expected' => 'Iron Man', 'desc' => 'e->o'],
+    ['query' => 'Blek Panther', 'expected' => 'Black Panther', 'desc' => 'e->a'],
+
+    // Missing space tests (5)
+    ['query' => 'Starwars', 'expected' => 'Star Wars', 'desc' => 'missing space'],
+    ['query' => 'Toystory', 'expected' => 'Toy Story', 'desc' => 'missing space'],
+    ['query' => 'Ironman', 'expected' => 'Iron Man', 'desc' => 'missing space'],
+    ['query' => 'Findingnemo', 'expected' => 'Finding Nemo', 'desc' => 'missing space'],
+    ['query' => 'Madmax', 'expected' => 'Mad Max', 'desc' => 'missing space'],
+
+    // Phonetic/sound-alike tests (5)
+    ['query' => 'Scareface', 'expected' => 'Scarface', 'desc' => 'phonetic'],
+    ['query' => 'Alien vs Prediter', 'expected' => 'Predator', 'desc' => 'phonetic er->or'],
+    ['query' => 'Robo Cop', 'expected' => 'RoboCop', 'desc' => 'extra space'],
+    ['query' => 'X Men', 'expected' => 'X-Men', 'desc' => 'space vs hyphen'],
+    ['query' => 'Jurrassic World', 'expected' => 'Jurassic', 'desc' => 'extra r'],
+
+    // Partial/prefix tests (5)
+    ['query' => 'Incept', 'expected' => 'Inception', 'desc' => 'prefix only'],
+    ['query' => 'Gladi', 'expected' => 'Gladiator', 'desc' => 'prefix only'],
+    ['query' => 'Interst', 'expected' => 'Interstellar', 'desc' => 'prefix only'],
+    ['query' => 'Avata', 'expected' => 'Avatar', 'desc' => 'prefix only'],
+    ['query' => 'Termin', 'expected' => 'Terminator', 'desc' => 'prefix only'],
+
+    // Complex multi-word tests (5)
+    ['query' => 'The Godfather Part 2', 'expected' => 'Godfather', 'desc' => 'exact multi-word'],
+    ['query' => 'Star Trek Into Darknes', 'expected' => 'Darkness', 'desc' => 'missing s'],
+    ['query' => 'Pirates of Carribean', 'expected' => 'Caribbean', 'desc' => 'missing b'],
+    ['query' => 'Lord of the Ring', 'expected' => 'Rings', 'desc' => 'missing s'],
+    ['query' => 'Harry Poter', 'expected' => 'Harry Potter', 'desc' => 'missing t'],
 ];
 
 $totalFuzzyTime = 0;
