@@ -335,7 +335,9 @@ class SqliteStorage implements StorageInterface
             $timestamp = $document['timestamp'] ?? time();
 
             $schema = $this->getSchemaMode($index);
+            $docId = null;
             if ($schema === 'external') {
+                // Use RETURNING to get doc_id directly without extra SELECT query (SQLite 3.35+)
                 $sql = "
                     INSERT INTO {$index} (id, content, metadata, language, type, timestamp)
                     VALUES (?, ?, ?, ?, ?, ?)
@@ -345,12 +347,15 @@ class SqliteStorage implements StorageInterface
                         language=excluded.language,
                         type=excluded.type,
                         timestamp=excluded.timestamp
+                    RETURNING doc_id
                 ";
                 $stmt = $this->connection->prepare($sql);
                 $stmt->execute([$id, $content, $metadata, $language, $type, $timestamp]);
+                $docId = $stmt->fetchColumn();
+                $stmt->closeCursor(); // Must close cursor before next operation
             } else {
                 $sql = "
-                    INSERT OR REPLACE INTO {$index} 
+                    INSERT OR REPLACE INTO {$index}
                     (id, content, metadata, language, type, timestamp)
                     VALUES (?, ?, ?, ?, ?, ?)
                 ";
@@ -361,7 +366,6 @@ class SqliteStorage implements StorageInterface
             // Insert into FTS with dynamic columns
             $ftsColumns = $this->getFtsColumns($index);
             if ($schema === 'external') {
-                $docId = $this->getDocId($index, $id);
                 $contentText = $this->getFieldText($document['content'], 'content', $index);
 
                 // For external content FTS5, we must explicitly delete the old entry
@@ -425,6 +429,7 @@ class SqliteStorage implements StorageInterface
             // Prepare statements once
             $schema = $this->getSchemaMode($index);
             if ($schema === 'external') {
+                // Use RETURNING to get doc_id directly without extra SELECT query (SQLite 3.35+)
                 $docStmt = $this->connection->prepare("
                     INSERT INTO {$index} (id, content, metadata, language, type, timestamp)
                     VALUES (?, ?, ?, ?, ?, ?)
@@ -434,10 +439,11 @@ class SqliteStorage implements StorageInterface
                         language=excluded.language,
                         type=excluded.type,
                         timestamp=excluded.timestamp
+                    RETURNING doc_id
                 ");
             } else {
                 $docStmt = $this->connection->prepare("
-                    INSERT OR REPLACE INTO {$index} 
+                    INSERT OR REPLACE INTO {$index}
                     (id, content, metadata, language, type, timestamp)
                     VALUES (?, ?, ?, ?, ?, ?)
                 ");
@@ -445,12 +451,12 @@ class SqliteStorage implements StorageInterface
 
             // Prepare FTS insert statement dynamically
             $ftsColumns = $this->getFtsColumns($index);
-            $ftsDeleteStmt = null;
             if ($schema === 'external') {
                 // External content with JSON storage only supports single-column FTS
-                // Prepare delete statement to remove old FTS entries before inserting
-                $ftsDeleteStmt = $this->connection->prepare("INSERT INTO {$index}_fts({$index}_fts, rowid, content) VALUES('delete', ?, ?)");
-                $ftsStmt = $this->connection->prepare("INSERT INTO {$index}_fts (rowid, content) VALUES (?, ?)");
+                // Note: For batch operations, we use INSERT OR REPLACE for performance.
+                // The FTS vocabulary may become stale on updates; use rebuildFts() after
+                // batch updates to resync the vocabulary with content.
+                $ftsStmt = $this->connection->prepare("INSERT OR REPLACE INTO {$index}_fts (rowid, content) VALUES (?, ?)");
             } else {
                 // Sanitize column names to ensure they're valid SQL identifiers
                 $validColumns = [];
@@ -521,16 +527,10 @@ class SqliteStorage implements StorageInterface
 
                 // Insert FTS content
                 if ($schema === 'external') {
-                    // For external content, we must delete old entry before inserting new one
-                    // to properly update the FTS vocabulary
-                    $docId = $this->getDocId($index, $id);
+                    // Get doc_id from RETURNING clause (avoids extra SELECT query)
+                    $docId = $docStmt->fetchColumn();
+                    $docStmt->closeCursor(); // Must close cursor before next operation
                     $contentText = $this->getFieldText($document['content'], 'content', $index);
-                    // Delete old entry (ignore errors if it doesn't exist)
-                    try {
-                        $ftsDeleteStmt->execute([$docId, '']);
-                    } catch (\PDOException $e) {
-                        // Ignore - entry may not exist
-                    }
                     $ftsStmt->execute([$docId, $contentText]);
                 } else {
                     // For non-external, insert with all columns
@@ -652,9 +652,11 @@ class SqliteStorage implements StorageInterface
      *
      * @param string $index The index name
      * @param string $prefix The ID prefix to match (e.g., "page123#chunk" to delete all chunks)
+     * @param bool $rebuildFts Whether to rebuild FTS after deletion (default true). Set to false
+     *                         when doing multiple deletions followed by inserts, then call rebuildFts() once at the end.
      * @return int Number of documents deleted
      */
-    public function deleteByIdPrefix(string $index, string $prefix): int
+    public function deleteByIdPrefix(string $index, string $prefix, bool $rebuildFts = true): int
     {
         $this->ensureConnected();
 
@@ -686,8 +688,11 @@ class SqliteStorage implements StorageInterface
 
             // Handle FTS deletion based on schema
             if ($schema === 'external') {
-                // For external content tables, rebuild FTS to sync
-                $this->connection->exec("INSERT INTO {$index}_fts({$index}_fts) VALUES('rebuild')");
+                // For external content tables, optionally rebuild FTS to sync
+                if ($rebuildFts) {
+                    $this->connection->exec("INSERT INTO {$index}_fts({$index}_fts) VALUES('rebuild')");
+                }
+                // Note: If rebuildFts is false, caller must call rebuildFts() after all operations
             } else {
                 // For non-external content, delete matching rows
                 $this->connection->prepare("DELETE FROM {$index}_fts WHERE id IN ({$placeholders})")->execute($ids);
