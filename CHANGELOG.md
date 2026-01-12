@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.1.2] - 2026-01-12
+
+### Bug Fixes
+- **External content FTS vocabulary sync**: Fixed critical bug where updating documents in external content FTS tables left stale terms in the vocabulary. The FTS `INSERT OR REPLACE` doesn't properly update the vocabulary for external content tables. Now uses explicit delete-before-insert and provides `rebuildFts()` method for ensuring vocabulary sync after updates.
+- **Pre-chunked document content handling**: Fixed bug where pre-chunked documents with array content were incorrectly merged with parent content. When plugins provide chunks with their own content arrays (title, content, excerpt, etc.), the Indexer now uses that content directly instead of nesting it inside the parent's content structure. This caused all chunks to match searches for terms that only existed in one chunk.
+- **Chunk cleanup on document update**: Added `deleteByIdPrefix()` method to properly clean up orphaned chunks when a document is updated with fewer chunks than before.
+
+### New Methods
+- `YetiSearch::deleteByIdPrefix(string $indexName, string $prefix): int` - Delete all documents whose ID starts with a given prefix. Useful for cleaning up chunks when a parent document is updated.
+- `YetiSearch::rebuildFts(string $indexName): void` - Rebuild the FTS index to ensure vocabulary is in sync with content table. Essential for external content FTS tables after document updates.
+- `SqliteStorage::deleteByIdPrefix(string $index, string $prefix): int` - Storage-level implementation of prefix-based deletion with proper cleanup of all related tables (FTS, terms, spatial).
+
 ## [2.1.1] - 2026-01-03
 
 ### Bug Fixes
