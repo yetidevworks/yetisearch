@@ -429,17 +429,11 @@ class SqliteStorage implements StorageInterface
             // Prepare statements once
             $schema = $this->getSchemaMode($index);
             if ($schema === 'external') {
-                // Use RETURNING to get doc_id directly without extra SELECT query (SQLite 3.35+)
+                // Use INSERT OR REPLACE for batch operations - faster than ON CONFLICT with RETURNING
+                // For updates, the doc_id is preserved. For new inserts, use lastInsertRowId.
                 $docStmt = $this->connection->prepare("
-                    INSERT INTO {$index} (id, content, metadata, language, type, timestamp)
+                    INSERT OR REPLACE INTO {$index} (id, content, metadata, language, type, timestamp)
                     VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                        content=excluded.content,
-                        metadata=excluded.metadata,
-                        language=excluded.language,
-                        type=excluded.type,
-                        timestamp=excluded.timestamp
-                    RETURNING doc_id
                 ");
             } else {
                 $docStmt = $this->connection->prepare("
@@ -489,7 +483,12 @@ class SqliteStorage implements StorageInterface
                 ");
             }
 
-            // Process all documents in a single transaction
+            // Collect FTS data for batch insert
+            $ftsData = [];
+            $termsData = [];
+            $spatialDocs = [];
+
+            // Process all documents - insert main docs and collect FTS/terms data
             foreach ($documents as $document) {
                 $id = $document['id'];
                 $content = json_encode($document['content']);
@@ -525,30 +524,42 @@ class SqliteStorage implements StorageInterface
                 // Insert main document
                 $docStmt->execute([$id, $content, $metadata, $language, $type, $timestamp]);
 
-                // Insert FTS content
+                // Collect FTS data for batch insert
                 if ($schema === 'external') {
-                    // Get doc_id from RETURNING clause (avoids extra SELECT query)
-                    $docId = $docStmt->fetchColumn();
-                    $docStmt->closeCursor(); // Must close cursor before next operation
-                    $contentText = $this->getFieldText($document['content'], 'content', $index);
-                    $ftsStmt->execute([$docId, $contentText]);
+                    $docId = $this->connection->lastInsertId();
+                    $ftsData[] = [$docId, $this->getFieldText($document['content'], 'content', $index)];
                 } else {
-                    // For non-external, insert with all columns
                     $values = [$id];
-                    // Use the validated columns from earlier
                     foreach ($ftsColumns as $col) {
                         $values[] = $this->getFieldText($document['content'], $col, $index);
                     }
-                    $ftsStmt->execute($values);
+                    $ftsData[] = $values;
                 }
 
-                // Only index terms if Levenshtein fuzzy search is enabled
-                if ($this->useTermsIndex && $termsStmt) {
-                    $this->indexTermsWithStatement($termsStmt, $id, $document['content']);
+                // Collect terms data if enabled
+                if ($this->useTermsIndex) {
+                    $termsData[] = [$id, $document['content']];
                 }
 
-                // Handle spatial indexing
-                $this->indexSpatialData($index, $id, $document);
+                // Collect spatial data
+                $spatialDocs[] = [$id, $document];
+            }
+
+            // Batch insert FTS entries
+            foreach ($ftsData as $ftsRow) {
+                $ftsStmt->execute($ftsRow);
+            }
+
+            // Batch insert terms if enabled
+            if ($this->useTermsIndex && $termsStmt) {
+                foreach ($termsData as [$docId, $docContent]) {
+                    $this->indexTermsWithStatement($termsStmt, $docId, $docContent);
+                }
+            }
+
+            // Batch insert spatial data
+            foreach ($spatialDocs as [$docId, $doc]) {
+                $this->indexSpatialData($index, $docId, $doc);
             }
 
             $this->connection->commit();

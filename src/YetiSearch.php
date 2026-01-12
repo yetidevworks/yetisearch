@@ -368,9 +368,11 @@ class YetiSearch
      *
      * @param string $indexName The index name
      * @param string $prefix The ID prefix to match (e.g., "page123#chunk" to delete all chunks)
+     * @param bool $rebuildFts Whether to rebuild FTS after deletion (default true). Set to false
+     *                         when doing multiple deletions followed by inserts, then call rebuildFts() once at the end.
      * @return int Number of documents deleted
      */
-    public function deleteByIdPrefix(string $indexName, string $prefix): int
+    public function deleteByIdPrefix(string $indexName, string $prefix, bool $rebuildFts = true): int
     {
         $storage = $this->getStorage();
 
@@ -379,7 +381,7 @@ class YetiSearch
             return 0;
         }
 
-        return $storage->deleteByIdPrefix($indexName, $prefix);
+        return $storage->deleteByIdPrefix($indexName, $prefix, $rebuildFts);
     }
 
     /**
