@@ -278,24 +278,32 @@ class Indexer implements IndexerInterface
             foreach ($chunks as $index => $chunkData) {
                 // Support both simple string chunks and structured chunks
                 if (is_string($chunkData)) {
-                    // Simple string chunk
-                    $chunkContent = $chunkData;
+                    // Simple string chunk - merge with parent content
+                    $chunkContentArray = array_merge($processedContent, ['content' => $chunkData]);
                     $chunkMetadata = [];
                 } else {
                     // Structured chunk with content and optional metadata
-                    $chunkContent = $chunkData['content'] ?? '';
+                    $chunkContentData = $chunkData['content'] ?? '';
                     $chunkMetadata = $chunkData['metadata'] ?? [];
+
+                    // If content is an array (pre-processed by plugin), use it directly
+                    // Otherwise, merge string content with parent
+                    if (is_array($chunkContentData)) {
+                        $chunkContentArray = $chunkContentData;
+                    } else {
+                        $chunkContentArray = array_merge($processedContent, ['content' => $chunkContentData]);
+                    }
                 }
 
                 $chunkId = $id . '#chunk' . $index;
                 $chunkDoc = [
                     'id' => $chunkId,
                     'parent_id' => $id,
-                    'content' => array_merge($processedContent, ['content' => $chunkContent]),
+                    'content' => $chunkContentArray,
                     'metadata' => array_merge($metadata, $chunkMetadata, [
                         'chunk_index' => $index,
                         'is_chunk' => true,
-                        'parent_route' => $processedContent['route'] ?? ''
+                        'parent_route' => $chunkContentArray['route'] ?? $processedContent['route'] ?? ''
                     ]),
                     'language' => $language,
                     'type' => $type,

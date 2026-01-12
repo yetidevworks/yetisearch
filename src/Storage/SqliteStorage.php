@@ -362,12 +362,22 @@ class SqliteStorage implements StorageInterface
             $ftsColumns = $this->getFtsColumns($index);
             if ($schema === 'external') {
                 $docId = $this->getDocId($index, $id);
-                // For external content, FTS5 reads from the content table
-                // We only need to insert the rowid to trigger indexing
-                $ftsSql = "INSERT OR REPLACE INTO {$index}_fts (rowid, content) VALUES (?, ?)";
-                $ftsStmt = $this->connection->prepare($ftsSql);
-                // Combine all content into a single text value for FTS
                 $contentText = $this->getFieldText($document['content'], 'content', $index);
+
+                // For external content FTS5, we must explicitly delete the old entry
+                // before inserting the new one, otherwise old terms remain in the vocabulary.
+                // Use the special 'delete' command to remove old FTS entry for this rowid.
+                // We delete with empty content since the actual content doesn't matter for deletion.
+                try {
+                    $deleteFtsSql = "INSERT INTO {$index}_fts({$index}_fts, rowid, content) VALUES('delete', ?, ?)";
+                    $this->connection->prepare($deleteFtsSql)->execute([$docId, '']);
+                } catch (\PDOException $e) {
+                    // Ignore deletion errors (e.g., if entry doesn't exist)
+                }
+
+                // Now insert the new FTS entry
+                $ftsSql = "INSERT INTO {$index}_fts (rowid, content) VALUES (?, ?)";
+                $ftsStmt = $this->connection->prepare($ftsSql);
                 $ftsStmt->execute([$docId, $contentText]);
             } else {
                 $placeholders = implode(', ', array_fill(0, count($ftsColumns) + 1, '?'));
@@ -435,9 +445,12 @@ class SqliteStorage implements StorageInterface
 
             // Prepare FTS insert statement dynamically
             $ftsColumns = $this->getFtsColumns($index);
+            $ftsDeleteStmt = null;
             if ($schema === 'external') {
                 // External content with JSON storage only supports single-column FTS
-                $ftsStmt = $this->connection->prepare("INSERT OR REPLACE INTO {$index}_fts (rowid, content) VALUES (?, ?)");
+                // Prepare delete statement to remove old FTS entries before inserting
+                $ftsDeleteStmt = $this->connection->prepare("INSERT INTO {$index}_fts({$index}_fts, rowid, content) VALUES('delete', ?, ?)");
+                $ftsStmt = $this->connection->prepare("INSERT INTO {$index}_fts (rowid, content) VALUES (?, ?)");
             } else {
                 // Sanitize column names to ensure they're valid SQL identifiers
                 $validColumns = [];
@@ -508,9 +521,16 @@ class SqliteStorage implements StorageInterface
 
                 // Insert FTS content
                 if ($schema === 'external') {
-                    // For external content, just insert rowid and combined content
+                    // For external content, we must delete old entry before inserting new one
+                    // to properly update the FTS vocabulary
                     $docId = $this->getDocId($index, $id);
                     $contentText = $this->getFieldText($document['content'], 'content', $index);
+                    // Delete old entry (ignore errors if it doesn't exist)
+                    try {
+                        $ftsDeleteStmt->execute([$docId, '']);
+                    } catch (\PDOException $e) {
+                        // Ignore - entry may not exist
+                    }
                     $ftsStmt->execute([$docId, $contentText]);
                 } else {
                     // For non-external, insert with all columns
@@ -624,6 +644,86 @@ class SqliteStorage implements StorageInterface
             $this->connection->rollBack();
             throw new StorageException("Failed to delete document: " . $e->getMessage());
         }
+    }
+
+    /**
+     * Delete all documents whose ID starts with the given prefix.
+     * Useful for cleaning up chunks when a parent document is updated.
+     *
+     * @param string $index The index name
+     * @param string $prefix The ID prefix to match (e.g., "page123#chunk" to delete all chunks)
+     * @return int Number of documents deleted
+     */
+    public function deleteByIdPrefix(string $index, string $prefix): int
+    {
+        $this->ensureConnected();
+
+        // Invalidate cache for this index
+        if ($this->queryCache) {
+            $this->queryCache->invalidate($index);
+        }
+
+        $schema = $this->getSchemaMode($index);
+        $deletedCount = 0;
+
+        try {
+            // First, get all IDs that match the prefix
+            $escapedPrefix = str_replace(['%', '_'], ['\\%', '\\_'], $prefix);
+            $stmt = $this->connection->prepare("SELECT id FROM {$index} WHERE id LIKE ? ESCAPE '\\'");
+            $stmt->execute([$escapedPrefix . '%']);
+            $ids = $stmt->fetchAll(\PDO::FETCH_COLUMN);
+
+            if (empty($ids)) {
+                return 0;
+            }
+
+            $this->connection->beginTransaction();
+
+            // Delete from main table
+            $placeholders = implode(',', array_fill(0, count($ids), '?'));
+            $this->connection->prepare("DELETE FROM {$index} WHERE id IN ({$placeholders})")->execute($ids);
+            $deletedCount = count($ids);
+
+            // Handle FTS deletion based on schema
+            if ($schema === 'external') {
+                // For external content tables, rebuild FTS to sync
+                $this->connection->exec("INSERT INTO {$index}_fts({$index}_fts) VALUES('rebuild')");
+            } else {
+                // For non-external content, delete matching rows
+                $this->connection->prepare("DELETE FROM {$index}_fts WHERE id IN ({$placeholders})")->execute($ids);
+            }
+
+            // Terms table
+            if ($this->useTermsIndex) {
+                $this->connection->prepare("DELETE FROM {$index}_terms WHERE document_id IN ({$placeholders})")->execute($ids);
+            }
+
+            // Spatial cleanup
+            if ($schema === 'external') {
+                // Get doc_ids for spatial cleanup
+                foreach ($ids as $id) {
+                    $docId = $this->getDocId($index, $id);
+                    if ($docId !== null) {
+                        $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?")->execute([$docId]);
+                    }
+                }
+            } else {
+                foreach ($ids as $id) {
+                    $this->connection->prepare("DELETE FROM {$index}_id_map WHERE string_id = ?")->execute([$id]);
+                    $spatialId = $this->getNumericId($id);
+                    $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?")->execute([$spatialId]);
+                }
+            }
+
+            $this->connection->commit();
+        } catch (\PDOException $e) {
+            if ($this->connection->inTransaction()) {
+                $this->connection->rollBack();
+            }
+            throw new StorageException("Failed to delete documents by prefix: " . $e->getMessage());
+        }
+
+        return $deletedCount;
     }
 
     public function search(string $index, array $query): array

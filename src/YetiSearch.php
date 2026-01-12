@@ -362,6 +362,44 @@ class YetiSearch
         $this->deleteDocument($indexName, $id);
     }
 
+    /**
+     * Delete all documents whose ID starts with the given prefix.
+     * Useful for cleaning up chunks when a parent document is updated.
+     *
+     * @param string $indexName The index name
+     * @param string $prefix The ID prefix to match (e.g., "page123#chunk" to delete all chunks)
+     * @return int Number of documents deleted
+     */
+    public function deleteByIdPrefix(string $indexName, string $prefix): int
+    {
+        $storage = $this->getStorage();
+
+        // Check if index exists before trying to delete
+        if (!$storage->indexExists($indexName)) {
+            return 0;
+        }
+
+        return $storage->deleteByIdPrefix($indexName, $prefix);
+    }
+
+    /**
+     * Rebuild the FTS index for the given index.
+     * Useful after batch updates to external content FTS tables to ensure
+     * the FTS vocabulary is in sync with the content table.
+     *
+     * @param string $indexName The index name
+     */
+    public function rebuildFts(string $indexName): void
+    {
+        $storage = $this->getStorage();
+
+        if (!$storage->indexExists($indexName)) {
+            return;
+        }
+
+        $storage->rebuildFts($indexName);
+    }
+
     // Clear index method
     public function clear(string $indexName): void
     {
