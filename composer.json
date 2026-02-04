@@ -45,13 +45,7 @@
         "test:watch": "phpunit-watcher watch",
         "phpstan": "phpstan analyse src --level 2",
         "cs": "phpcs --standard=PSR12 src/",
-        "cs-fix": "phpcbf --standard=PSR12 src/",
-        "post-install-cmd": [
-            "@php -r \"if (DIRECTORY_SEPARATOR==='/' && file_exists('bin/yetisearch')) { chmod('bin/yetisearch', 0755); echo 'Set executable bit on bin/yetisearch\\n'; }\""
-        ],
-        "post-update-cmd": [
-            "@php -r \"if (DIRECTORY_SEPARATOR==='/' && file_exists('bin/yetisearch')) { chmod('bin/yetisearch', 0755); echo 'Set executable bit on bin/yetisearch\\n'; }\""
-        ]
+        "cs-fix": "phpcbf --standard=PSR12 src/"
     },
     "config": {
         "sort-packages": true
