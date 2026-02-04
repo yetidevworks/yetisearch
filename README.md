@@ -1016,6 +1016,82 @@ if ($results['total'] === 0 && !empty($results['suggestions'])) {
 
 The enhanced fuzzy search provides significantly better user experience by automatically correcting common typos while maintaining high precision through consensus scoring.
 
+#### Understanding Fuzzy Search vs. Spelling Suggestions
+
+YetiSearch provides two distinct but complementary features for handling typos:
+
+**1. Fuzzy Search** - Returns documents with typo-tolerant matching
+- **When**: Query has `fuzzy: true` option
+- **Behavior**: Expands search to include similar terms and returns matching documents
+- **Result**: Returns documents (e.g., searching "defered" returns pages about "deferred")
+
+**2. Spelling Suggestions** - Shows "Did you mean?" corrections
+- **When**: Search returns **zero results** AND `enable_suggestions: true`
+- **Behavior**: Suggests corrected spelling but returns empty results
+- **Result**: Returns 0 documents + suggestion string (e.g., "Did you mean: deferred?")
+
+**Key Configuration:**
+
+```php
+$config = [
+    'search' => [
+        'enable_fuzzy' => true,          // REQUIRED for both features (enables correction infrastructure)
+        'enable_suggestions' => true,     // Enable "Did you mean?" when no results found
+        'correction_threshold' => 0.5,    // Lower = more permissive suggestions (default: 0.6)
+    ]
+];
+```
+
+**Critical Requirement:** `enable_fuzzy` must be `true` for suggestions to work, even if you don't want fuzzy search results. This is because the spelling correction algorithm uses the fuzzy matching infrastructure.
+
+**Interaction Matrix:**
+
+| enable_fuzzy | Query fuzzy option | enable_suggestions | Behavior |
+|--------------|-------------------|--------------------|----------|
+| `true` | `false` | `true` | Exact search; shows suggestion if 0 results |
+| `true` | `true` | `true` | Fuzzy search; returns results (no suggestion shown) |
+| `true` | `true` | `false` | Fuzzy search; returns results |
+| `false` | N/A | `true` | ⚠️ Suggestions won't work - requires enable_fuzzy |
+
+**Usage Pattern:**
+
+```php
+// Configure engine
+$search = new YetiSearch([
+    'search' => [
+        'enable_fuzzy' => true,
+        'enable_suggestions' => true,
+    ]
+]);
+
+// Exact search with suggestions on no results
+$results = $search->search('docs', 'defered', ['fuzzy' => false]);
+// Returns: { total: 0, suggestion: "deferred" }
+
+// Fuzzy search (returns documents, no suggestion needed)
+$results = $search->search('docs', 'defered', ['fuzzy' => true]);
+// Returns: { total: 5, hits: [...], suggestion: null }
+```
+
+**Per-Index Default:**
+
+You can set the default `fuzzy` option for an index:
+
+```php
+'indexes' => [
+    'pages' => [
+        'options' => [
+            'fuzzy' => false  // Queries default to exact match (shows suggestions if no results)
+        ]
+    ]
+]
+```
+
+**Recommendation:** For optimal user experience, do an exact search first (with `fuzzy: false`). If there are no results and a suggestion is returned, either:
+1. Display "Did you mean: [suggestion]?" to the user
+2. Automatically retry with the suggested term
+3. Automatically retry with `fuzzy: true` to find similar matches
+
 ### Query Result Caching
 
 YetiSearch includes built-in query result caching to dramatically improve performance for repeated searches:

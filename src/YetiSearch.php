@@ -230,13 +230,15 @@ class YetiSearch
             }
         }
 
+        $suggestion = $results->getSuggestion();
         return [
             'results' => $documents,
             'total' => $results->getTotalCount(),
             'count' => count($documents),  // Add count for backward compatibility
             'search_time' => $results->getSearchTime(),
             'facets' => $results->getFacets(),
-            'suggestions' => $results->getSuggestion() ? [$results->getSuggestion()] : []
+            'suggestion' => $suggestion,  // Singular for "did you mean?" feature
+            'suggestions' => $suggestion ? [$suggestion] : []  // Plural for compatibility
         ];
     }
 
