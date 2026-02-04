@@ -780,6 +780,8 @@ class SqliteStorage implements StorageInterface
         // Check if we have a search query
         $hasSearchQuery = !empty(trim($searchQuery));
 
+        // Track whether filters have been applied (for wrapped queries)
+        $filtersApplied = false;
 
         // Detect if we need PHP-based sorting (FTS5 + distance sorting)
         $needsPhpSort = false;
@@ -949,11 +951,10 @@ class SqliteStorage implements StorageInterface
                 WHERE 1=1" . $spatial['where'] . "
             ";
             $params = $spatial['params'];
-            $filtersApplied = false;
         }
 
         // Apply language and filters only if not already applied (for wrapped queries)
-        if (!isset($filtersApplied) || !$filtersApplied) {
+        if (!$filtersApplied) {
             if ($language) {
                 $sql .= " AND d.language = ?";
                 $params[] = $language;
