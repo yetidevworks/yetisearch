@@ -1932,7 +1932,7 @@ class SearchEngine implements SearchEngineInterface
             $indexedLen = mb_strlen($indexedLower);
 
             // Check if the indexed term starts with our query
-            if ($indexedLen > $termLen && str_starts_with($indexedLower, $termLower)) {
+            if ($indexedLen > $termLen && strpos($indexedLower, $termLower) === 0) {
                 // Prefer matches that are not too much longer (1-5 chars more)
                 $extraLen = $indexedLen - $termLen;
                 if ($extraLen <= 5) {
