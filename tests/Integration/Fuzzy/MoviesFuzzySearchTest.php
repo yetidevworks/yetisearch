@@ -10,6 +10,8 @@ use YetiSearch\Tests\TestCase;
  * Tests various real-world typo scenarios that the fuzzy algorithms can handle.
  * Note: Short words (4 chars or less) have limited fuzzy matching due to
  * trigram similarity thresholds - this is expected behavior.
+ *
+ * @group external-data
  */
 class MoviesFuzzySearchTest extends TestCase
 {
@@ -19,6 +21,10 @@ class MoviesFuzzySearchTest extends TestCase
 
     protected function setUp(): void
     {
+        if (!file_exists(self::MOVIES_FILE)) {
+            $this->markTestSkipped('Movies benchmark file not available (benchmarks/movies.json is gitignored)');
+        }
+
         parent::setUp();
 
         $this->createSearchInstance([
