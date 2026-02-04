@@ -429,11 +429,19 @@ class SqliteStorage implements StorageInterface
             // Prepare statements once
             $schema = $this->getSchemaMode($index);
             if ($schema === 'external') {
-                // Use INSERT OR REPLACE for batch operations - faster than ON CONFLICT with RETURNING
-                // For updates, the doc_id is preserved. For new inserts, use lastInsertRowId.
+                // Use ON CONFLICT DO UPDATE to preserve doc_id on updates.
+                // INSERT OR REPLACE would delete and re-insert, generating new doc_id.
+                // Use RETURNING to get the doc_id for FTS/spatial indexing.
                 $docStmt = $this->connection->prepare("
-                    INSERT OR REPLACE INTO {$index} (id, content, metadata, language, type, timestamp)
+                    INSERT INTO {$index} (id, content, metadata, language, type, timestamp)
                     VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        content=excluded.content,
+                        metadata=excluded.metadata,
+                        language=excluded.language,
+                        type=excluded.type,
+                        timestamp=excluded.timestamp
+                    RETURNING doc_id
                 ");
             } else {
                 $docStmt = $this->connection->prepare("
@@ -526,7 +534,9 @@ class SqliteStorage implements StorageInterface
 
                 // Collect FTS data for batch insert
                 if ($schema === 'external') {
-                    $docId = $this->connection->lastInsertId();
+                    // Get doc_id from RETURNING clause (works for both inserts and updates)
+                    $docId = $docStmt->fetchColumn();
+                    $docStmt->closeCursor();
                     $ftsData[] = [$docId, $this->getFieldText($document['content'], 'content', $index)];
                 } else {
                     $values = [$id];
@@ -894,6 +904,22 @@ class SqliteStorage implements StorageInterface
                 $inner = "SELECT d.*, {$bm25}" . $spatial['select'] . " FROM {$index} d INNER JOIN {$index}_fts f ON d.id = f.id" . $spatial['join'] . " WHERE {$index}_fts MATCH ?" . $spatial['where'];
             }
             $params = array_merge([$searchQuery], $spatial['params']);
+
+            // Apply language filter to inner query (while d is in scope)
+            if ($language) {
+                $inner .= " AND d.language = ?";
+                $params[] = $language;
+            }
+
+            // Apply filters to inner query (while d is in scope)
+            foreach ($filters as $filter) {
+                [$filterSql, $filterParams] = $this->buildFilterClause($filter);
+                if ($filterSql !== '') {
+                    $inner .= $filterSql;
+                    $params = array_merge($params, $filterParams);
+                }
+            }
+
             if (isset($geoFilters['near']) && !empty($spatial['select']) && strpos($spatial['select'], 'distance') !== false) {
                 $radius = (float)$geoFilters['near']['radius'];
                 $units = $geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? null);
@@ -910,10 +936,12 @@ class SqliteStorage implements StorageInterface
             } else {
                 $sql = $inner;
             }
+            // Mark that filters/language were already applied
+            $filtersApplied = true;
         } else {
             // No text search, only filters and/or spatial search
             $sql = "
-                SELECT 
+                SELECT
                     d.id, d.content, d.metadata, d.language, d.type, d.timestamp,
                     0 as rank" . $spatial['select'] . "
                 FROM {$index} d" .
@@ -921,19 +949,22 @@ class SqliteStorage implements StorageInterface
                 WHERE 1=1" . $spatial['where'] . "
             ";
             $params = $spatial['params'];
+            $filtersApplied = false;
         }
 
+        // Apply language and filters only if not already applied (for wrapped queries)
+        if (!isset($filtersApplied) || !$filtersApplied) {
+            if ($language) {
+                $sql .= " AND d.language = ?";
+                $params[] = $language;
+            }
 
-        if ($language) {
-            $sql .= " AND d.language = ?";
-            $params[] = $language;
-        }
-
-        foreach ($filters as $filter) {
-            [$filterSql, $filterParams] = $this->buildFilterClause($filter);
-            if ($filterSql !== '') {
-                $sql .= $filterSql;
-                $params = array_merge($params, $filterParams);
+            foreach ($filters as $filter) {
+                [$filterSql, $filterParams] = $this->buildFilterClause($filter);
+                if ($filterSql !== '') {
+                    $sql .= $filterSql;
+                    $params = array_merge($params, $filterParams);
+                }
             }
         }
 
