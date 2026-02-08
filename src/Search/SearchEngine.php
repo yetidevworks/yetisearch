@@ -128,6 +128,7 @@ class SearchEngine implements SearchEngineInterface
             $originalLimit = $storageQuery['limit'];
             $originalOffset = $storageQuery['offset'];
 
+
             if ($options['unique_by_route'] ?? false) {
                 // Temporarily override limit to get all results
                 $storageQuery['limit'] = $this->config['max_results'];
@@ -255,9 +256,6 @@ class SearchEngine implements SearchEngineInterface
                 'time' => $searchTime
             ]);
 
-            // Restore original config
-            $this->config = $originalConfig;
-
             return $finalResults;
         } catch (\Exception $e) {
             $this->logger->error('Search failed', [
@@ -265,10 +263,10 @@ class SearchEngine implements SearchEngineInterface
                 'error' => $e->getMessage()
             ]);
 
-            // Restore original config before throwing
-            $this->config = $originalConfig;
-
             throw new SearchException("Search failed: " . $e->getMessage(), 0, $e);
+        } finally {
+            // Always restore original config, even if an exception is thrown
+            $this->config = $originalConfig;
         }
     }
 
@@ -759,16 +757,12 @@ class SearchEngine implements SearchEngineInterface
             $filteredDocument = $this->filterResultFields($contentFields);
 
             // Log first result to see structure
-            static $logged = false;
-            if (!$logged) {
-                $this->logger->debug('Result document fields', [
-                    'raw_fields' => array_keys($contentFields),
-                    'filtered_fields' => array_keys($filteredDocument),
-                    'has_route' => isset($filteredDocument['route']),
-                    'route_value' => $filteredDocument['route'] ?? 'NOT SET'
-                ]);
-                $logged = true;
-            }
+            $this->logger->debug('Result document fields', [
+                'raw_fields' => array_keys($contentFields),
+                'filtered_fields' => array_keys($filteredDocument),
+                'has_route' => isset($filteredDocument['route']),
+                'route_value' => $filteredDocument['route'] ?? 'NOT SET'
+            ]);
 
             $resultData = [
                 'id' => $result['id'],
@@ -1062,11 +1056,13 @@ class SearchEngine implements SearchEngineInterface
         $end = min($textLength, $start + $length);
 
         if ($start > 0) {
-            $start = strpos($text, ' ', $start) ?: $start;
+            $pos = strpos($text, ' ', $start);
+            $start = $pos !== false ? $pos : $start;
         }
 
         if ($end < $textLength) {
-            $end = strrpos(substr($text, 0, $end), ' ') ?: $end;
+            $pos = strrpos(substr($text, 0, $end), ' ');
+            $end = $pos !== false ? $pos : $end;
         }
 
         $snippet = substr($text, $start, $end - $start);

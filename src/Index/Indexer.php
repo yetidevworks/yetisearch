@@ -69,7 +69,7 @@ class Indexer implements IndexerInterface
                 continue;
             }
 
-            $id = $document['id'] ?? uniqid();
+            $id = $document['id'] ?? bin2hex(random_bytes(8));
 
             try {
                 $processed[] = $this->processDocument($document);
@@ -235,7 +235,7 @@ class Indexer implements IndexerInterface
         $content = $document['content'] ?? [];
         $metadata = $document['metadata'] ?? [];
         $language = $document['language'] ?? null;
-        $id = $document['id'] ?? uniqid();
+        $id = $document['id'] ?? bin2hex(random_bytes(8));
         $type = $document['type'] ?? 'default';
         $timestamp = $document['timestamp'] ?? time();
 

@@ -23,6 +23,58 @@ class SqliteStorage implements StorageInterface
     private bool $externalContentDefault = false;
     private ?QueryCache $queryCache = null;
 
+    /**
+     * Allowed operators for filter clauses.
+     */
+    private const ALLOWED_FILTER_OPERATORS = [
+        '=', '!=', '<', '>', '<=', '>=',
+        'like', 'not like', 'in', 'not in',
+        'between', 'is null', 'is not null',
+        'contains', 'exists', 'not exists', '=?',
+    ];
+
+    /**
+     * Validate that an index name is a safe SQL identifier.
+     *
+     * @throws \InvalidArgumentException If the name is not valid
+     */
+    private function validateIndexName(string $name): void
+    {
+        if (!preg_match('/^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/', $name)) {
+            throw new \InvalidArgumentException(
+                "Invalid index name '{$name}': must match /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/"
+            );
+        }
+    }
+
+    /**
+     * Validate that a field name is safe for use in SQL expressions.
+     *
+     * @throws \InvalidArgumentException If the field name is not valid
+     */
+    private function validateFieldName(string $field): void
+    {
+        if (!preg_match('/^[a-zA-Z_][a-zA-Z0-9_.]*$/', $field)) {
+            throw new \InvalidArgumentException(
+                "Invalid field name '{$field}': must match /^[a-zA-Z_][a-zA-Z0-9_.]*$/"
+            );
+        }
+    }
+
+    /**
+     * Validate that a filter operator is in the allowed list.
+     *
+     * @throws \InvalidArgumentException If the operator is not allowed
+     */
+    private function validateOperator(string $operator): void
+    {
+        if (!in_array(strtolower($operator), self::ALLOWED_FILTER_OPERATORS, true)) {
+            throw new \InvalidArgumentException(
+                "Invalid filter operator '{$operator}': must be one of " . implode(', ', self::ALLOWED_FILTER_OPERATORS)
+            );
+        }
+    }
+
     public function connect(array $config): void
     {
         $this->config = $config;
@@ -56,7 +108,11 @@ class SqliteStorage implements StorageInterface
 
             $this->connection->exec('PRAGMA foreign_keys = ON');
             $this->connection->exec('PRAGMA journal_mode = WAL');
-            $this->connection->exec('PRAGMA synchronous = OFF'); // Most aggressive for bulk loading
+            $synchronous = strtoupper($config['synchronous'] ?? 'NORMAL');
+            if (!in_array($synchronous, ['OFF', 'NORMAL', 'FULL', 'EXTRA'], true)) {
+                $synchronous = 'NORMAL';
+            }
+            $this->connection->exec("PRAGMA synchronous = {$synchronous}");
             $this->connection->exec('PRAGMA temp_store = MEMORY');
             $this->connection->exec('PRAGMA cache_size = -20000');
             $this->connection->exec('PRAGMA mmap_size = 268435456'); // 256MB memory map
@@ -102,6 +158,7 @@ class SqliteStorage implements StorageInterface
 
     public function createIndex(string $name, array $options = []): void
     {
+        $this->validateIndexName($name);
         $this->ensureConnected();
 
         try {
@@ -265,6 +322,7 @@ class SqliteStorage implements StorageInterface
 
     public function dropIndex(string $name): void
     {
+        $this->validateIndexName($name);
         $this->ensureConnected();
 
         try {
@@ -281,6 +339,7 @@ class SqliteStorage implements StorageInterface
 
     public function indexExists(string $name): bool
     {
+        $this->validateIndexName($name);
         $this->ensureConnected();
 
         $stmt = $this->connection->prepare(
@@ -293,6 +352,7 @@ class SqliteStorage implements StorageInterface
 
     public function insert(string $index, array $document): void
     {
+        $this->validateIndexName($index);
         $this->ensureConnected();
 
         // Invalidate cache for this index when inserting
@@ -412,6 +472,7 @@ class SqliteStorage implements StorageInterface
 
     public function insertBatch(string $index, array $documents): void
     {
+        $this->validateIndexName($index);
         $this->ensureConnected();
 
         // Invalidate cache for this index when batch inserting
@@ -604,6 +665,7 @@ class SqliteStorage implements StorageInterface
 
     public function update(string $index, string $id, array $document): void
     {
+        $this->validateIndexName($index);
         // Invalidate cache for this index when updating
         if ($this->queryCache) {
             $this->queryCache->invalidate($index);
@@ -615,6 +677,7 @@ class SqliteStorage implements StorageInterface
 
     public function delete(string $index, string $id): void
     {
+        $this->validateIndexName($index);
         $this->ensureConnected();
 
         // Invalidate cache for this index when deleting
@@ -636,9 +699,16 @@ class SqliteStorage implements StorageInterface
 
             // Handle FTS deletion based on schema
             if ($schema === 'external') {
-                // For external content tables, we need to rebuild the FTS to sync with content table
-                // The 'rebuild' command rebuilds the FTS index from the content table
-                $this->connection->exec("INSERT INTO {$index}_fts({$index}_fts) VALUES('rebuild')");
+                // For external content, use FTS5's targeted delete command
+                // instead of a full rebuild (O(1) vs O(N))
+                if ($savedDocId !== null) {
+                    try {
+                        $deleteFtsSql = "INSERT INTO {$index}_fts({$index}_fts, rowid, content) VALUES('delete', ?, ?)";
+                        $this->connection->prepare($deleteFtsSql)->execute([$savedDocId, '']);
+                    } catch (\PDOException $e) {
+                        // Ignore deletion errors (e.g., if entry doesn't exist)
+                    }
+                }
             } else {
                 // For non-external content, regular DELETE works
                 $this->connection->prepare("DELETE FROM {$index}_fts WHERE id = ?")->execute([$id]);
@@ -679,6 +749,7 @@ class SqliteStorage implements StorageInterface
      */
     public function deleteByIdPrefix(string $index, string $prefix, bool $rebuildFts = true): int
     {
+        $this->validateIndexName($index);
         $this->ensureConnected();
 
         // Invalidate cache for this index
@@ -701,6 +772,17 @@ class SqliteStorage implements StorageInterface
             }
 
             $this->connection->beginTransaction();
+
+            // Collect spatial IDs BEFORE deleting from main table
+            $spatialIds = [];
+            if ($schema === 'external') {
+                foreach ($ids as $id) {
+                    $docId = $this->getDocId($index, $id);
+                    if ($docId !== null) {
+                        $spatialIds[] = $docId;
+                    }
+                }
+            }
 
             // Delete from main table
             $placeholders = implode(',', array_fill(0, count($ids), '?'));
@@ -726,12 +808,8 @@ class SqliteStorage implements StorageInterface
 
             // Spatial cleanup
             if ($schema === 'external') {
-                // Get doc_ids for spatial cleanup
-                foreach ($ids as $id) {
-                    $docId = $this->getDocId($index, $id);
-                    if ($docId !== null) {
-                        $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?")->execute([$docId]);
-                    }
+                foreach ($spatialIds as $spatialId) {
+                    $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?")->execute([$spatialId]);
                 }
             } else {
                 foreach ($ids as $id) {
@@ -754,6 +832,7 @@ class SqliteStorage implements StorageInterface
 
     public function search(string $index, array $query): array
     {
+        $this->validateIndexName($index);
         $this->ensureConnected();
 
         // Check cache first if enabled
@@ -1003,9 +1082,11 @@ class SqliteStorage implements StorageInterface
                     } elseif (strpos($field, 'metadata.') === 0) {
                         // Metadata field - use JSON extraction
                         $metaField = substr($field, 9);
+                        $this->validateFieldName($metaField);
                         $orderClauses[] = "CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) {$dir}";
                     } else {
-                        // Assume it's a direct column (for backward compatibility)
+                        // Validate field name for safety
+                        $this->validateFieldName($field);
                         $orderClauses[] = "d.{$field} {$dir}";
                     }
                 }
@@ -1158,6 +1239,7 @@ class SqliteStorage implements StorageInterface
 
     public function count(string $index, array $query): int
     {
+        $this->validateIndexName($index);
         $this->ensureConnected();
 
         $searchQuery = $query['query'] ?? '';
@@ -1242,6 +1324,7 @@ class SqliteStorage implements StorageInterface
 
     public function getDocument(string $index, string $id): ?array
     {
+        $this->validateIndexName($index);
         $this->ensureConnected();
 
         $stmt = $this->connection->prepare("SELECT * FROM {$index} WHERE id = ?");
@@ -1264,6 +1347,7 @@ class SqliteStorage implements StorageInterface
 
     public function optimize(string $index): void
     {
+        $this->validateIndexName($index);
         $this->ensureConnected();
 
         try {
@@ -1277,6 +1361,7 @@ class SqliteStorage implements StorageInterface
 
     public function getIndexStats(string $index): array
     {
+        $this->validateIndexName($index);
         $this->ensureConnected();
 
         $stats = [
@@ -1324,6 +1409,7 @@ class SqliteStorage implements StorageInterface
      */
     public function migrateToExternalContent(string $index): void
     {
+        $this->validateIndexName($index);
         $this->ensureConnected();
         try {
             $this->connection->beginTransaction();
@@ -1380,13 +1466,20 @@ class SqliteStorage implements StorageInterface
             while ($row = $stmt->fetch()) {
                 $tableName = $row['name'];
 
+                // Validate table name before using in queries
+                if (!preg_match('/^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/', $tableName)) {
+                    continue;
+                }
+
                 // Verify this is a valid index by checking for corresponding FTS table
-                $ftsExists = $this->connection->query("
-                    SELECT COUNT(*) 
-                    FROM sqlite_master 
-                    WHERE type = 'table' 
-                    AND name = '{$tableName}_fts'
-                ")->fetchColumn() > 0;
+                $ftsCheck = $this->connection->prepare("
+                    SELECT COUNT(*)
+                    FROM sqlite_master
+                    WHERE type = 'table'
+                    AND name = ?
+                ");
+                $ftsCheck->execute([$tableName . '_fts']);
+                $ftsExists = $ftsCheck->fetchColumn() > 0;
 
                 if ($ftsExists) {
                     // Get additional metadata about the index
@@ -1408,11 +1501,13 @@ class SqliteStorage implements StorageInterface
 
     public function getStats(string $index): array
     {
+        $this->validateIndexName($index);
         return $this->getIndexStats($index);
     }
 
     public function clear(string $index): void
     {
+        $this->validateIndexName($index);
         $this->ensureConnected();
 
         try {
@@ -1481,6 +1576,7 @@ class SqliteStorage implements StorageInterface
         // Apply limit and offset to merged results
         $limit = $query['limit'] ?? 20;
         $offset = $query['offset'] ?? 0;
+        $totalCount = count($allResults);
         $allResults = array_slice($allResults, $offset, $limit);
 
         // Calculate search time
@@ -1489,7 +1585,7 @@ class SqliteStorage implements StorageInterface
         // Return results in a format similar to single index search
         return [
             'results' => $allResults,
-            'total' => count($allResults),
+            'total' => $totalCount,
             'search_time' => $searchTime,
             'indices_searched' => array_filter($indices, [$this, 'indexExists'])
         ];
@@ -1598,6 +1694,7 @@ class SqliteStorage implements StorageInterface
 
     public function rebuildFts(string $index): void
     {
+        $this->validateIndexName($index);
         $this->ensureConnected();
         $schema = $this->getSchemaMode($index);
         $ftsColumns = $this->getFtsColumns($index);
@@ -1845,9 +1942,11 @@ class SqliteStorage implements StorageInterface
 
     private function getNumericId(string $id): int
     {
-        // Create a stable numeric ID from string ID using CRC32
-        // We use abs() to ensure positive integer for R-tree
-        return abs(crc32($id));
+        // Create a stable numeric ID from string ID using a truncated SHA-256 hash
+        // to minimize collision risk (CRC32 has ~50% collision at 77k entries).
+        // We use the first 15 hex chars (60 bits) to stay within PHP_INT_MAX on 64-bit.
+        $hex = substr(hash('sha256', $id), 0, 15);
+        return (int)hexdec($hex);
     }
 
     private function buildSpatialQuery(string $index, array $geoFilters): array
@@ -2139,6 +2238,7 @@ class SqliteStorage implements StorageInterface
 
     public function ensureSpatialTableExists(string $name): void
     {
+        $this->validateIndexName($name);
         $this->ensureConnected();
 
         // Skip if R-tree support is not available
@@ -2543,6 +2643,9 @@ class SqliteStorage implements StorageInterface
         $sql = '';
         $params = [];
 
+        // Validate operator against whitelist
+        $this->validateOperator($operator);
+
         // Direct column filtering (type, language, id, timestamp)
         if (in_array($field, ['type', 'language', 'id', 'timestamp'])) {
             $sql = " AND d.{$field} {$operator} ?";
@@ -2577,6 +2680,9 @@ class SqliteStorage implements StorageInterface
      */
     private function buildJsonFilterClause(string $column, string $field, string $operator, $value): array
     {
+        // Validate field name to prevent SQL injection via JSON path
+        $this->validateFieldName($field);
+
         $sql = '';
         $params = [];
         $jsonPath = "json_extract({$column}, '$.{$field}')";
@@ -2654,9 +2760,7 @@ class SqliteStorage implements StorageInterface
                 break;
 
             default:
-                // Allow custom operators to pass through for advanced use cases
-                $sql = " AND {$jsonPath} {$operator} ?";
-                $params[] = $value;
+                // Operator was already validated by validateOperator(), this is unreachable
                 break;
         }
 

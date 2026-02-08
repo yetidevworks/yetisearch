@@ -1,5 +1,44 @@
 # Changelog
 
+## [2.2.0] - 2026-02-08
+
+### Security Fixes
+- **SQL injection via index name interpolation**: Added `validateIndexName()` enforcing `/^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/` at all 18 public entry points in `SqliteStorage`. Index names are now validated before being interpolated into SQL.
+- **SQL injection via filter operator pass-through**: Added operator whitelist (`ALLOWED_FILTER_OPERATORS`) with `validateOperator()`. The `buildFilterClause()` and `buildJsonFilterClause()` default case no longer passes arbitrary operators into SQL.
+- **SQL injection via JSON field path**: Added `validateFieldName()` enforcing `/^[a-zA-Z_][a-zA-Z0-9_.]*$/` for all field names used in `json_extract()` calls and ORDER BY clauses.
+- **SQL injection via sort field in ORDER BY**: Metadata sort fields and arbitrary field values in ORDER BY are now validated before interpolation.
+- **Second-order SQL injection in `listIndices()`**: Table names from `sqlite_master` are now validated with regex and the FTS existence check uses a parameterized query instead of string interpolation.
+- **PRAGMA synchronous value validation**: The configurable `synchronous` pragma value is now whitelisted to `OFF`, `NORMAL`, `FULL`, or `EXTRA`.
+
+### Bug Fixes
+- **`PRAGMA synchronous = OFF` risked data corruption**: Changed default from `OFF` to `NORMAL` (safe with WAL mode, minimal performance impact). Users can opt-in to `OFF` via `'synchronous' => 'OFF'` config for bulk-load scenarios.
+- **CRC32 hash collision for spatial IDs**: Replaced `abs(crc32($id))` (~50% collision at 77k entries) with a 60-bit SHA-256 hash using `hexdec()` for PHP 7.4 compatibility.
+- **`deleteByIdPrefix()` orphaned spatial data**: Fixed bug where `getDocId()` was called AFTER deleting from the main table (always returned null). Now collects `doc_id` values BEFORE main table deletion.
+- **`extractKeywords()` passed wrong type**: Fixed `StandardAnalyzer::extractKeywords()` passing the full `analyze()` result array to `array_count_values()` instead of just the `tokens` key.
+- **`searchMultiple()` returned paginated count as total**: Fixed `count($allResults)` being called after `array_slice()`. Now captures total count before pagination.
+- **External content FTS deletion rebuilt entire index**: Single document deletion no longer triggers a full FTS rebuild (O(N)). Now uses FTS5's targeted delete command (O(1)), matching the pattern used in `insert()`.
+- **`CacheException` not in exception hierarchy**: Changed `CacheException` to extend `YetiSearchException` instead of `\RuntimeException`, so `catch (YetiSearchException $e)` now catches cache errors.
+- **`FuzzyTermCache` had no file locking**: Added `LOCK_EX` flag to `file_put_contents()` to prevent concurrent process corruption of the JSON cache file.
+- **Config mutation not exception-safe in `SearchEngine`**: Replaced dual config restoration (normal flow + catch block) with a single `try/finally` block to guarantee config is always restored.
+- **`strpos` return value bug in snippet extraction**: Fixed `strpos() ?: $start` treating position 0 as falsy. Now uses proper `!== false` check.
+- **Static `$logged` variable only logged once per process**: Removed the `static $logged` pattern in `processResults()` that prevented debug logging after the first call.
+- **`uniqid()` not unique under concurrency**: Replaced `uniqid()` with `bin2hex(random_bytes(8))` for fallback document IDs in `Indexer`.
+- **No validation on `SearchQuery` limit/offset**: Added `max(0, ...)` clamping in constructor and setter methods to reject negative values.
+
+### Documentation Fixes
+- Fixed 4 PHP syntax errors in README code examples (missing closing `]`)
+- Replaced non-existent `getAnalyzerInstance()` example with config-based approach
+- Fixed `count()` API signature to match actual `count(string $indexName)` (1 param, not 3)
+- Replaced non-existent `insert()`/`insertBatch()` facade methods with actual names (`index()`, `indexDocument()`, `indexBatch()`)
+- Added undocumented public methods to API reference: `deleteByIdPrefix()`, `rebuildFts()`, `close()`, `query()`, `execute()`, `listIndices()`, `generateSuggestions()`
+- Removed 6 unimplemented stemmer languages from feature list (Italian, Portuguese, Dutch, Swedish, Norwegian, Danish)
+- Fixed broken link: `examples/dsl-examples.php` to `examples/dsl-metadata-example.php`
+- Replaced non-existent `YetiSearch\Tools\FuzzyBenchmark` class reference with config-based comparison example
+- Removed non-existent `Models/Document.php` from architecture diagram, added `SearchResults.php`
+
+### Test Configuration
+- Added DSL test suite to `phpunit.xml.dist` pointing to `tests/DSL` directory (was previously unreachable)
+
 ## [2.1.2] - 2026-02-04
 
 ### Bug Fixes

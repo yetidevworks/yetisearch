@@ -73,7 +73,7 @@ class FuzzyTermCache
             return;
         }
 
-        file_put_contents($this->cacheFile, json_encode($this->cache, JSON_UNESCAPED_UNICODE));
+        file_put_contents($this->cacheFile, json_encode($this->cache, JSON_UNESCAPED_UNICODE), LOCK_EX);
     }
 
     /**

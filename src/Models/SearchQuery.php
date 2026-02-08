@@ -29,10 +29,10 @@ class SearchQuery
         $this->query = $query;
 
         if (isset($options['limit'])) {
-            $this->limit = $options['limit'];
+            $this->limit = max(0, $options['limit']);
         }
         if (isset($options['offset'])) {
-            $this->offset = $options['offset'];
+            $this->offset = max(0, $options['offset']);
         }
         if (isset($options['language'])) {
             $this->language = $options['language'];
@@ -93,7 +93,7 @@ class SearchQuery
 
     public function limit(int $limit): self
     {
-        $this->limit = $limit;
+        $this->limit = max(0, $limit);
         return $this;
     }
 
@@ -104,7 +104,7 @@ class SearchQuery
 
     public function offset(int $offset): self
     {
-        $this->offset = $offset;
+        $this->offset = max(0, $offset);
         return $this;
     }
 

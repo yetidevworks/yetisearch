@@ -135,8 +135,8 @@ class StandardAnalyzer implements AnalyzerInterface
 
     public function extractKeywords(string $text, int $limit = 10): array
     {
-        $tokens = $this->analyze($text);
-        $frequencies = array_count_values($tokens);
+        $result = $this->analyze($text);
+        $frequencies = array_count_values($result['tokens']);
 
         arsort($frequencies);
 

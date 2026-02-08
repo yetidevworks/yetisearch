@@ -165,7 +165,7 @@ php examples/apartment-search-simple.php
 - **Pre-chunked indexing**: [`examples/pre-chunked-indexing.php`](examples/pre-chunked-indexing.php) - Custom document chunking with semantic boundaries
 - **Type-ahead search**: [`examples/type-ahead.php`](examples/type-ahead.php) - Interactive as-you-type search
 - **Geo facets and k-NN**: [`examples/geo-facets-knn.php`](examples/geo-facets-knn.php) - Distance faceting and nearest neighbors
-- **DSL examples**: [`examples/dsl-examples.php`](examples/dsl-examples.php) - Query builder demonstrations
+- **DSL examples**: [`examples/dsl-metadata-example.php`](examples/dsl-metadata-example.php) - Query builder demonstrations
 - **Custom fields**: [`examples/apartment-search-tutorial.php`](examples/apartment-search-tutorial.php) - Extended version with amenities
 
 ## Usage Examples
@@ -684,12 +684,6 @@ Supported languages:
 - French
 - German
 - Spanish
-- Italian
-- Portuguese
-- Dutch
-- Swedish
-- Norwegian
-- Danish
 
 ### Custom Stop Words
 
@@ -703,19 +697,19 @@ $search = new YetiSearch([
     ]
 ]);
 
-// Or add them dynamically
-$analyzer = $search->getAnalyzerInstance();
-$analyzer->addCustomStopWord('example');
-$analyzer->addCustomStopWord('test');
+// Or configure stop words at initialization
+$search = new YetiSearch([
+    'analyzer' => [
+        'custom_stop_words' => ['example', 'test']
+    ]
+]);
 
-// Remove a custom stop word
-$analyzer->removeCustomStopWord('test');
-
-// Get all custom stop words
-$customWords = $analyzer->getCustomStopWords();
-
-// Disable all stop word filtering (not recommended)
-$analyzer->setStopWordsDisabled(true);
+// Disable all stop word filtering via config (not recommended)
+$search = new YetiSearch([
+    'analyzer' => [
+        'disable_stop_words' => true
+    ]
+]);
 ```
 
 Custom stop words are applied in addition to the default language-specific stop words. They are case-insensitive and apply across all languages.
@@ -972,14 +966,14 @@ The enhanced fuzzy search uses 5 different algorithms and combines their scores:
 ```php
 // Phonetic typos
 $search->search('docs', 'fone', ['fuzzy' => true]);        // → "phone"
-$search->search('docs', 'thier', ['fuzzy' => true);       // → "their"
+$search->search('docs', 'thier', ['fuzzy' => true]);       // → "their"
 
-// Keyboard proximity typos  
-$search->search('docs', 'qyick', ['fuzzy' => true);       // → "quick"
-$search->search('docs', 'tutoral', ['fuzzy' => true);     // → "tutorial"
+// Keyboard proximity typos
+$search->search('docs', 'qyick', ['fuzzy' => true]);       // → "quick"
+$search->search('docs', 'tutoral', ['fuzzy' => true]);     // → "tutorial"
 
 // Multiple typos in one query
-$search->search('docs', 'qyick fone', ['fuzzy' => true);  // → "quick phone"
+$search->search('docs', 'qyick fone', ['fuzzy' => true]);  // → "quick phone"
 ```
 
 **Enhanced "Did You Mean?" Suggestions:**
@@ -1351,20 +1345,17 @@ $config = [
 ];
 ```
 
-**Algorithm Benchmarking:**
+**Algorithm Comparison:**
 
-YetiSearch includes built-in benchmarking tools to help you choose the best fuzzy algorithm for your use case:
+You can compare fuzzy algorithm performance by configuring different algorithms and testing with your data:
 
 ```php
-// Run benchmarks to compare algorithm performance
-use YetiSearch\Tools\FuzzyBenchmark;
-
-$benchmark = new FuzzyBenchmark($search);
-$results = $benchmark->runAllBenchmarks();
-
-// Results show accuracy and performance metrics for each algorithm
-foreach ($results as $algorithm => $metrics) {
-    echo "$algorithm: {$metrics['accuracy']}% accuracy, {$metrics['avg_time']}ms avg search time\n";
+// Try different algorithms to find the best fit for your use case
+foreach (['trigram', 'levenshtein', 'jaro_winkler'] as $algorithm) {
+    $search = new YetiSearch([
+        'search' => ['fuzzy_algorithm' => $algorithm]
+    ]);
+    // Run your test queries and measure accuracy/speed
 }
 ```
 
@@ -1523,9 +1514,9 @@ YetiSearch/
 ├── Index/              # Indexing logic
 │   └── Indexer.php
 ├── Models/             # Data models
-│   ├── Document.php
 │   ├── SearchQuery.php
-│   └── SearchResult.php
+│   ├── SearchResult.php
+│   └── SearchResults.php
 ├── Search/             # Search implementation
 │   └── SearchEngine.php
 └── Storage/            # Storage backends
@@ -1614,17 +1605,29 @@ $indexer = $search->getIndexer(string $name);
 
 // Search operations
 $results = $search->search(string $indexName, string $query, array $options = []);
-$count = $search->count(string $indexName, string $query, array $options = []);
+$count = $search->count(string $indexName);
 $suggestions = $search->suggest(string $indexName, string $term, array $options = []);
 
 // Index operations
-$search->insert(string $indexName, array $documentData);
-$search->insertBatch(string $indexName, array $documents);
-$search->update(string $indexName, array $documentData);
+$search->index(string $indexName, $documentOrId, $content = null, array $options = []);
+$search->indexDocument(string $indexName, string $id, $content, array $options = []);
+$search->indexBatch(string $indexName, array $documents);
+$search->update(string $indexName, $documentOrId, $content = null, array $options = []);
 $search->delete(string $indexName, string $documentId);
+$search->deleteByIdPrefix(string $indexName, string $prefix, bool $rebuildFts = true): int;
 $search->clear(string $indexName);
 $search->optimize(string $indexName);
+$search->rebuildFts(string $indexName);
 $search->getStats(string $indexName);
+$search->listIndices(): array;
+$search->close(): void;
+
+// Query DSL
+$query = $search->query(string $indexName): SearchQuery;
+$results = $search->execute(SearchQuery $query, string $index): array;
+
+// Suggestions
+$suggestions = $search->generateSuggestions(string $name, string $query, int $maxSuggestions = 3);
 ```
 
 ### Document Structure
