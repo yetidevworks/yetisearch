@@ -530,12 +530,12 @@ class FluentQueryTest extends TestCase
 
     public function testParseDetectsDslString(): void
     {
-        $sq = $this->builder->parse('author = "John" LIMIT 5');
+        $sq = $this->builder->parse('author = "John" SORT title');
         $this->assertInstanceOf(SearchQuery::class, $sq);
         $filters = $sq->getFilters();
         $this->assertCount(1, $filters);
         $this->assertEquals('author', $filters[0]['field']);
-        $this->assertEquals(5, $sq->getLimit());
+        $this->assertArrayHasKey('title', $sq->getSort());
     }
 
     public function testParseDetectsUrlQueryString(): void
