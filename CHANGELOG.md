@@ -39,6 +39,12 @@
 ### Test Configuration
 - Added DSL test suite to `phpunit.xml.dist` pointing to `tests/DSL` directory (was previously unreachable)
 
+### Tests
+- Added 60 comprehensive DSL tests across 3 new test files:
+  - `QueryParserDetailedTest` (46 tests): query text parsing, all filter operators, IN/NOT IN, LIKE, grouped conditions, FIELDS/SORT keywords, field aliases, dot-notation fields, edge cases
+  - `URLQueryParserTest` (51 tests): all 14 filter operator mappings, value coercion, sorting, fields, pagination modes, fuzzy/highlight/facets/geo/language/boost, `parseFromQueryString()`
+  - `FluentQueryTest` (43 tests): all where variants, ordering, pagination, fuzzy/highlight/boost/language/facets, geo queries, `toSearchQuery()`/`toArray()`, `QueryBuilder.parse()` auto-detection, exception cases
+
 ## [2.1.2] - 2026-02-04
 
 ### Bug Fixes
