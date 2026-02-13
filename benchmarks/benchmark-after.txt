@@ -1,0 +1,112 @@
+
+  YetiSearch Benchmark
+  ====================
+  PHP 8.4.17 | SQLite 3.51.2
+
+============================================================
+ Indexing Benchmark
+============================================================
+
+  Loading movies.json... Done (31944 movies in 42.6ms)
+
+  Indexing...
+    5000 docs | 6,641/sec | 0.8s elapsed
+    10000 docs | 6,629/sec | 1.5s elapsed
+    15000 docs | 6,433/sec | 2.3s elapsed
+    20000 docs | 6,259/sec | 3.2s elapsed
+    25000 docs | 6,102/sec | 4.1s elapsed
+    30000 docs | 6,150/sec | 4.9s elapsed
+    31944 docs | 6,172/sec | 5.2s elapsed
+
+    Documents indexed:                  31,944
+    Indexing time:                      5175.5ms
+    Indexing rate:                      6,172/sec
+    Memory used:                        0.1MB
+    Peak memory:                        59.3MB
+
+============================================================
+ Search Benchmark (Standard)
+============================================================
+
+  [32m✓[0m 'star wars':                        4.6ms | 925 results
+  [32m✓[0m 'action':                           4.0ms | 5728 results
+  [32m✓[0m 'nemo':                             0.1ms | 9 results
+  [32m✓[0m 'matrix':                           0.1ms | 20 results
+  [32m✓[0m 'Anakin Skywalker':                 0.3ms | 18 results
+  [32m✓[0m 'drama crime':                      9.4ms | 14105 results
+
+    Average search time:                3.1ms
+  [32m✓[0m Tests passed:                       6/6
+
+============================================================
+ Fuzzy Search Benchmark
+============================================================
+
+  [32m✓[0m 'The Godfathr' -> 'Godfather':      88.5ms | Found
+  [32m✓[0m 'Pulp Fictin' -> 'Pulp Fiction':    31.3ms | Found
+  [32m✓[0m 'Dark Knigh' -> 'Dark Knight':      2.2ms | Found
+  [32m✓[0m 'Shawshank Redemtion' -> 'Shawshank': 209.4ms | Found
+  [32m✓[0m 'Interstelar' -> 'Interstellar':    28.4ms | Found
+  [32m✓[0m 'Jurrasic Park' -> 'Jurassic':      173.0ms | Found
+  [32m✓[0m 'Batmn' -> 'Batman':                19.4ms | Found
+  [32m✓[0m 'Termintor' -> 'Terminator':        42.9ms | Found
+  [32m✓[0m 'Avengers Endgam' -> 'Endgame':     2.3ms | Found
+  [32m✓[0m 'Lord of Rings' -> 'Rings':         0.9ms | Found
+  [32m✓[0m 'Gladiatorr' -> 'Gladiator':        37.2ms | Found
+  [32m✓[0m 'Matrixx' -> 'Matrix':              38.7ms | Found
+  [32m✓[0m 'Titannic' -> 'Titanic':            43.9ms | Found
+  [32m✓[0m 'Avatarr' -> 'Avatar':              39.2ms | Found
+  [32m✓[0m 'Inceptionn' -> 'Inception':        37.2ms | Found
+  [32m✓[0m 'Gladaitor' -> 'Gladiator':         165.0ms | Found
+  [32m✓[0m 'Inetrstellar' -> 'Interstellar':   76.4ms | Found
+  [31m✗[0m 'Froest Gump' -> 'Forrest':         165.6ms | NOT found
+  [31m✗[0m 'Teh Matrix' -> 'Matrix':           21.0ms | NOT found
+  [32m✓[0m 'Pirrates' -> 'Pirates':            44.2ms | Found
+  [32m✓[0m 'Gladiater' -> 'Gladiator':         43.1ms | Found
+  [32m✓[0m 'Spiderman' -> 'Spider-Man':        43.0ms | Found
+  [32m✓[0m 'Terminetor' -> 'Terminator':       36.7ms | Found
+  [32m✓[0m 'Batmen' -> 'Batman':               31.2ms | Found
+  [32m✓[0m 'Supermen' -> 'Superman':           45.0ms | Found
+  [31m✗[0m 'Stir Wars' -> 'Star Wars':         34.7ms | NOT found
+  [32m✓[0m 'Juressic Park' -> 'Jurassic':      45.1ms | Found
+  [31m✗[0m 'Die Herd' -> 'Die Hard':           18.0ms | NOT found
+  [31m✗[0m 'Iren Man' -> 'Iron Man':           2.3ms | NOT found
+  [31m✗[0m 'Blek Panther' -> 'Black Panther':  43.9ms | NOT found
+  [32m✓[0m 'Starwars' -> 'Star Wars':          45.6ms | Found
+  [32m✓[0m 'Toystory' -> 'Toy Story':          44.7ms | Found
+  [32m✓[0m 'Ironman' -> 'Iron Man':            39.7ms | Found
+  [32m✓[0m 'Findingnemo' -> 'Finding Nemo':    28.3ms | Found
+  [32m✓[0m 'Madmax' -> 'Mad Max':              31.6ms | Found
+  [32m✓[0m 'Scareface' -> 'Scarface':          44.8ms | Found
+  [32m✓[0m 'Alien vs Prediter' -> 'Predator':  175.8ms | Found
+  [32m✓[0m 'Robo Cop' -> 'RoboCop':            1.3ms | Found
+  [32m✓[0m 'X Men' -> 'X-Men':                 0.9ms | Found
+  [32m✓[0m 'Jurrassic World' -> 'Jurassic':    43.7ms | Found
+  [32m✓[0m 'Incept' -> 'Inception':            1.6ms | Found
+  [32m✓[0m 'Gladi' -> 'Gladiator':             1.5ms | Found
+  [32m✓[0m 'Interst' -> 'Interstellar':        1.5ms | Found
+  [32m✓[0m 'Avata' -> 'Avatar':                1.7ms | Found
+  [31m✗[0m 'Termin' -> 'Terminator':           1.7ms | NOT found
+  [31m✗[0m 'The Godfather Part 2' -> 'Godfather': 42.6ms | NOT found
+  [32m✓[0m 'Star Trek Into Darknes' -> 'Darkness': 2.4ms | Found
+  [32m✓[0m 'Pirates of Carribean' -> 'Caribbean': 166.5ms | Found
+  [32m✓[0m 'Lord of the Ring' -> 'Rings':      1.0ms | Found
+  [32m✓[0m 'Harry Poter' -> 'Harry Potter':    20.4ms | Found
+
+    Average fuzzy time:                 46.1ms
+  [32m✓[0m Fuzzy tests passed:                 42/50
+
+============================================================
+ Summary
+============================================================
+
+    Indexing rate:                      6,172/sec
+    Avg search time:                    3.1ms
+    Avg fuzzy time:                     46.1ms
+    Search accuracy:                    100%
+    Fuzzy accuracy:                     84%
+
+  Results saved to results.json
+
+  Benchmark complete!
+

@@ -1,5 +1,32 @@
 # Changelog
 
+## [2.4.0] - 2026-02-13
+
+### Security Fixes
+- **Cache table identifier hardening**: Added strict validation for cache table names in `QueryCache` (`/^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/`) before SQL interpolation. Invalid names now throw `CacheException`.
+
+### Performance Improvements
+- **`searchMultiple()` merge efficiency**: Removed repeated `array_merge` copying in result aggregation and eliminated duplicate `indexExists()` checks by tracking validated indices in one pass.
+- **Levenshtein prefilter optimization**: In `SearchEngine::generateLevenshteinVariations()`, query-term bigrams are now computed once per query term instead of once per indexed-term candidate.
+- **Suggestion query roundtrip reduction**: Added per-call memoization for `count()` checks in `generateSuggestion()` and `generateSuggestions()` to avoid repeated database checks for identical candidate queries.
+- **Field-weight candidate pool tuning**: Reduced default overfetch for field-weight scoring and made candidate sizing configurable:
+  - `field_weight_candidate_multiplier` (default `20`)
+  - `field_weight_candidate_min` (default `200`)
+  - `field_weight_candidate_max` (default `2000`)
+  - `field_weight_candidate_cap` (optional per-query/config cap)
+
+### Internationalization
+- **UTF-8-safe hot paths**: Switched key text-processing paths to UTF-8-safe handling:
+  - Snippet extraction in `SearchEngine::extractSnippet()`
+  - Suggest title normalization/matching in `SearchEngine::suggest()`
+  - Tokenization/term-position extraction in `SqliteStorage`
+  - Field-weighted phrase/term matching in `SqliteStorage::calculateFieldWeightedScore()`
+
+### Tests
+- Added `tests/Integration/Storage/FieldWeightCandidateLimitTest.php` for default and explicit candidate cap behavior.
+- Added `tests/Integration/Search/Utf8HighlightTest.php` for UTF-8 highlight/snippet behavior.
+- Extended `tests/Integration/Storage/QueryCacheIntegrationTest.php` with invalid cache table name rejection coverage.
+
 ## [2.3.0] - 2026-02-13
 
 ### Bug Fixes

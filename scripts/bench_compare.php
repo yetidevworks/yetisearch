@@ -2,18 +2,46 @@
 <?php
 declare(strict_types=1);
 
-function getMetric(string $path, string $key): string {
+function normalizeLine(string $line): string {
+    // Remove ANSI color codes and normalize whitespace.
+    $line = preg_replace('/\x1b\[[0-9;]*m/', '', $line);
+    $line = trim($line);
+    $line = preg_replace('/\s+/', ' ', $line);
+    return (string)$line;
+}
+
+function getMetricSeconds(string $path, array $labels): float {
     $lines = @file($path) ?: [];
-    foreach ($lines as $line) {
-        if (strpos($line, $key) === 0) {
-            $parts = preg_split('/\s+/', trim($line));
-            if ($key === 'Average indexing rate') {
-                return str_replace(',', '', $parts[3] ?? '0');
+    foreach ($lines as $raw) {
+        $line = normalizeLine($raw);
+        foreach ($labels as $label) {
+            if (stripos($line, $label . ':') !== 0) {
+                continue;
             }
-            return $parts[2] ?? '0';
+            if (preg_match('/:\s*([0-9][0-9,\.]*)\s*(ms|s)?/i', $line, $m)) {
+                $value = (float)str_replace(',', '', $m[1]);
+                $unit = strtolower($m[2] ?? 's');
+                return $unit === 'ms' ? $value / 1000.0 : $value;
+            }
         }
     }
-    return '0';
+    return 0.0;
+}
+
+function getMetricFloat(string $path, array $labels): float {
+    $lines = @file($path) ?: [];
+    foreach ($lines as $raw) {
+        $line = normalizeLine($raw);
+        foreach ($labels as $label) {
+            if (stripos($line, $label . ':') !== 0) {
+                continue;
+            }
+            if (preg_match('/:\s*([0-9][0-9,\.]*)/i', $line, $m)) {
+                return (float)str_replace(',', '', $m[1]);
+            }
+        }
+    }
+    return 0.0;
 }
 
 $before = __DIR__ . '/../benchmarks/benchmark-before.txt';
@@ -23,17 +51,25 @@ if (!file_exists($before) || !file_exists($after)) {
     exit(1);
 }
 
-// Parse indexing metrics
-$bt = (float)getMetric($before, 'Total time');
-$at = (float)getMetric($after,  'Total time');
-$bi = (float)getMetric($before, 'Indexing time');
-$ai = (float)getMetric($after,  'Indexing time');
-$br = (float)getMetric($before, 'Average indexing rate');
-$ar = (float)getMetric($after,  'Average indexing rate');
-$bm = (float)getMetric($before, 'Memory used');
-$am = (float)getMetric($after,  'Memory used');
-$bp = (float)getMetric($before, 'Peak memory');
-$ap = (float)getMetric($after,  'Peak memory');
+// Parse indexing metrics (supports legacy and current benchmark output formats).
+$bi = getMetricSeconds($before, ['Indexing time']);
+$ai = getMetricSeconds($after,  ['Indexing time']);
+
+$bt = getMetricSeconds($before, ['Total time']);
+$at = getMetricSeconds($after,  ['Total time']);
+if ($bt <= 0.0) {
+    $bt = $bi;
+}
+if ($at <= 0.0) {
+    $at = $ai;
+}
+
+$br = getMetricFloat($before, ['Average indexing rate', 'Indexing rate']);
+$ar = getMetricFloat($after,  ['Average indexing rate', 'Indexing rate']);
+$bm = getMetricFloat($before, ['Memory used']);
+$am = getMetricFloat($after,  ['Memory used']);
+$bp = getMetricFloat($before, ['Peak memory']);
+$ap = getMetricFloat($after,  ['Peak memory']);
 
 echo "Benchmark comparison (legacy vs external-content)\n";
 printf("Total time: %.4fs -> %.4fs (Δ %+0.4fs)\n", $bt, $at, $at - $bt);
@@ -66,9 +102,20 @@ function parseSearchResults(string $path): array {
         'titles' => [],
     ];
 
-    foreach ($lines as $line) {
-        if (strpos($line, '--- Standard Search') === 0) { $mode = 'standard'; $currentQuery = null; $currBlock = ['time_ms'=>0.0,'results_found'=>0,'total_hits'=>0,'titles'=>[]]; continue; }
-        if (strpos($line, '--- Fuzzy Search') === 0)    { $mode = 'fuzzy';    $currentQuery = null; $currBlock = ['time_ms'=>0.0,'results_found'=>0,'total_hits'=>0,'titles'=>[]]; continue; }
+    foreach ($lines as $rawLine) {
+        $line = normalizeLine($rawLine);
+        if (stripos($line, '--- Standard Search') === 0 || stripos($line, 'Search Benchmark (Standard)') !== false) {
+            $mode = 'standard';
+            $currentQuery = null;
+            $currBlock = ['time_ms'=>0.0,'results_found'=>0,'total_hits'=>0,'titles'=>[]];
+            continue;
+        }
+        if (stripos($line, '--- Fuzzy Search') === 0 || stripos($line, 'Fuzzy Search Benchmark') !== false) {
+            $mode = 'fuzzy';
+            $currentQuery = null;
+            $currBlock = ['time_ms'=>0.0,'results_found'=>0,'total_hits'=>0,'titles'=>[]];
+            continue;
+        }
         // End of sections
         if ($mode !== 'standard' && $mode !== 'fuzzy') { continue; }
 
@@ -87,6 +134,33 @@ function parseSearchResults(string $path): array {
         }
         if (preg_match('/^\s+\d+\.\s+(.+?)\s+\(Score:/', $line, $m)) {
             $currBlock['titles'][] = $m[1];
+            continue;
+        }
+
+        // Current benchmark.php output format (standard)
+        // Example: ✓ 'star wars': 4.4ms | 925 results
+        if ($mode === 'standard' && preg_match("/^[✓✗]\s+'(.+)':\s+([0-9.]+)ms\s+\|\s+([0-9]+)\s+results$/u", $line, $m)) {
+            $q = $m[1];
+            $data['standard'][$q] = [
+                'time_ms' => (float)$m[2],
+                'results_found' => (int)$m[3],
+                'total_hits' => (int)$m[3],
+                'titles' => [],
+            ];
+            continue;
+        }
+
+        // Current benchmark.php output format (fuzzy)
+        // Example: ✓ 'The Godfathr' -> 'Godfather': 86.4ms | Found
+        if ($mode === 'fuzzy' && preg_match("/^[✓✗]\s+'(.+)'\s+->\s+'(.+)':\s+([0-9.]+)ms\s+\|\s+(Found|NOT found)$/u", $line, $m)) {
+            $q = $m[1];
+            $found = strtolower($m[4]) === 'found';
+            $data['fuzzy'][$q] = [
+                'time_ms' => (float)$m[3],
+                'results_found' => $found ? 1 : 0,
+                'total_hits' => $found ? 1 : 0,
+                'titles' => [$m[2]],
+            ];
             continue;
         }
     }

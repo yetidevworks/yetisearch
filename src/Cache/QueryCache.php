@@ -23,6 +23,11 @@ class QueryCache
     {
         $this->connection = $connection;
         $this->cacheTable = $config['table_name'] ?? '_query_cache';
+        if (!preg_match('/^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/', $this->cacheTable)) {
+            throw new CacheException(
+                "Invalid cache table name '{$this->cacheTable}': must match /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/"
+            );
+        }
         $this->defaultTtl = $config['ttl'] ?? 300; // 5 minutes default
         $this->maxCacheSize = $config['max_size'] ?? 1000;
         $this->enabled = $config['enabled'] ?? true;

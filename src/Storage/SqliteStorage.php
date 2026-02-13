@@ -8,6 +8,7 @@ use YetiSearch\Geo\GeoPoint;
 use YetiSearch\Geo\GeoBounds;
 use YetiSearch\Cache\QueryCache;
 use YetiSearch\Storage\PreparedStatementCache;
+use YetiSearch\Helpers\UTF8Helper as UTF8;
 
 class SqliteStorage implements StorageInterface
 {
@@ -873,9 +874,19 @@ class SqliteStorage implements StorageInterface
             $needsPhpSort = true;
         }
 
-        // When using field weights, we need to fetch more results to ensure proper scoring
-        // Increase the candidate pool significantly to catch documents that might rank high after field weighting
-        $effectiveLimit = (!empty($fieldWeights) && $hasSearchQuery) ? min(max($limit * 50, 1000), 5000) : $limit;
+        // When using field weights, fetch a broader candidate set for post-scoring.
+        // Keep defaults conservative to avoid large memory/CPU spikes on big indexes.
+        if (!empty($fieldWeights) && $hasSearchQuery) {
+            $multiplier = max(1, (int)($query['field_weight_candidate_multiplier'] ?? $this->searchConfig['field_weight_candidate_multiplier'] ?? 20));
+            $minCandidates = max(1, (int)($query['field_weight_candidate_min'] ?? $this->searchConfig['field_weight_candidate_min'] ?? 200));
+            $maxCandidates = max($minCandidates, (int)($query['field_weight_candidate_max'] ?? $this->searchConfig['field_weight_candidate_max'] ?? 2000));
+            $effectiveLimit = min(max($limit * $multiplier, $minCandidates), $maxCandidates);
+            if (isset($query['field_weight_candidate_cap'])) {
+                $effectiveLimit = min($effectiveLimit, max(1, (int)$query['field_weight_candidate_cap']));
+            }
+        } else {
+            $effectiveLimit = $limit;
+        }
 
 
         // Nearest-neighbor mode (k-NN): ignore text, order by distance asc, limit k
@@ -1543,22 +1554,23 @@ class SqliteStorage implements StorageInterface
         $allResults = [];
         $totalCount = 0;
         $searchTime = microtime(true);
+        $searchedIndices = [];
 
         // Search each index
         foreach ($indices as $indexName) {
             if (!$this->indexExists($indexName)) {
                 continue;
             }
+            $searchedIndices[] = $indexName;
 
             try {
                 $results = $this->search($indexName, $query);
 
                 // Add index name to each result
-                foreach ($results as &$result) {
+                foreach ($results as $result) {
                     $result['_index'] = $indexName;
+                    $allResults[] = $result;
                 }
-
-                $allResults = array_merge($allResults, $results);
             } catch (\Exception $e) {
                 // Log error but continue with other indices
                 // In production, you might want to log this error
@@ -1587,7 +1599,7 @@ class SqliteStorage implements StorageInterface
             'results' => $allResults,
             'total' => $totalCount,
             'search_time' => $searchTime,
-            'indices_searched' => array_filter($indices, [$this, 'indexExists'])
+            'indices_searched' => $searchedIndices
         ];
     }
 
@@ -1840,12 +1852,12 @@ class SqliteStorage implements StorageInterface
 
     private function tokenizeText(string $text): array
     {
-        $text = strtolower($text);
+        $text = UTF8::strtolower($text);
         $text = preg_replace('/[^\p{L}\p{N}\s]/u', ' ', $text);
         $tokens = preg_split('/\s+/', $text, -1, PREG_SPLIT_NO_EMPTY);
 
         return array_filter($tokens, function ($token) {
-            return strlen($token) > 2;
+            return UTF8::strlen($token) > 2;
         });
     }
 
@@ -1854,7 +1866,7 @@ class SqliteStorage implements StorageInterface
         $positions = [];
         $offset = 0;
 
-        while (($pos = stripos($text, $term, $offset)) !== false) {
+        while (($pos = UTF8::stripos($text, $term, $offset)) !== false) {
             $positions[] = $pos;
             $offset = $pos + 1;
         }
@@ -2443,14 +2455,14 @@ class SqliteStorage implements StorageInterface
         // Extract quoted phrases first
         if (preg_match_all('/"([^"]+)"/', $searchQuery, $matches)) {
             foreach ($matches[1] as $phrase) {
-                $exactPhrases[] = strtolower($phrase);
+                $exactPhrases[] = UTF8::strtolower($phrase);
             }
         }
 
         // Clean up query to extract base terms (remove NEAR, OR, parentheses, etc.)
         $cleanQuery = preg_replace('/NEAR\([^)]+\)/', '', $searchQuery);
         $cleanQuery = preg_replace('/["\(\)]/', ' ', $cleanQuery);
-        $allTerms = array_map('trim', explode(' ', strtolower($cleanQuery)));
+        $allTerms = array_map('trim', explode(' ', UTF8::strtolower($cleanQuery)));
 
         // Filter out operators, wildcards and empty terms
         $searchTerms = array_filter($allTerms, function ($term) {
@@ -2493,7 +2505,7 @@ class SqliteStorage implements StorageInterface
                 continue;
             }
 
-            $fieldText = strtolower(trim($fieldValue));
+            $fieldText = UTF8::strtolower(trim($fieldValue));
             if (empty($fieldText)) {
                 continue;
             }
@@ -2516,13 +2528,13 @@ class SqliteStorage implements StorageInterface
             // Check for exact phrase match within field
             if ($matchType === 'none') {
                 foreach ($exactPhrases as $phrase) {
-                    if (strpos($fieldText, $phrase) !== false) {
+                    if (UTF8::stripos($fieldText, $phrase) !== false) {
                         // Exact phrase found - high boost
                         $fieldScore = 50.0;
                         $matchType = 'exact_phrase';
 
                         // Additional boost for shorter fields (more relevant)
-                        $phraseRatio = strlen($phrase) / strlen($fieldText);
+                        $phraseRatio = UTF8::strlen($phrase) / max(1, UTF8::strlen($fieldText));
                         if ($phraseRatio > 0.8) {
                             $fieldScore += 20.0; // Phrase is most of the field
                         } elseif ($phraseRatio > 0.5) {
@@ -2539,7 +2551,7 @@ class SqliteStorage implements StorageInterface
                 $termPositions = [];
 
                 foreach ($searchTerms as $term) {
-                    $pos = strpos($fieldText, $term);
+                    $pos = UTF8::stripos($fieldText, $term);
                     if ($pos !== false) {
                         $termMatches++;
                         $termPositions[] = $pos;

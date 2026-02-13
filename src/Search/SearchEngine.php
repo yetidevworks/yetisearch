@@ -14,6 +14,7 @@ use YetiSearch\Utils\JaroWinkler;
 use YetiSearch\Utils\Trigram;
 use YetiSearch\Utils\PhoneticMatcher;
 use YetiSearch\Utils\KeyboardProximity;
+use YetiSearch\Helpers\UTF8Helper as UTF8;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
@@ -299,7 +300,7 @@ class SearchEngine implements SearchEngineInterface
                     }
 
                     // De-dup per variant-result pair
-                    $key = strtolower($title);
+                    $key = UTF8::strtolower($title);
                     if (isset($seen[$variant][$key])) {
                         continue;
                     }
@@ -308,12 +309,12 @@ class SearchEngine implements SearchEngineInterface
                     $score = (float)$res->getScore();
 
                     // Prefer titles that contain or start with the (cleaned) variant
-                    $titleLower = strtolower($title);
-                    $variantLower = strtolower($variant);
-                    if (strpos($titleLower, $variantLower) !== false) {
+                    $titleLower = UTF8::strtolower($title);
+                    $variantLower = UTF8::strtolower($variant);
+                    if (UTF8::stripos($titleLower, $variantLower) !== false) {
                         $score += $boostTitle;
                     }
-                    if (strpos($titleLower, $variantLower) === 0) {
+                    if (UTF8::stripos($titleLower, $variantLower) === 0) {
                         $score += $boostPrefix;
                     }
 
@@ -670,6 +671,16 @@ class SearchEngine implements SearchEngineInterface
         // Pass field weights if configured
         if (!empty($this->config['field_weights'])) {
             $storageQuery['field_weights'] = $this->config['field_weights'];
+        }
+        foreach ([
+            'field_weight_candidate_multiplier',
+            'field_weight_candidate_min',
+            'field_weight_candidate_max',
+            'field_weight_candidate_cap',
+        ] as $key) {
+            if (isset($this->config[$key])) {
+                $storageQuery[$key] = $this->config[$key];
+            }
         }
 
         // Add geo filters if present
@@ -1030,12 +1041,12 @@ class SearchEngine implements SearchEngineInterface
         $bestPosition = 0;
         $bestScore = 0;
 
-        $lowerText = strtolower($text);
-        $textLength = strlen($text);
+        $lowerText = UTF8::strtolower($text);
+        $textLength = UTF8::strlen($text);
 
         foreach ($terms as $term) {
             // Try exact match first
-            $pos = stripos($lowerText, $term);
+            $pos = UTF8::stripos($lowerText, $term);
             if ($pos !== false) {
                 $score = 1 / ($pos + 1);
                 if ($score > $bestScore) {
@@ -1045,7 +1056,7 @@ class SearchEngine implements SearchEngineInterface
             }
 
             // Also try plural form
-            $pluralPos = stripos($lowerText, $term . 's');
+            $pluralPos = UTF8::stripos($lowerText, $term . 's');
             if ($pluralPos !== false) {
                 $score = 1 / ($pluralPos + 1);
                 if ($score > $bestScore) {
@@ -1061,16 +1072,17 @@ class SearchEngine implements SearchEngineInterface
         $end = min($textLength, $start + $length);
 
         if ($start > 0) {
-            $pos = strpos($text, ' ', $start);
+            $pos = mb_strpos($text, ' ', $start, 'UTF-8');
             $start = $pos !== false ? $pos : $start;
         }
 
         if ($end < $textLength) {
-            $pos = strrpos(substr($text, 0, $end), ' ');
+            $prefix = mb_substr($text, 0, $end, 'UTF-8');
+            $pos = mb_strrpos($prefix, ' ', 0, 'UTF-8');
             $end = $pos !== false ? $pos : $end;
         }
 
-        $snippet = substr($text, $start, $end - $start);
+        $snippet = mb_substr($text, $start, $end - $start, 'UTF-8');
 
         if ($start > 0) {
             $snippet = '...' . ltrim($snippet);
@@ -1380,6 +1392,13 @@ class SearchEngine implements SearchEngineInterface
             $candidateTerms = [];
             $termLower = strtolower($term);
             $termLen = mb_strlen($term);
+            $termBigrams = [];
+            if ($termLen >= 4) {
+                for ($i = 0, $n = strlen($termLower) - 1; $i < $n; $i++) {
+                    $termBigrams[] = substr($termLower, $i, 2);
+                }
+                $termBigrams = array_unique($termBigrams);
+            }
 
             foreach ($indexedTerms as $indexedTerm => $frequency) {
                 // Skip if same as search term (case insensitive)
@@ -1406,17 +1425,13 @@ class SearchEngine implements SearchEngineInterface
 
                 // Bigram prefilter for words of reasonable length
                 if ($termLen >= 4 && $indexedLen >= 4) {
-                    $bigrams = static function (string $s): array {
-                        $s = strtolower($s);
-                        $out = [];
-                        for ($i = 0, $n = strlen($s) - 1; $i < $n; $i++) {
-                            $out[] = substr($s, $i, 2);
-                        }
-                        return array_unique($out);
-                    };
-                    $tBi = $bigrams($term);
-                    $iBi = $bigrams($indexedTerm);
-                    if (empty(array_intersect($tBi, $iBi))) {
+                    $indexedLower = strtolower($indexedTerm);
+                    $indexedBigrams = [];
+                    for ($i = 0, $n = strlen($indexedLower) - 1; $i < $n; $i++) {
+                        $indexedBigrams[] = substr($indexedLower, $i, 2);
+                    }
+                    $indexedBigrams = array_unique($indexedBigrams);
+                    if (empty(array_intersect($termBigrams, $indexedBigrams))) {
                         continue;
                     }
                 }
@@ -2202,6 +2217,7 @@ class SearchEngine implements SearchEngineInterface
         $tokens = $this->analyzer->tokenize($query);
         $suggestions = [];
         $corrections = [];
+        $countMemo = [];
 
         foreach ($tokens as $token) {
             // First, try to find the best correction using our enhanced method
@@ -2219,8 +2235,11 @@ class SearchEngine implements SearchEngineInterface
             foreach ($fuzzyVariations as $variation) {
                 $testQuery = new SearchQuery($variation);
                 $testQuery->limit(1);
-
-                if ($this->count($testQuery) > 0) {
+                $variationKey = $variation;
+                if (!isset($countMemo[$variationKey])) {
+                    $countMemo[$variationKey] = $this->count($testQuery) > 0;
+                }
+                if ($countMemo[$variationKey]) {
                     $suggestions[] = $variation;
                     break;
                 }
@@ -2234,8 +2253,10 @@ class SearchEngine implements SearchEngineInterface
             // Verify that the corrected query actually has results
             $testQuery = new SearchQuery($suggestion);
             $testQuery->limit(1);
-
-            if ($this->count($testQuery) > 0) {
+            if (!isset($countMemo[$suggestion])) {
+                $countMemo[$suggestion] = $this->count($testQuery) > 0;
+            }
+            if ($countMemo[$suggestion]) {
                 $this->logger->debug('Did you mean suggestion generated', [
                     'original' => $query,
                     'suggestion' => $suggestion,
@@ -2266,6 +2287,7 @@ class SearchEngine implements SearchEngineInterface
     {
         $tokens = $this->analyzer->tokenize($query);
         $allSuggestions = [];
+        $countMemo = [];
 
         // Generate corrections for each token
         foreach ($tokens as $tokenIndex => $token) {
@@ -2304,8 +2326,11 @@ class SearchEngine implements SearchEngineInterface
 
             $testQuery = new SearchQuery($suggestion['text']);
             $testQuery->limit(1);
-
-            if ($this->count($testQuery) > 0) {
+            $text = $suggestion['text'];
+            if (!isset($countMemo[$text])) {
+                $countMemo[$text] = $this->count($testQuery) > 0;
+            }
+            if ($countMemo[$text]) {
                 $validSuggestions[] = $suggestion;
             }
         }

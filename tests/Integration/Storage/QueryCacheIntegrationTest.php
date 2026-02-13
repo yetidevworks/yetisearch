@@ -57,4 +57,22 @@ class QueryCacheIntegrationTest extends TestCase
         $this->assertNotFalse($row);
         $this->assertSame(1, (int)$row['hit_count']);
     }
+
+    public function test_invalid_cache_table_name_is_rejected(): void
+    {
+        $this->expectException(\YetiSearch\Exceptions\CacheException::class);
+
+        $search = $this->createSearchInstance([
+            'storage' => [
+                'path' => getTestDbPath(uniqid('cache_invalid_table_')),
+                'external_content' => false,
+            ],
+            'cache' => [
+                'enabled' => true,
+                'table_name' => 'bad-table-name',
+            ],
+        ]);
+
+        $search->createIndex('cache_idx_invalid_table');
+    }
 }
