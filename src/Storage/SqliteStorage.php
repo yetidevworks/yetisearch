@@ -1568,8 +1568,8 @@ class SqliteStorage implements StorageInterface
 
         // Sort merged results by score/rank
         usort($allResults, function ($a, $b) {
-            $scoreA = $a['rank'] ?? $a['_score'] ?? 0;
-            $scoreB = $b['rank'] ?? $b['_score'] ?? 0;
+            $scoreA = $a['score'] ?? $a['rank'] ?? $a['_score'] ?? 0;
+            $scoreB = $b['score'] ?? $b['rank'] ?? $b['_score'] ?? 0;
             return $scoreB <=> $scoreA; // Descending order
         });
 
@@ -2648,8 +2648,72 @@ class SqliteStorage implements StorageInterface
 
         // Direct column filtering (type, language, id, timestamp)
         if (in_array($field, ['type', 'language', 'id', 'timestamp'])) {
-            $sql = " AND d.{$field} {$operator} ?";
-            $params[] = $value;
+            $operator = strtolower($operator);
+            switch ($operator) {
+                case '=':
+                case '!=':
+                case '>':
+                case '<':
+                case '>=':
+                case '<=':
+                case 'like':
+                case 'not like':
+                    $sql = " AND d.{$field} {$operator} ?";
+                    $params[] = $value;
+                    break;
+
+                case 'contains':
+                    $sql = " AND d.{$field} LIKE ?";
+                    $params[] = '%' . $value . '%';
+                    break;
+
+                case '=?':
+                    $sql = " AND (d.{$field} = ? OR d.{$field} IS NULL OR d.{$field} = '')";
+                    $params[] = $value;
+                    break;
+
+                case 'in':
+                    if (is_array($value)) {
+                        if (count($value) === 0) {
+                            $sql = " AND 0=1";
+                        } else {
+                            $placeholders = implode(',', array_fill(0, count($value), '?'));
+                            $sql = " AND d.{$field} IN ({$placeholders})";
+                            $params = $value;
+                        }
+                    }
+                    break;
+
+                case 'not in':
+                    if (is_array($value)) {
+                        if (count($value) === 0) {
+                            $sql = " AND 1=1";
+                        } else {
+                            $placeholders = implode(',', array_fill(0, count($value), '?'));
+                            $sql = " AND d.{$field} NOT IN ({$placeholders})";
+                            $params = $value;
+                        }
+                    }
+                    break;
+
+                case 'between':
+                    if (is_array($value) && count($value) >= 2) {
+                        $sql = " AND d.{$field} BETWEEN ? AND ?";
+                        $params[] = $value[0];
+                        $params[] = $value[1];
+                    }
+                    break;
+
+                case 'is null':
+                case 'not exists':
+                    $sql = " AND d.{$field} IS NULL";
+                    break;
+
+                case 'is not null':
+                case 'exists':
+                    $sql = " AND d.{$field} IS NOT NULL";
+                    break;
+            }
             return [$sql, $params];
         }
 
@@ -2728,27 +2792,54 @@ class SqliteStorage implements StorageInterface
 
             case 'in':
                 if (is_array($value)) {
-                    $placeholders = implode(',', array_fill(0, count($value), '?'));
-                    $sql = " AND {$jsonPath} IN ({$placeholders})";
-                    $params = $value;
+                    if (count($value) === 0) {
+                        $sql = " AND 0=1";
+                    } else {
+                        $placeholders = implode(',', array_fill(0, count($value), '?'));
+                        $sql = " AND {$jsonPath} IN ({$placeholders})";
+                        $params = $value;
+                    }
                 }
                 break;
 
             case 'not in':
                 if (is_array($value)) {
-                    $placeholders = implode(',', array_fill(0, count($value), '?'));
-                    $sql = " AND {$jsonPath} NOT IN ({$placeholders})";
-                    $params = $value;
+                    if (count($value) === 0) {
+                        $sql = " AND 1=1";
+                    } else {
+                        $placeholders = implode(',', array_fill(0, count($value), '?'));
+                        $sql = " AND {$jsonPath} NOT IN ({$placeholders})";
+                        $params = $value;
+                    }
+                }
+                break;
+
+            case 'between':
+                if (is_array($value) && count($value) >= 2) {
+                    $sql = " AND CAST({$jsonPath} AS REAL) BETWEEN ? AND ?";
+                    $params[] = $value[0];
+                    $params[] = $value[1];
                 }
                 break;
 
             case 'like':
+            case 'not like':
             case 'contains':
-                $sql = " AND {$jsonPath} LIKE ?";
-                $params[] = $operator === 'contains' ? '%' . $value . '%' : $value;
+                if ($operator === 'contains') {
+                    $sql = " AND {$jsonPath} LIKE ?";
+                    $params[] = '%' . $value . '%';
+                } else {
+                    $sql = " AND {$jsonPath} " . strtoupper($operator) . " ?";
+                    $params[] = $value;
+                }
                 break;
 
             case 'exists':
+                $sql = " AND {$jsonPath} IS NOT NULL";
+                // No params needed
+                break;
+
+            case 'is not null':
                 $sql = " AND {$jsonPath} IS NOT NULL";
                 // No params needed
                 break;

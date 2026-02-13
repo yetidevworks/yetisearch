@@ -32,5 +32,26 @@ class SearchMultipleTest extends TestCase
             $this->assertTrue(in_array($row['_index'], [$i1, $i2], true));
         }
     }
-}
 
+    public function test_search_multiple_indices_sorts_by_score(): void
+    {
+        $search = $this->createSearchInstance();
+        $i1 = 'sm_rank_idx_1';
+        $i2 = 'sm_rank_idx_2';
+        $this->createTestIndex($i1);
+        $this->createTestIndex($i2);
+
+        $search->indexBatch($i1, [
+            ['id' => 'a1', 'content' => ['title' => 'rocket', 'content' => 'single']]
+        ]);
+        $search->indexBatch($i2, [
+            ['id' => 'a2', 'content' => ['title' => 'rocket rocket rocket', 'content' => 'triple']]
+        ]);
+        $search->getIndexer($i1)->flush();
+        $search->getIndexer($i2)->flush();
+
+        $res = $search->searchMultiple([$i1, $i2], 'rocket');
+        $this->assertCount(2, $res['results']);
+        $this->assertSame('a2', $res['results'][0]['id']);
+    }
+}

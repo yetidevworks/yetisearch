@@ -29,6 +29,11 @@ class MetadataFilterTest extends TestCase
                 'content' => ['title' => 'Three'],
                 'metadata' => ['author' => 'Alice', 'rating' => 5.0, 'tags' => ['t3']]
             ],
+            [
+                'id' => 'd4',
+                'content' => ['title' => 'Four'],
+                'metadata' => ['author' => 'Cara']
+            ],
         ];
         $search->indexBatch($index, $docs);
         $search->getIndexer($index)->flush();
@@ -41,7 +46,7 @@ class MetadataFilterTest extends TestCase
 
         // author != Alice
         $q = (new SearchQuery(''))->filter('metadata.author', 'Alice', '!=');
-        $this->assertSame(1, $engine->count($q));
+        $this->assertSame(2, $engine->count($q));
 
         // rating > 4.0
         $q = (new SearchQuery(''))->filter('metadata.rating', 4.0, '>');
@@ -49,6 +54,10 @@ class MetadataFilterTest extends TestCase
 
         // rating <= 4.2
         $q = (new SearchQuery(''))->filter('metadata.rating', 4.2, '<=');
+        $this->assertSame(2, $engine->count($q));
+
+        // rating BETWEEN 4.0 and 5.0
+        $q = (new SearchQuery(''))->filter('metadata.rating', [4.0, 5.0], 'between');
         $this->assertSame(2, $engine->count($q));
 
         // IN operator for author
@@ -61,6 +70,41 @@ class MetadataFilterTest extends TestCase
 
         // exists published
         $q = (new SearchQuery(''))->filter('metadata.published', null, 'exists');
+        $this->assertSame(1, $engine->count($q));
+
+        // is not null for rating
+        $q = (new SearchQuery(''))->filter('metadata.rating', null, 'is not null');
+        $this->assertSame(3, $engine->count($q));
+    }
+
+    public function test_direct_column_between_and_is_not_null(): void
+    {
+        $search = $this->createSearchInstance();
+        $index = 'meta_ops_direct_idx';
+        $this->createTestIndex($index);
+
+        $search->indexBatch($index, [
+            [
+                'id' => 'd1',
+                'content' => ['title' => 'One'],
+                'timestamp' => 100,
+                'language' => 'en',
+            ],
+            [
+                'id' => 'd2',
+                'content' => ['title' => 'Two'],
+                'timestamp' => 200,
+                'language' => null,
+            ],
+        ]);
+        $search->getIndexer($index)->flush();
+
+        $engine = $search->getSearchEngine($index);
+
+        $q = (new SearchQuery(''))->filter('timestamp', [50, 150], 'between');
+        $this->assertSame(1, $engine->count($q));
+
+        $q = (new SearchQuery(''))->filter('language', null, 'is not null');
         $this->assertSame(1, $engine->count($q));
     }
 }

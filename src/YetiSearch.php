@@ -650,7 +650,11 @@ class YetiSearch
     {
         if ($this->storage === null) {
             $this->storage = new SqliteStorage();
-            $this->storage->connect($this->config['storage']);
+            $storageConfig = $this->config['storage'];
+            if (!isset($storageConfig['cache']) && isset($this->config['cache']) && is_array($this->config['cache'])) {
+                $storageConfig['cache'] = $this->config['cache'];
+            }
+            $this->storage->connect($storageConfig);
         }
 
         return $this->storage;

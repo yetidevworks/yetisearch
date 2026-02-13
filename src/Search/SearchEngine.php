@@ -692,6 +692,11 @@ class SearchEngine implements SearchEngineInterface
             $storageQuery['geoFilters'] = $geoFilters;
         }
 
+        $queryOptions = $query->getOptions();
+        if (array_key_exists('bypass_cache', $queryOptions)) {
+            $storageQuery['bypass_cache'] = (bool)$queryOptions['bypass_cache'];
+        }
+
         return $storageQuery;
     }
 

@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.3.0] - 2026-02-13
+
+### Bug Fixes
+- **Filter operator correctness in storage queries**: Fixed inconsistent operator handling between direct columns and JSON fields in `SqliteStorage::buildFilterClause()` / `buildJsonFilterClause()`. Added proper support for `between` and `is not null` semantics, and corrected `in`/`not in` empty-array behavior to avoid invalid SQL or silent filter bypass.
+- **Multi-index ranking in `searchMultiple()`**: Fixed merged result ordering to sort by actual `score` output (with fallback keys), instead of relying on missing `rank`/`_score` keys that could produce non-relevance ordering.
+- **Cache wiring and bypass propagation**: Top-level `cache` config is now passed into storage connection config, and `bypass_cache` set on `SearchQuery` options is now propagated from `SearchEngine` to storage queries.
+
+### Tests
+- Added integration coverage for metadata and direct-column filter operators:
+  - `between` and `is not null` regression assertions in `tests/Integration/Storage/MetadataFilterTest.php`
+- Added multi-index ranking regression test:
+  - `test_search_multiple_indices_sorts_by_score` in `tests/Integration/Storage/SearchMultipleTest.php`
+- Added query cache integration coverage:
+  - `tests/Integration/Storage/QueryCacheIntegrationTest.php` verifies top-level cache config wiring and `bypass_cache` behavior
+
 ## [2.2.0] - 2026-02-08
 
 ### Security Fixes
