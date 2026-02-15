@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "ee581d0df09538af1b71239bbc092dde",
+    "content-hash": "4da0d23babfda52b3747bc4b7e5e50fd",
     "packages": [
         {
             "name": "psr/log",
@@ -2181,7 +2181,8 @@
         "ext-json": "*",
         "ext-mbstring": "*",
         "ext-pdo": "*",
-        "ext-sqlite3": "*"
+        "ext-sqlite3": "*",
+        "lib-pdo_sqlite-sqlite": ">=3.35.0"
     },
     "platform-dev": {},
     "plugin-api-version": "2.9.0"
