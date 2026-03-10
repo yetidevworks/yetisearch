@@ -503,6 +503,7 @@ class SqliteStorage implements StorageInterface
 
             // Prepare statements once
             $schema = $this->getSchemaMode($index);
+            $docIdFallbackStmt = null;
             if ($schema === 'external') {
                 // Use ON CONFLICT DO UPDATE to preserve doc_id on updates.
                 // INSERT OR REPLACE would delete and re-insert, generating new doc_id.
@@ -518,12 +519,11 @@ class SqliteStorage implements StorageInterface
                 ";
                 if ($this->hasReturningSupport) {
                     $upsertSql .= " RETURNING doc_id";
+                } else {
+                    // Prepare fallback SELECT for older SQLite without RETURNING support
+                    $docIdFallbackStmt = $this->connection->prepare("SELECT doc_id FROM {$index} WHERE id = ?");
                 }
                 $docStmt = $this->connection->prepare($upsertSql);
-                // Prepare fallback SELECT for older SQLite without RETURNING support
-                $docIdFallbackStmt = !$this->hasReturningSupport
-                    ? $this->connection->prepare("SELECT doc_id FROM {$index} WHERE id = ?")
-                    : null;
             } else {
                 $docStmt = $this->connection->prepare("
                     INSERT OR REPLACE INTO {$index}
