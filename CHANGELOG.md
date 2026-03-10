@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.3.1] - 2026-03-09
+
+### Improvements
+- **SQLite backward compatibility**: The `RETURNING` clause (requires SQLite 3.35.0+) is now optional. On older SQLite versions (3.24.0+), a fallback `SELECT` query is used to retrieve `doc_id` after upsert operations. This lowers the minimum SQLite requirement from 3.35.0 to 3.24.0 while preserving optimal performance on newer versions.
+
 ## [2.3.0] - 2026-02-13
 
 ### Security Fixes

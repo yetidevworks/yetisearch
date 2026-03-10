@@ -19,6 +19,7 @@ class SqliteStorage implements StorageInterface
     private ?bool $rtreeSupport = null;
     private bool $useTermsIndex = false;
     private ?bool $hasMathFunctions = null;
+    private bool $hasReturningSupport = false;
     private array $ftsColumnsCache = [];
     private array $spatialEnabledCache = [];
     private bool $externalContentDefault = false;
@@ -124,6 +125,10 @@ class SqliteStorage implements StorageInterface
             $this->initializeDatabase();
             // Improve query planning on connect
             $this->connection->exec('PRAGMA optimize');
+
+            // Detect SQLite version for RETURNING clause support (3.35.0+)
+            $sqliteVersion = $this->connection->query('SELECT sqlite_version()')->fetchColumn();
+            $this->hasReturningSupport = version_compare($sqliteVersion, '3.35.0', '>=');
 
             // Detect availability of math functions for Haversine
             try {
@@ -398,8 +403,7 @@ class SqliteStorage implements StorageInterface
             $schema = $this->getSchemaMode($index);
             $docId = null;
             if ($schema === 'external') {
-                // Use RETURNING to get doc_id directly without extra SELECT query (SQLite 3.35+)
-                $sql = "
+                $upsertSql = "
                     INSERT INTO {$index} (id, content, metadata, language, type, timestamp)
                     VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
@@ -408,12 +412,21 @@ class SqliteStorage implements StorageInterface
                         language=excluded.language,
                         type=excluded.type,
                         timestamp=excluded.timestamp
-                    RETURNING doc_id
                 ";
-                $stmt = $this->connection->prepare($sql);
-                $stmt->execute([$id, $content, $metadata, $language, $type, $timestamp]);
-                $docId = $stmt->fetchColumn();
-                $stmt->closeCursor(); // Must close cursor before next operation
+                if ($this->hasReturningSupport) {
+                    // Use RETURNING to get doc_id directly without extra SELECT query (SQLite 3.35+)
+                    $stmt = $this->connection->prepare($upsertSql . " RETURNING doc_id");
+                    $stmt->execute([$id, $content, $metadata, $language, $type, $timestamp]);
+                    $docId = $stmt->fetchColumn();
+                    $stmt->closeCursor();
+                } else {
+                    // Fallback for older SQLite: upsert then SELECT doc_id
+                    $stmt = $this->connection->prepare($upsertSql);
+                    $stmt->execute([$id, $content, $metadata, $language, $type, $timestamp]);
+                    $docId = $this->connection->prepare("SELECT doc_id FROM {$index} WHERE id = ?");
+                    $docId->execute([$id]);
+                    $docId = $docId->fetchColumn();
+                }
             } else {
                 $sql = "
                     INSERT OR REPLACE INTO {$index}
@@ -493,8 +506,7 @@ class SqliteStorage implements StorageInterface
             if ($schema === 'external') {
                 // Use ON CONFLICT DO UPDATE to preserve doc_id on updates.
                 // INSERT OR REPLACE would delete and re-insert, generating new doc_id.
-                // Use RETURNING to get the doc_id for FTS/spatial indexing.
-                $docStmt = $this->connection->prepare("
+                $upsertSql = "
                     INSERT INTO {$index} (id, content, metadata, language, type, timestamp)
                     VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
@@ -503,8 +515,15 @@ class SqliteStorage implements StorageInterface
                         language=excluded.language,
                         type=excluded.type,
                         timestamp=excluded.timestamp
-                    RETURNING doc_id
-                ");
+                ";
+                if ($this->hasReturningSupport) {
+                    $upsertSql .= " RETURNING doc_id";
+                }
+                $docStmt = $this->connection->prepare($upsertSql);
+                // Prepare fallback SELECT for older SQLite without RETURNING support
+                $docIdFallbackStmt = !$this->hasReturningSupport
+                    ? $this->connection->prepare("SELECT doc_id FROM {$index} WHERE id = ?")
+                    : null;
             } else {
                 $docStmt = $this->connection->prepare("
                     INSERT OR REPLACE INTO {$index}
@@ -596,9 +615,14 @@ class SqliteStorage implements StorageInterface
 
                 // Collect FTS data for batch insert
                 if ($schema === 'external') {
-                    // Get doc_id from RETURNING clause (works for both inserts and updates)
-                    $docId = $docStmt->fetchColumn();
-                    $docStmt->closeCursor();
+                    // Get doc_id - use RETURNING if available, otherwise fallback SELECT
+                    if ($this->hasReturningSupport) {
+                        $docId = $docStmt->fetchColumn();
+                        $docStmt->closeCursor();
+                    } else {
+                        $docIdFallbackStmt->execute([$id]);
+                        $docId = $docIdFallbackStmt->fetchColumn();
+                    }
                     $ftsData[] = [$docId, $this->getFieldText($document['content'], 'content', $index)];
                 } else {
                     $values = [$id];
