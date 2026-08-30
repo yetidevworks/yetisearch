@@ -6,6 +6,7 @@ use YetiSearch\Contracts\IndexerInterface;
 use YetiSearch\Contracts\StorageInterface;
 use YetiSearch\Contracts\AnalyzerInterface;
 use YetiSearch\Exceptions\IndexException;
+use YetiSearch\Exceptions\InvalidArgumentException;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
@@ -46,10 +47,93 @@ class Indexer implements IndexerInterface
             'chunk_overlap' => 100
         ], $config);
 
+        $this->config['fields'] = $this->normalizeFieldsConfig($this->config['fields']);
+
         $this->batchSize = $this->config['batch_size'];
         $this->logger = $logger ?? new NullLogger();
 
         $this->ensureIndexExists();
+    }
+
+    /**
+     * Normalize the "fields" option into its canonical associative form.
+     *
+     * The documented form maps a field name to its config:
+     *
+     *     ['title' => ['boost' => 3.0], 'sku' => ['boost' => 1.0]]
+     *
+     * A flat list of field names is accepted as shorthand and expanded to the
+     * default boost:
+     *
+     *     ['title', 'sku']
+     *
+     * The two forms may be mixed. Previously the flat form was accepted without
+     * complaint and then read as if it were associative, so the integer list
+     * keys became the FTS column names and the index was silently built wrong.
+     *
+     * @param mixed $fields
+     * @return array<string, array<string, mixed>>
+     * @throws InvalidArgumentException If the option is not one of the forms above
+     */
+    private function normalizeFieldsConfig($fields): array
+    {
+        if (!is_array($fields)) {
+            throw new InvalidArgumentException(
+                "Indexer option 'fields' must be an array, " . gettype($fields) . ' given'
+            );
+        }
+
+        $normalized = [];
+
+        foreach ($fields as $key => $value) {
+            if (is_int($key)) {
+                // Shorthand: a flat list of field names.
+                if (!is_string($value)) {
+                    throw new InvalidArgumentException(
+                        "Indexer option 'fields' contains a non-string field name at position {$key}: "
+                        . gettype($value) . ' given. Use a list of field names, or a map of field name '
+                        . 'to config such as [\'title\' => [\'boost\' => 3.0]].'
+                    );
+                }
+
+                $name = $this->validateFieldName($value);
+                $normalized[$name] = ['boost' => 1.0];
+                continue;
+            }
+
+            $name = $this->validateFieldName((string)$key);
+
+            if (!is_array($value)) {
+                throw new InvalidArgumentException(
+                    "Indexer option 'fields' entry '{$name}' must be an array of settings, "
+                    . gettype($value) . ' given. Use [\'' . $name . '\' => [\'boost\' => 1.0]], '
+                    . 'or list the field name on its own to take the defaults.'
+                );
+            }
+
+            $normalized[$name] = $value;
+        }
+
+        return $normalized;
+    }
+
+    /**
+     * Field names become FTS5 column names, so they must be plain SQL identifiers.
+     *
+     * @throws InvalidArgumentException If the name is not a usable identifier
+     */
+    private function validateFieldName(string $name): string
+    {
+        $name = trim($name);
+
+        if (!preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*$/', $name)) {
+            throw new InvalidArgumentException(
+                "Invalid field name '{$name}' in indexer option 'fields': "
+                . 'must match /^[a-zA-Z_][a-zA-Z0-9_]*$/'
+            );
+        }
+
+        return $name;
     }
 
     public function insert($documents): void

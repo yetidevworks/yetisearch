@@ -375,20 +375,70 @@ class SearchEngine implements SearchEngineInterface
         $this->indexedTermsCacheTime = 0;
     }
 
+    /**
+     * FTS5 keywords that must be quoted when they appear as a user term,
+     * otherwise the MATCH parser reads them as operators.
+     */
+    private const FTS_KEYWORDS = ['AND', 'OR', 'NOT', 'NEAR'];
+
+    /**
+     * Escape a single user term so it is safe to hand to an FTS5 MATCH expression.
+     *
+     * Only bare alphanumeric terms are legal unquoted in the MATCH grammar.
+     * Anything else — a hyphen in an order number or SKU, a colon, an asterisk,
+     * a quote, a parenthesis — is an operator there and would either change the
+     * meaning of the query or make SQLite reject it outright (a hyphen, for
+     * instance, is read as a column filter, so "BENCH-100821" fails with
+     * "no such column: 100821"). Such terms are wrapped in double quotes, which
+     * makes FTS5 treat them as a literal phrase and re-tokenize them with the
+     * table's own tokenizer.
+     *
+     * This deliberately escapes individual terms only. The operators that
+     * processQuery() builds around them (OR, NEAR(), phrase grouping) are added
+     * outside this method and stay intact.
+     *
+     * @param bool $inPhrase True when the token is being placed inside a
+     *                       double-quoted phrase assembled by the caller.
+     */
     private function escapeFtsToken(string $token, bool $inPhrase = false): string
     {
-        // FTS5 handles apostrophes differently in phrases vs bare terms
         if ($inPhrase) {
-            // In phrases, double the apostrophes
-            return str_replace("'", "''", $token);
-        } else {
-            // For bare terms, if it contains an apostrophe, wrap it in quotes
-            if (strpos($token, "'") !== false) {
-                $escaped = str_replace("'", "''", $token);
-                return '"' . $escaped . '"';
-            }
-            return $token;
+            // The caller wraps the whole phrase in double quotes, so the quote
+            // character is the only one that can break out of it. FTS5 escapes
+            // it by doubling.
+            return str_replace('"', '""', $token);
         }
+
+        // A trailing asterisk is the prefix operator added by prefix_last_token.
+        // Keep it outside the quotes so it stays an operator instead of becoming
+        // a literal character in the phrase.
+        $suffix = '';
+        if (substr($token, -1) === '*') {
+            $token = substr($token, 0, -1);
+            $suffix = '*';
+        }
+
+        if ($token === '') {
+            return '';
+        }
+
+        if ($this->isBareFtsTerm($token)) {
+            return $token . $suffix;
+        }
+
+        return '"' . str_replace('"', '""', $token) . '"' . $suffix;
+    }
+
+    /**
+     * True when a term can be passed to FTS5 MATCH without quoting.
+     */
+    private function isBareFtsTerm(string $token): bool
+    {
+        if (in_array(strtoupper($token), self::FTS_KEYWORDS, true)) {
+            return false;
+        }
+
+        return (bool)preg_match('/^[\p{L}\p{N}]+$/u', $token);
     }
 
     private function processQuery(SearchQuery $query): SearchQuery
