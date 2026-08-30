@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.3.3] - 2026-08-30
+
+### Bug Fixes
+- **Stale FTS5 terms on external-content deletes**: An FTS5 `content=` table stores no copy of the indexed text, so its `'delete'` command removes exactly the terms it is handed — and every delete site was handing it an empty string, which deletes nothing. The old terms stayed in the vocabulary pointing at a `doc_id`, and since `doc_id` is a plain `INTEGER PRIMARY KEY`, SQLite hands that rowid to the next document inserted, which then answered for words only the deleted document ever contained. All paths (`delete()`, `insert()`, `insertBatch()`, `deleteByIdPrefix()` without rebuild) now read the `doc_id` and the text the row was indexed with before anything is overwritten and hand that text to the `'delete'` command. `insertBatch()` also drops `INSERT OR REPLACE` (which cannot work for external content) in favor of a plain insert paired with an explicit delete. Callers no longer need a `rebuildFts()` after every write batch to keep results correct. See `tests/Integration/Storage/ExternalContentFtsDeleteTest.php`.
+- **Remaining query-operand leaks in FTS5 MATCH**: A token that escapes to an empty string (empty, or nothing but the prefix operator) was joined into the MATCH expression as a bare operand, so `widget *` built `widget OR ` and SQLite answered with an fts5 syntax error. Escaping now goes through `escapeFtsTokens()`, which drops the empties, and phrase and `NEAR()` components are only emitted while they still have operands. Separately, a query that reduces to no searchable term (`:`, `...`, `**`, `()`) now returns no results from `search()` and `count()` instead of matching the entire index. An explicitly blank query is unchanged and still means "no text query" for geo-only and facet-only searches.
+
 ## [2.3.2] - 2026-08-30
 
 ### Bug Fixes
