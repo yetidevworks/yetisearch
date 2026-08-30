@@ -123,6 +123,16 @@ class SearchEngine implements SearchEngineInterface
             $originalQuery = $query->getQuery();
 
             $processedQuery = $this->processQuery($query);
+
+            if ($this->isTermlessQuery($query, $processedQuery)) {
+                $this->logger->debug('Query holds no searchable term', ['query' => $originalQuery]);
+
+                $emptyResults = new SearchResults([], 0, microtime(true) - $startTime);
+                $this->cacheResults($cacheKey, $emptyResults);
+
+                return $emptyResults;
+            }
+
             $storageQuery = $this->buildStorageQuery($processedQuery);
 
             // If deduplicating, we need to get ALL results first
@@ -351,6 +361,11 @@ class SearchEngine implements SearchEngineInterface
     public function count(SearchQuery $query): int
     {
         $processedQuery = $this->processQuery($query);
+
+        if ($this->isTermlessQuery($query, $processedQuery)) {
+            return 0;
+        }
+
         $storageQuery = $this->buildStorageQuery($processedQuery);
 
         return $this->storage->count($this->indexName, $storageQuery);
@@ -439,6 +454,47 @@ class SearchEngine implements SearchEngineInterface
         }
 
         return (bool)preg_match('/^[\p{L}\p{N}]+$/u', $token);
+    }
+
+    /**
+     * Escape a list of user terms, dropping any that escape to nothing.
+     *
+     * A token can escape to an empty string: it was empty to begin with, or it
+     * was nothing but the prefix operator. Left in the list it gets joined into
+     * the MATCH expression as a bare operand — "widget OR ", "NEAR(widget , 10)"
+     * — which FTS5 rejects with a syntax error.
+     *
+     * @param array<int, string> $tokens
+     * @return array<int, string>
+     */
+    private function escapeFtsTokens(array $tokens, bool $inPhrase = false): array
+    {
+        $escaped = [];
+
+        foreach ($tokens as $token) {
+            $value = $this->escapeFtsToken($token, $inPhrase);
+            if ($value !== '') {
+                $escaped[] = $value;
+            }
+        }
+
+        return $escaped;
+    }
+
+    /**
+     * True when the caller supplied query text that analysis reduced to nothing.
+     *
+     * An explicitly blank query means "no text query": geo-only and facet-only
+     * searches are expressed that way, and storage answers them with a match-all
+     * over whatever filters came with them. Text the user actually typed is a
+     * different thing. If none of it survives as a searchable term — punctuation,
+     * stray operators, stop words — the honest answer is no matches. Falling
+     * through to the match-all branch instead answers a search box full of
+     * punctuation with the entire index.
+     */
+    private function isTermlessQuery(SearchQuery $original, SearchQuery $processed): bool
+    {
+        return trim($original->getQuery()) !== '' && trim($processed->getQuery()) === '';
     }
 
     private function processQuery(SearchQuery $query): SearchQuery
@@ -599,17 +655,10 @@ class SearchEngine implements SearchEngineInterface
         if ($query->isFuzzy() && $useCorrectionMode && $this->config['enable_fuzzy']) {
             // Build a simple query with corrected terms
             // Use the same logic as non-fuzzy search but with corrected tokens
-            $escapedTokens = array_map(function ($t) {
-                return $this->escapeFtsToken($t, false);
-            }, $exactTokens);
+            $escapedTokens = $this->escapeFtsTokens($exactTokens);
 
-            if (count($exactTokens) > 1) {
-                // Multiple terms - search for all of them (implicit AND in FTS5)
-                $processedQuery = implode(' ', $escapedTokens);
-            } else {
-                // Single term
-                $processedQuery = $escapedTokens[0] ?? '';
-            }
+            // Multiple terms - search for all of them (implicit AND in FTS5)
+            $processedQuery = implode(' ', $escapedTokens);
         } elseif ($query->isFuzzy() && !$useCorrectionMode && !empty($fuzzyTokens)) {
             // Build structured query that strongly prioritizes exact matches
             // Use parentheses to group exact matches with higher priority
@@ -623,17 +672,15 @@ class SearchEngine implements SearchEngineInterface
             $exactComponents = [];
             if (count($tokens) > 1) {
                 // Escape tokens for FTS phrase
-                $escapedTokens = array_map(function ($t) {
-                    return $this->escapeFtsToken($t, true);
-                }, $tokens);
+                $escapedTokens = $this->escapeFtsTokens($tokens, true);
                 // Exact phrase gets highest priority
-                $exactComponents[] = '"' . implode(' ', $escapedTokens) . '"';
+                if (!empty($escapedTokens)) {
+                    $exactComponents[] = '"' . implode(' ', $escapedTokens) . '"';
+                }
             }
 
             // Escape exact tokens for FTS (as bare terms)
-            $escapedExactTokens = array_map(function ($t) {
-                return $this->escapeFtsToken($t, false);
-            }, $exactTokens);
+            $escapedExactTokens = $this->escapeFtsTokens($exactTokens);
 
             // Add individual exact tokens with NEAR proximity (if multiple tokens)
             if (count($escapedExactTokens) > 1) {
@@ -647,9 +694,7 @@ class SearchEngine implements SearchEngineInterface
             }
 
             // Build fuzzy component - group them with lower priority
-            $escapedFuzzyTokens = array_map(function ($t) {
-                return $this->escapeFtsToken($t, false);
-            }, $fuzzyTokens);
+            $escapedFuzzyTokens = $this->escapeFtsTokens($fuzzyTokens);
             $fuzzyComponent = count($escapedFuzzyTokens) > 0 ? '(' . implode(' OR ', $escapedFuzzyTokens) . ')' : '';
 
             // Combine with exact matches having priority
@@ -670,23 +715,23 @@ class SearchEngine implements SearchEngineInterface
             }
 
             $exactComponents = [];
+            $escapedExactTokens = $this->escapeFtsTokens($exactTokens);
             if (count($tokens) > 1) {
                 // Escape tokens for FTS phrase
-                $escapedTokens = array_map(function ($t) {
-                    return $this->escapeFtsToken($t, true);
-                }, $tokens);
-                $escapedExactTokens = array_map(function ($t) {
-                    return $this->escapeFtsToken($t, false);
-                }, $exactTokens);
+                $escapedTokens = $this->escapeFtsTokens($tokens, true);
 
                 // Add exact phrase
-                $exactComponents[] = '"' . implode(' ', $escapedTokens) . '"';
+                if (!empty($escapedTokens)) {
+                    $exactComponents[] = '"' . implode(' ', $escapedTokens) . '"';
+                }
                 // Add NEAR query for proximity boost
-                $exactComponents[] = 'NEAR(' . implode(' ', $escapedExactTokens) . ', 10)';
+                if (count($escapedExactTokens) > 1) {
+                    $exactComponents[] = 'NEAR(' . implode(' ', $escapedExactTokens) . ', 10)';
+                }
             }
             // Add individual tokens
-            foreach ($exactTokens as $token) {
-                $exactComponents[] = $this->escapeFtsToken($token, false);
+            foreach ($escapedExactTokens as $token) {
+                $exactComponents[] = $token;
             }
 
             $processedQuery = implode(' OR ', array_unique($exactComponents));
