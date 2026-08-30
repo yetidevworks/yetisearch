@@ -328,7 +328,9 @@ class YetiSearch
         // that is how a caller says "no text query" for geo-only or
         // facet-only searches.
         if (trim($query) !== '' && empty($escapedTokens)) {
-            $this->logger?->debug('Query holds no searchable term', ['query' => $query]);
+            if ($this->logger !== null) {
+                $this->logger->debug('Query holds no searchable term', ['query' => $query]);
+            }
 
             return [
                 'results' => [],
@@ -340,10 +342,12 @@ class YetiSearch
 
         // Prepare query array for storage
         $queryArray = array_merge([
-            'query' => implode(' ', $escapedTokens),
             'limit' => 20,
             'offset' => 0
         ], $options);
+        // The dedicated $query argument is authoritative. Do not allow an
+        // options entry to bypass analysis and FTS5 escaping.
+        $queryArray['query'] = implode(' ', $escapedTokens);
 
         return $storage->searchMultiple($indices, $queryArray);
     }

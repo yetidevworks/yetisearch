@@ -15,9 +15,9 @@ class MultiSearchSpecialCharacterTest extends TestCase
     private const INDEX_A = 'idx_multi_a';
     private const INDEX_B = 'idx_multi_b';
 
-    private function seedIndices(): \YetiSearch\YetiSearch
+    private function seedIndices(array $config = []): \YetiSearch\YetiSearch
     {
-        $search = $this->createSearchInstance();
+        $search = $this->createSearchInstance($config);
         $this->createTestIndex(self::INDEX_A);
         $this->createTestIndex(self::INDEX_B);
 
@@ -89,10 +89,10 @@ class MultiSearchSpecialCharacterTest extends TestCase
     {
         $search = $this->seedIndices();
 
-        $results = $search->multiSearch([self::INDEX_A], 'say "widget"');
+        $results = $search->multiSearch([self::INDEX_B], '"blue widget"');
 
-        $this->assertIsArray($results['results']);
-        $this->assertArrayHasKey('total', $results);
+        $ids = array_column($results['results'], 'id');
+        $this->assertContains('product-1', $ids);
     }
 
     /**
@@ -141,10 +141,35 @@ class MultiSearchSpecialCharacterTest extends TestCase
      */
     public function test_bare_keywords_are_searched_as_terms(): void
     {
+        $search = $this->seedIndices([
+            'analyzer' => [
+                'disable_stop_words' => true,
+                'lowercase' => false,
+            ],
+        ]);
+
+        $results = $search->multiSearch([self::INDEX_B], 'AND');
+
+        $ids = array_column($results['results'], 'id');
+        $this->assertContains('product-1', $ids);
+    }
+
+    /**
+     * The query has a dedicated argument, so an options entry must not replace
+     * the analyzed and escaped value sent to FTS5.
+     */
+    public function test_query_option_cannot_bypass_escaping(): void
+    {
         $search = $this->seedIndices();
 
-        $results = $search->multiSearch([self::INDEX_A, self::INDEX_B], 'order AND widget');
+        $results = $search->multiSearch(
+            [self::INDEX_B],
+            'properly',
+            ['query' => 'ABC-123']
+        );
 
-        $this->assertIsArray($results['results']);
+        $ids = array_column($results['results'], 'id');
+        $this->assertContains('guide-1', $ids);
+        $this->assertNotContains('product-1', $ids);
     }
 }
