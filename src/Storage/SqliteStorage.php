@@ -9,6 +9,8 @@ use YetiSearch\Geo\GeoBounds;
 use YetiSearch\Cache\QueryCache;
 use YetiSearch\Storage\PreparedStatementCache;
 use YetiSearch\Helpers\UTF8Helper as UTF8;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 
 class SqliteStorage implements StorageInterface
 {
@@ -24,6 +26,12 @@ class SqliteStorage implements StorageInterface
     private array $spatialEnabledCache = [];
     private bool $externalContentDefault = false;
     private ?QueryCache $queryCache = null;
+    private LoggerInterface $logger;
+
+    public function __construct(?LoggerInterface $logger = null)
+    {
+        $this->logger = $logger ?? new NullLogger();
+    }
 
     /**
      * Allowed operators for filter clauses.
@@ -1626,8 +1634,11 @@ class SqliteStorage implements StorageInterface
                     $allResults[] = $result;
                 }
             } catch (\Exception $e) {
-                // Log error but continue with other indices
-                // In production, you might want to log this error
+                // Log the error but continue with other indices
+                $this->logger->warning('multiSearch: index search failed and was skipped', [
+                    'index' => $indexName,
+                    'error' => $e->getMessage(),
+                ]);
                 continue;
             }
         }

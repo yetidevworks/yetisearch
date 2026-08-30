@@ -14,6 +14,7 @@ use YetiSearch\Utils\JaroWinkler;
 use YetiSearch\Utils\Trigram;
 use YetiSearch\Utils\PhoneticMatcher;
 use YetiSearch\Utils\KeyboardProximity;
+use YetiSearch\Utils\Fts5Escaper;
 use YetiSearch\Helpers\UTF8Helper as UTF8;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -391,12 +392,6 @@ class SearchEngine implements SearchEngineInterface
     }
 
     /**
-     * FTS5 keywords that must be quoted when they appear as a user term,
-     * otherwise the MATCH parser reads them as operators.
-     */
-    private const FTS_KEYWORDS = ['AND', 'OR', 'NOT', 'NEAR'];
-
-    /**
      * Escape a single user term so it is safe to hand to an FTS5 MATCH expression.
      *
      * Only bare alphanumeric terms are legal unquoted in the MATCH grammar.
@@ -417,68 +412,18 @@ class SearchEngine implements SearchEngineInterface
      */
     private function escapeFtsToken(string $token, bool $inPhrase = false): string
     {
-        if ($inPhrase) {
-            // The caller wraps the whole phrase in double quotes, so the quote
-            // character is the only one that can break out of it. FTS5 escapes
-            // it by doubling.
-            return str_replace('"', '""', $token);
-        }
-
-        // A trailing asterisk is the prefix operator added by prefix_last_token.
-        // Keep it outside the quotes so it stays an operator instead of becoming
-        // a literal character in the phrase.
-        $suffix = '';
-        if (substr($token, -1) === '*') {
-            $token = substr($token, 0, -1);
-            $suffix = '*';
-        }
-
-        if ($token === '') {
-            return '';
-        }
-
-        if ($this->isBareFtsTerm($token)) {
-            return $token . $suffix;
-        }
-
-        return '"' . str_replace('"', '""', $token) . '"' . $suffix;
-    }
-
-    /**
-     * True when a term can be passed to FTS5 MATCH without quoting.
-     */
-    private function isBareFtsTerm(string $token): bool
-    {
-        if (in_array(strtoupper($token), self::FTS_KEYWORDS, true)) {
-            return false;
-        }
-
-        return (bool)preg_match('/^[\p{L}\p{N}]+$/u', $token);
+        return Fts5Escaper::escapeToken($token, $inPhrase);
     }
 
     /**
      * Escape a list of user terms, dropping any that escape to nothing.
-     *
-     * A token can escape to an empty string: it was empty to begin with, or it
-     * was nothing but the prefix operator. Left in the list it gets joined into
-     * the MATCH expression as a bare operand — "widget OR ", "NEAR(widget , 10)"
-     * — which FTS5 rejects with a syntax error.
      *
      * @param array<int, string> $tokens
      * @return array<int, string>
      */
     private function escapeFtsTokens(array $tokens, bool $inPhrase = false): array
     {
-        $escaped = [];
-
-        foreach ($tokens as $token) {
-            $value = $this->escapeFtsToken($token, $inPhrase);
-            if ($value !== '') {
-                $escaped[] = $value;
-            }
-        }
-
-        return $escaped;
+        return Fts5Escaper::escapeTokens($tokens, $inPhrase);
     }
 
     /**

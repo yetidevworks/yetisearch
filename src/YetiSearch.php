@@ -6,6 +6,7 @@ use YetiSearch\Storage\SqliteStorage;
 use YetiSearch\Analyzers\StandardAnalyzer;
 use YetiSearch\Index\Indexer;
 use YetiSearch\Search\SearchEngine;
+use YetiSearch\Utils\Fts5Escaper;
 use YetiSearch\Models\SearchQuery;
 use YetiSearch\Geo\GeoPoint;
 use YetiSearch\Geo\GeoBounds;
@@ -312,9 +313,34 @@ class YetiSearch
     {
         $storage = $this->getStorage();
 
+        // Unlike search(), this path does not go through SearchEngine, so the
+        // raw query text would reach FTS5 MATCH unescaped. Process it here the
+        // same way the engine would: tokenize with the analyzer, drop stop
+        // words, escape each term.
+        $analyzer = $this->getAnalyzer();
+        $language = $options['language'] ?? null;
+        $tokens = $analyzer->tokenize($query);
+        $tokens = $analyzer->removeStopWords($tokens, $language);
+        $escapedTokens = Fts5Escaper::escapeTokens($tokens);
+
+        // A termless but non-blank query ("...", ":") must not fall through to
+        // storage's match-all branch. An explicitly blank query is left alone:
+        // that is how a caller says "no text query" for geo-only or
+        // facet-only searches.
+        if (trim($query) !== '' && empty($escapedTokens)) {
+            $this->logger?->debug('Query holds no searchable term', ['query' => $query]);
+
+            return [
+                'results' => [],
+                'total' => 0,
+                'search_time' => 0.0,
+                'indices_searched' => [],
+            ];
+        }
+
         // Prepare query array for storage
         $queryArray = array_merge([
-            'query' => $query,
+            'query' => implode(' ', $escapedTokens),
             'limit' => 20,
             'offset' => 0
         ], $options);
@@ -649,7 +675,7 @@ class YetiSearch
     private function getStorage(): SqliteStorage
     {
         if ($this->storage === null) {
-            $this->storage = new SqliteStorage();
+            $this->storage = new SqliteStorage($this->logger);
             $storageConfig = $this->config['storage'];
             if (!isset($storageConfig['cache']) && isset($this->config['cache']) && is_array($this->config['cache'])) {
                 $storageConfig['cache'] = $this->config['cache'];
