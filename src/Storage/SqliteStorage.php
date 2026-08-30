@@ -402,7 +402,12 @@ class SqliteStorage implements StorageInterface
 
             $schema = $this->getSchemaMode($index);
             $docId = null;
+            $previousFtsRow = null;
             if ($schema === 'external') {
+                // Read what this document is currently indexed as before the
+                // upsert overwrites it; FTS5 needs that text to drop its terms.
+                $previousFtsRow = $this->getIndexedFtsRow($index, $id);
+
                 $upsertSql = "
                     INSERT INTO {$index} (id, content, metadata, language, type, timestamp)
                     VALUES (?, ?, ?, ?, ?, ?)
@@ -443,14 +448,11 @@ class SqliteStorage implements StorageInterface
                 $contentText = $this->getFieldText($document['content'], 'content', $index);
 
                 // For external content FTS5, we must explicitly delete the old entry
-                // before inserting the new one, otherwise old terms remain in the vocabulary.
-                // Use the special 'delete' command to remove old FTS entry for this rowid.
-                // We delete with empty content since the actual content doesn't matter for deletion.
-                try {
-                    $deleteFtsSql = "INSERT INTO {$index}_fts({$index}_fts, rowid, content) VALUES('delete', ?, ?)";
-                    $this->connection->prepare($deleteFtsSql)->execute([$docId, '']);
-                } catch (\PDOException $e) {
-                    // Ignore deletion errors (e.g., if entry doesn't exist)
+                // before inserting the new one, otherwise old terms remain in the
+                // vocabulary. The 'delete' command only removes the terms it is
+                // given, so it gets the text the row was actually indexed with.
+                if ($previousFtsRow !== null) {
+                    $this->deleteFtsRow($index, $previousFtsRow[0], $previousFtsRow[1]);
                 }
 
                 // Now insert the new FTS entry
@@ -535,11 +537,12 @@ class SqliteStorage implements StorageInterface
             // Prepare FTS insert statement dynamically
             $ftsColumns = $this->getFtsColumns($index);
             if ($schema === 'external') {
-                // External content with JSON storage only supports single-column FTS
-                // Note: For batch operations, we use INSERT OR REPLACE for performance.
-                // The FTS vocabulary may become stale on updates; use rebuildFts() after
-                // batch updates to resync the vocabulary with content.
-                $ftsStmt = $this->connection->prepare("INSERT OR REPLACE INTO {$index}_fts (rowid, content) VALUES (?, ?)");
+                // External content with JSON storage only supports single-column FTS.
+                // A plain INSERT, paired with an explicit 'delete' of whatever the
+                // rowid held before: INSERT OR REPLACE cannot remove the old terms,
+                // because by the time it looks them up the content table already
+                // holds the replacement text.
+                $ftsStmt = $this->connection->prepare("INSERT INTO {$index}_fts (rowid, content) VALUES (?, ?)");
             } else {
                 // Sanitize column names to ensure they're valid SQL identifiers
                 $validColumns = [];
@@ -574,6 +577,7 @@ class SqliteStorage implements StorageInterface
 
             // Collect FTS data for batch insert
             $ftsData = [];
+            $staleFtsRows = [];
             $termsData = [];
             $spatialDocs = [];
 
@@ -610,6 +614,17 @@ class SqliteStorage implements StorageInterface
                 $type = $document['type'] ?? 'default';
                 $timestamp = $document['timestamp'] ?? time();
 
+                // Read the text this document is currently indexed as, before the
+                // upsert overwrites it. Keyed by doc_id and only recorded once, so
+                // an id repeated inside one batch still deletes exactly the terms
+                // that were in the index when the batch started.
+                if ($schema === 'external') {
+                    $previousFtsRow = $this->getIndexedFtsRow($index, $id);
+                    if ($previousFtsRow !== null && !isset($staleFtsRows[$previousFtsRow[0]])) {
+                        $staleFtsRows[$previousFtsRow[0]] = $previousFtsRow;
+                    }
+                }
+
                 // Insert main document
                 $docStmt->execute([$id, $content, $metadata, $language, $type, $timestamp]);
 
@@ -623,7 +638,9 @@ class SqliteStorage implements StorageInterface
                         $docIdFallbackStmt->execute([$id]);
                         $docId = $docIdFallbackStmt->fetchColumn();
                     }
-                    $ftsData[] = [$docId, $this->getFieldText($document['content'], 'content', $index)];
+                    // Keyed by doc_id so a repeated id is inserted into FTS once,
+                    // with the last version of the document to appear in the batch.
+                    $ftsData[(int)$docId] = [$docId, $this->getFieldText($document['content'], 'content', $index)];
                 } else {
                     $values = [$id];
                     foreach ($ftsColumns as $col) {
@@ -639,6 +656,11 @@ class SqliteStorage implements StorageInterface
 
                 // Collect spatial data
                 $spatialDocs[] = [$id, $document];
+            }
+
+            // Drop the terms of every row being replaced before re-inserting it
+            foreach ($staleFtsRows as [$staleDocId, $staleText]) {
+                $this->deleteFtsRow($index, $staleDocId, $staleText);
             }
 
             // Batch insert FTS entries
@@ -715,27 +737,27 @@ class SqliteStorage implements StorageInterface
             // Capture doc_id early for external schema
             $schema = $this->getSchemaMode($index);
             $savedDocId = null;
+            $indexedFtsRow = null;
             if ($schema === 'external') {
-                $savedDocId = $this->getDocId($index, $id);
+                $indexedFtsRow = $this->getIndexedFtsRow($index, $id);
+                $savedDocId = $indexedFtsRow[0] ?? null;
+
+                // Drop the FTS entry before the content row goes. FTS5 has to be
+                // handed the text the row was indexed with, and the content table
+                // is the only place that text is kept — once the row is deleted it
+                // cannot be reconstructed, and the terms stay in the vocabulary
+                // pointing at a doc_id SQLite will reuse.
+                if ($indexedFtsRow !== null) {
+                    $this->deleteFtsRow($index, $indexedFtsRow[0], $indexedFtsRow[1]);
+                }
             }
 
-            // Delete from main table first
+            // Delete from main table
             $this->connection->prepare("DELETE FROM {$index} WHERE id = ?")->execute([$id]);
 
-            // Handle FTS deletion based on schema
-            if ($schema === 'external') {
-                // For external content, use FTS5's targeted delete command
-                // instead of a full rebuild (O(1) vs O(N))
-                if ($savedDocId !== null) {
-                    try {
-                        $deleteFtsSql = "INSERT INTO {$index}_fts({$index}_fts, rowid, content) VALUES('delete', ?, ?)";
-                        $this->connection->prepare($deleteFtsSql)->execute([$savedDocId, '']);
-                    } catch (\PDOException $e) {
-                        // Ignore deletion errors (e.g., if entry doesn't exist)
-                    }
-                }
-            } else {
-                // For non-external content, regular DELETE works
+            // The external schema already dropped its FTS entry above, before the
+            // content row was removed. For non-external content, regular DELETE works.
+            if ($schema !== 'external') {
                 $this->connection->prepare("DELETE FROM {$index}_fts WHERE id = ?")->execute([$id]);
             }
 
@@ -798,13 +820,16 @@ class SqliteStorage implements StorageInterface
 
             $this->connection->beginTransaction();
 
-            // Collect spatial IDs BEFORE deleting from main table
+            // Collect spatial IDs and indexed FTS text BEFORE deleting from main
+            // table — once the content rows are gone the text cannot be recovered
             $spatialIds = [];
+            $indexedFtsRows = [];
             if ($schema === 'external') {
                 foreach ($ids as $id) {
-                    $docId = $this->getDocId($index, $id);
-                    if ($docId !== null) {
-                        $spatialIds[] = $docId;
+                    $indexedFtsRow = $this->getIndexedFtsRow($index, $id);
+                    if ($indexedFtsRow !== null) {
+                        $indexedFtsRows[] = $indexedFtsRow;
+                        $spatialIds[] = $indexedFtsRow[0];
                     }
                 }
             }
@@ -816,11 +841,16 @@ class SqliteStorage implements StorageInterface
 
             // Handle FTS deletion based on schema
             if ($schema === 'external') {
-                // For external content tables, optionally rebuild FTS to sync
                 if ($rebuildFts) {
+                    // A full rebuild resyncs the vocabulary in one pass
                     $this->connection->exec("INSERT INTO {$index}_fts({$index}_fts) VALUES('rebuild')");
+                } else {
+                    // Otherwise drop each row's terms individually, using the text
+                    // read before the content rows were deleted
+                    foreach ($indexedFtsRows as [$docId, $indexedText]) {
+                        $this->deleteFtsRow($index, $docId, $indexedText);
+                    }
                 }
-                // Note: If rebuildFts is false, caller must call rebuildFts() after all operations
             } else {
                 // For non-external content, delete matching rows
                 $this->connection->prepare("DELETE FROM {$index}_fts WHERE id IN ({$placeholders})")->execute($ids);
@@ -1725,6 +1755,57 @@ class SqliteStorage implements StorageInterface
             return (int)$val;
         } catch (\PDOException $e) {
             return null;
+        }
+    }
+
+    /**
+     * The doc_id and the exact text an external-content FTS5 row was indexed with.
+     *
+     * An FTS5 content= table keeps no copy of the text, so removing a row's terms
+     * means handing the original column values back to it. The content table is
+     * the only place they are kept, which is why this has to be read before the
+     * row is deleted or overwritten.
+     *
+     * @return array{0: int, 1: string}|null doc_id and indexed text, or null when
+     *                                       the document is not in the index
+     */
+    private function getIndexedFtsRow(string $index, string $id): ?array
+    {
+        try {
+            $stmt = $this->connection->prepare("SELECT doc_id, content FROM {$index} WHERE id = ?");
+            $stmt->execute([$id]);
+            $row = $stmt->fetch(\PDO::FETCH_ASSOC);
+        } catch (\PDOException $e) {
+            return null;
+        }
+
+        if (!is_array($row) || !isset($row['doc_id'])) {
+            return null;
+        }
+
+        $content = json_decode((string)($row['content'] ?? ''), true);
+
+        return [
+            (int)$row['doc_id'],
+            $this->getFieldText(is_array($content) ? $content : [], 'content', $index),
+        ];
+    }
+
+    /**
+     * Remove one external-content FTS5 row's terms from the vocabulary.
+     *
+     * The text must be what the row was indexed with. Passing anything else — an
+     * empty string, or the replacement text of a document being updated — deletes
+     * nothing, and the old terms stay in the index pointing at a doc_id SQLite is
+     * free to hand to the next document.
+     */
+    private function deleteFtsRow(string $index, int $docId, string $indexedText): void
+    {
+        try {
+            $sql = "INSERT INTO {$index}_fts({$index}_fts, rowid, content) VALUES('delete', ?, ?)";
+            $this->connection->prepare($sql)->execute([$docId, $indexedText]);
+        } catch (\PDOException $e) {
+            // The row was never in the FTS index, so there is nothing to remove.
         }
     }
 
