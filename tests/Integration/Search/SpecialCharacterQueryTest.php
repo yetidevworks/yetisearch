@@ -143,6 +143,131 @@ class SpecialCharacterQueryTest extends TestCase
         $this->assertContains('order-1', $ids);
     }
 
+    /**
+     * A colon is FTS5 column-filter syntax. The plain search() path has no
+     * column-filter feature — that is the DSL's job (`field = "value"`) — so
+     * "title:widget" is nothing but user text, and it must never restrict the
+     * match to the "title" column. Here "widget" lives only in the content
+     * field, so a column filter would return nothing.
+     */
+    public function test_field_prefix_text_does_not_filter_by_column(): void
+    {
+        $search = $this->seedIndex();
+
+        $results = $search->search(self::INDEX, 'title:widget');
+
+        $ids = array_column($results['results'], 'id');
+        $this->assertContains('product-1', $ids);
+    }
+
+    public function test_field_prefix_text_with_an_unknown_column_still_searches(): void
+    {
+        $search = $this->seedIndex();
+
+        $results = $search->search(self::INDEX, 'nosuchcolumn:widget');
+
+        $ids = array_column($results['results'], 'id');
+        $this->assertContains('product-1', $ids);
+    }
+
+    public function test_bare_field_prefix_returns_no_results_rather_than_everything(): void
+    {
+        $search = $this->seedIndex();
+
+        $results = $search->search(self::INDEX, 'foo:');
+
+        $this->assertSame(0, $results['total']);
+    }
+
+    /**
+     * A query the user actually typed that contains no searchable term at all
+     * must come back empty. Falling through to the unfiltered match-all branch
+     * answers a search box full of punctuation with the entire index.
+     *
+     * @dataProvider termlessQueries
+     */
+    public function test_queries_with_no_searchable_term_return_no_results(string $query): void
+    {
+        $search = $this->seedIndex();
+
+        $results = $search->search(self::INDEX, $query);
+
+        $this->assertSame(0, $results['total'], "Query {$query} should not match every document");
+        $this->assertSame([], $results['results']);
+    }
+
+    public static function termlessQueries(): array
+    {
+        return [
+            'colon' => [':'],
+            'ellipsis' => ['...'],
+            'hyphens' => ['---'],
+            'asterisk' => ['*'],
+            'double asterisk' => ['**'],
+            'quote' => ['"'],
+            'empty quotes' => ['""'],
+            'parentheses' => ['()'],
+            'caret' => ['^'],
+            'mixed punctuation' => ['!?.,;'],
+        ];
+    }
+
+    /**
+     * An empty (or whitespace-only) query is the caller saying "no text query",
+     * which is how geo-only and facet-only searches are expressed. That branch
+     * stays a match-all.
+     *
+     * @dataProvider blankQueries
+     */
+    public function test_a_blank_query_remains_a_match_all(string $query): void
+    {
+        $search = $this->seedIndex();
+
+        $results = $search->search(self::INDEX, $query);
+
+        $this->assertSame(2, $results['total']);
+    }
+
+    public static function blankQueries(): array
+    {
+        return [
+            'empty string' => [''],
+            'whitespace only' => ['   '],
+        ];
+    }
+
+    public function test_count_agrees_with_search_on_a_termless_query(): void
+    {
+        $search = $this->seedIndex();
+
+        $engine = $search->getSearchEngine(self::INDEX);
+
+        $this->assertSame(0, $engine->count(new \YetiSearch\Models\SearchQuery('...')));
+    }
+
+    /**
+     * With punctuation stripping turned off the raw token reaches the escaper,
+     * and a token that is nothing but the prefix operator used to collapse to
+     * an empty string that was then joined into the MATCH expression, producing
+     * "widget OR " and an fts5 syntax error.
+     */
+    public function test_operator_only_token_does_not_break_the_match_expression(): void
+    {
+        $search = $this->createSearchInstance([
+            'analyzer' => ['strip_punctuation' => false],
+        ]);
+        $this->createTestIndex(self::INDEX);
+        $search->index(self::INDEX, [
+            'id' => 'product-1',
+            'content' => ['title' => 'Blue Widget', 'content' => 'A widget.'],
+        ]);
+
+        $results = $search->search(self::INDEX, 'widget *');
+
+        $ids = array_column($results['results'], 'id');
+        $this->assertContains('product-1', $ids);
+    }
+
     public function test_engine_count_accepts_hyphenated_queries(): void
     {
         $search = $this->seedIndex();
