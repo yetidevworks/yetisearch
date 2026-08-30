@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.2] - 2026-08-30
+
+### Bug Fixes
+- **FTS5 query escaping**: User-typed terms containing characters that are operators in the FTS5 `MATCH` grammar (hyphens in order numbers or SKUs, colons, quotes, parentheses) no longer throw a `StorageException` — instead they are wrapped in double quotes so FTS5 treats them as literal phrases and re-tokenizes them with the table's own tokenizer. Terms colliding with the `AND`/`OR`/`NOT`/`NEAR` keywords are quoted as well, and a trailing `*` from `prefix_last_token` stays outside the quotes so it remains a prefix operator. Intentional DSL and advanced-query syntax is unaffected. See `tests/Integration/Search/SpecialCharacterQueryTest.php`.
+- **Indexer `fields` option validation**: A flat list like `['fields' => ['title', 'sku']]` used to be accepted silently and then corrupt the index (the integer list keys became the FTS column names, followed by insert failures or silently missing documents). The option is now normalized in the `Indexer` constructor: the flat form is accepted as shorthand for the default boost, the documented associative form passes through, and the two may be mixed. Malformed shapes throw `InvalidArgumentException`, and field names are validated as plain SQL identifiers since they become FTS5 column names. See `tests/Integration/Indexer/FieldsConfigNormalizationTest.php`.
+- **Packagist package name**: Restored the canonical `yetidevworks/yetisearch` package name in `composer.json` (a rename to `yetisearch/yetisearch` pointed at a package that has never existed on Packagist and would have broken the next release sync).
+
 ## [2.3.1] - 2026-03-09
 
 ### Improvements
