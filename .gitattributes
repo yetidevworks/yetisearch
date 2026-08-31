@@ -24,3 +24,7 @@
 
 # Artifacts a development run wrote and a release should never carry.
 /yetisearch.db      export-ignore
+
+# A library consumer never resolves against our lockfile — Composer ignores it
+# outside the root package — so it is dead weight in the dist.
+/composer.lock      export-ignore

@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.3.5] - 2026-08-31
+
+### Packaging
+- **Development files no longer ship to consumers**: `composer require yetidevworks/yetisearch` unpacked the entire repository into a consumer's `vendor/` — the test suite, the benchmarks, the examples, the CI configuration, and the SQLite databases a development run leaves behind (`yetisearch.db` at the repo root, `examples/typeahead.db`, `benchmarks/fuzzy-eval.db`). Those three databases were arriving in production installs of anything depending on this library. A `.gitattributes` `export-ignore` set now limits the dist to `src/`, `bin/`, `docs/`, the composer metadata, the licence, the readme, the performance guide and the changelog. The lockfile is excluded as well, since Composer ignores it outside the root package. The published archive drops from roughly 2.0 MB to 0.7 MB. No library code changed in this release.
+
 ## [2.3.4] - 2026-08-30
 
 ### Bug Fixes
