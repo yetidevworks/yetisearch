@@ -1,0 +1,26 @@
+# Keep development-only files out of the Packagist dist.
+#
+# Without this, `composer require yetidevworks/yetisearch` unpacks the whole
+# repository into a consumer's vendor/ — the test suite, the benchmarks, the
+# examples, and the stray SQLite databases those leave behind. yetisearch.db at
+# the repo root, examples/typeahead.db and benchmarks/fuzzy-eval.db were all
+# arriving in production installs.
+#
+# What a consumer needs is src/, bin/, composer.json, the licence and the
+# readable docs. Everything below is ours.
+
+/.github            export-ignore
+/.gitattributes     export-ignore
+/.gitignore         export-ignore
+/benchmarks         export-ignore
+/examples           export-ignore
+/scripts            export-ignore
+/tests              export-ignore
+/Makefile           export-ignore
+/Makefile.tmp       export-ignore
+/phpstan.neon       export-ignore
+/phpunit.xml.dist   export-ignore
+/phpunit-readable.xml export-ignore
+
+# Artifacts a development run wrote and a release should never carry.
+/yetisearch.db      export-ignore
