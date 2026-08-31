@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.4] - 2026-08-30
+
+### Bug Fixes
+- **Unescaped FTS5 MATCH on the `multiSearch()` path**: `multiSearch()`/`searchMultiple()` handed the raw query string to `SqliteStorage::search()` without going through `SearchEngine`, so none of the FTS5 escaping applied there. A hyphenated order number like `BENCH-100821` parsed as a column filter, SQLite rejected the MATCH, and the per-index `catch` swallowed the error into zero results. The escaper is now extracted into `YetiSearch\Utils\Fts5Escaper` (shared with `SearchEngine`), and `multiSearch()` tokenizes with the analyzer, removes stop words, and escapes each term before storage. A termless but non-blank query returns no results instead of matching the entire index; an explicitly blank query keeps its match-all meaning for geo-only and facet-only searches. The dedicated `query` argument is authoritative — an options entry can no longer bypass analysis and escaping. See `tests/Integration/Search/MultiSearchSpecialCharacterTest.php`.
+- **Silently skipped indices in `searchMultiple()`**: The per-index `catch` continued without any trace, so a caller searching three indices could have one skipped invisibly. `SqliteStorage` now accepts an optional PSR-3 logger (wired from `YetiSearch`) and logs a warning naming the index and the error before continuing.
+- **PHP 7.4 compatibility**: Replaced a nullsafe operator (`?->`) introduced on the multiSearch path with an explicit null check — `YetiSearch` still supports PHP 7.4.
+
 ## [2.3.3] - 2026-08-30
 
 ### Bug Fixes
