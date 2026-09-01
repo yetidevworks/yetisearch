@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.3.6] - 2026-08-31
+
+### Bug Fixes
+- **Typo correction did nothing on a small corpus**: `min_term_frequency` is the number of *documents* a term must appear in before fuzzy search will correct towards it, and it defaulted to `2` — not as a declared default, but as a bare `?? 2` repeated at five call sites in `SearchEngine` and in the `getIndexedTerms()` signature. Two is a floor that removes exactly the vocabulary a small corpus is made of: a product name, a brand or a person's name appears in one document by its nature, so on a twelve-document catalogue the correction dictionary fell from 156 terms to 39 and every one of those names became unreachable by a misspelling of it. Searching `licence` for a product called Licenses, `molie` for Mollie or `subscription` for Subscriptions returned nothing at all, while a typo of a word that happened to appear twice corrected normally — which made the feature look intermittent rather than misconfigured. The default is now `1`, declared alongside the other fuzzy tuning knobs, and documented: a term that is in the index is a term somebody indexed on purpose. Raise it on a large, noisy corpus, where a term appearing once is more likely to be a typo than a word.
+
+### Tests
+- **The default configuration is now tested**: every existing fuzzy test set `min_term_frequency => 1` in its own setup, so the suite never exercised the values a consumer gets out of the box and the floor above went unnoticed through several releases. `tests/Integration/Search/DefaultConfigFuzzySearchTest.php` builds a ten-document catalogue in which every term it corrects towards appears in exactly one document, overrides no search setting at all, and covers a substituted letter, a transposed pair, a dropped letter, a British spelling, a truncated word and a singular typed for a plural — plus the negative case, that a word with no near neighbour still matches nothing. It fails on all seven typos against the old default.
+
 ## [2.3.5] - 2026-08-31
 
 ### Packaging

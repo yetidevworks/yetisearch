@@ -63,6 +63,17 @@ class SearchEngine implements SearchEngineInterface
             'fuzzy_correction_mode' => true,    // Enable modern typo correction by default
             'fuzzy_algorithm' => 'trigram',     // Best balance of speed/accuracy
             'correction_threshold' => 0.6,      // Lower threshold for better sensitivity
+            // How many documents a term must appear in before it can be a
+            // correction target. One, because a term that is in the index at
+            // all is a real term somebody indexed on purpose. Two -- what this
+            // used to be, as an undeclared literal repeated at five call sites
+            // -- silently switched typo correction off for the terms that most
+            // need it: on a catalogue, a shop or any small corpus, a product
+            // name, a brand or a person's name appears in exactly one document,
+            // so the whole of the vocabulary worth correcting to sat below the
+            // floor. Raise it on a large, noisy corpus where a term appearing
+            // once is more likely to be a typo than a word.
+            'min_term_frequency' => 1,
             'trigram_size' => 3,
             'trigram_threshold' => 0.35,        // Lower threshold for better matching
             'jaro_winkler_threshold' => 0.85,   // Slightly lower for more matches
@@ -1407,7 +1418,7 @@ class SearchEngine implements SearchEngineInterface
 
         // Get configuration
         $threshold = $this->config['levenshtein_threshold'] ?? 2;
-        $minFrequency = $this->config['min_term_frequency'] ?? 2;
+        $minFrequency = $this->config['min_term_frequency'] ?? 1;
         $maxVariations = $this->config['max_fuzzy_variations'] ?? 10;
 
         try {
@@ -1524,7 +1535,7 @@ class SearchEngine implements SearchEngineInterface
 
         // Get configuration
         $threshold = $this->config['jaro_winkler_threshold'] ?? 0.85;
-        $minFrequency = $this->config['min_term_frequency'] ?? 2;
+        $minFrequency = $this->config['min_term_frequency'] ?? 1;
         $maxVariations = $this->config['max_fuzzy_variations'] ?? 10;
         $prefixScale = $this->config['jaro_winkler_prefix_scale'] ?? 0.1;
 
@@ -1587,7 +1598,7 @@ class SearchEngine implements SearchEngineInterface
         $now = time();
 
         if ($this->indexedTermsCache === null || ($now - $this->indexedTermsCacheTime) > $cacheTimeout) {
-            $minFrequency = $this->config['min_term_frequency'] ?? 2;
+            $minFrequency = $this->config['min_term_frequency'] ?? 1;
             $termLimit = $this->config['max_indexed_terms'] ?? 20000;
             $this->indexedTermsCache = $this->storage->getIndexedTerms($this->indexName, $minFrequency, $termLimit);
             $this->indexedTermsCacheTime = $now;
@@ -1758,7 +1769,7 @@ class SearchEngine implements SearchEngineInterface
         }
 
         $correctionThreshold = $this->config['correction_threshold'] ?? 0.6;
-        $minFrequency = $this->config['min_term_frequency'] ?? 2;
+        $minFrequency = $this->config['min_term_frequency'] ?? 1;
 
         try {
             // Use cached indexed terms if available
@@ -2141,7 +2152,7 @@ class SearchEngine implements SearchEngineInterface
 
         // Get configuration - lower threshold for better fuzzy matching
         $threshold = $this->config['trigram_threshold'] ?? 0.3;
-        $minFrequency = $this->config['min_term_frequency'] ?? 2;
+        $minFrequency = $this->config['min_term_frequency'] ?? 1;
         $maxVariations = $this->config['max_fuzzy_variations'] ?? 10;
         $ngramSize = $this->config['trigram_size'] ?? 3;
         // Adaptive n-gram for short tokens

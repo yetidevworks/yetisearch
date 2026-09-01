@@ -86,7 +86,7 @@ $config = [
         'enable_fuzzy' => true,                  // Enable fuzzy search
         'fuzzy_algorithm' => 'trigram',          // Options: 'trigram', 'jaro_winkler', 'levenshtein', 'basic'
         'levenshtein_threshold' => 2,            // For Levenshtein: max edit distance (1-3)
-        'min_term_frequency' => 2,               // Min frequency for candidate terms
+        'min_term_frequency' => 1,               // Documents a term must appear in to be a correction target
         'max_indexed_terms' => 10000,            // Max terms to check
         'max_fuzzy_variations' => 8,             // Max variations per search term
         'fuzzy_score_penalty' => 0.4,            // Score penalty for fuzzy matches (0.0-1.0)
@@ -108,9 +108,16 @@ $config = [
   - `2`: Moderate tolerance (recommended)
   - `3`: Very permissive (may return false positives)
 
-- **`min_term_frequency`**: Minimum times a term must appear
-  - Higher values = faster search but may miss rare terms
-  - Lower values = more comprehensive but slower
+- **`min_term_frequency`**: How many *documents* a term must appear in before it
+  can be corrected towards. Default `1`.
+  - `1`: any term in the index is a correction target. Right for a catalogue,
+    a shop, a directory — anywhere the words people mistype are product names,
+    brands or personal names, which appear in exactly one document by nature.
+  - Higher values: fewer candidates to score, so a faster correction pass on a
+    large corpus, and less chance of correcting towards a term that is itself a
+    typo somebody indexed. The cost is that every term below the floor becomes
+    uncorrectable — at `2`, a name that appears in one document cannot be
+    reached by a misspelling of it at all.
 
 - **`max_indexed_terms`**: Maximum number of indexed terms to check
   - Affects performance for Levenshtein algorithm

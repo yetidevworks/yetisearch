@@ -2467,7 +2467,7 @@ class SqliteStorage implements StorageInterface
      * @param int $limit Maximum number of terms to return
      * @return array Array of indexed terms
      */
-    public function getIndexedTerms(?string $indexName = null, int $minFrequency = 2, int $limit = 10000): array
+    public function getIndexedTerms(?string $indexName = null, int $minFrequency = 1, int $limit = 10000): array
     {
         $this->ensureConnected();
 
