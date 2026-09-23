@@ -236,6 +236,32 @@ class HybridSearchTest extends TestCase
         $this->assertStringStartsWith('guide#chunk', $response['results'][0]['id']);
     }
 
+    public function testALongPageDoesNotOutrankABetterMatchByLength(): void
+    {
+        $search = $this->createSearchInstance(['indexer' => ['chunk_size' => 80, 'chunk_overlap' => 0]]);
+        $this->createTestIndex(self::INDEX);
+        $search->setEmbeddingProvider(new FakeEmbeddingProvider());
+        // Many chunks, each mostly about food with one vehicle word: every
+        // chunk is somewhat similar to a vehicle query.
+        $search->index(self::INDEX, ['id' => 'long', 'content' => [
+            'title' => 'Road trip cooking',
+            'route' => '/road-trip',
+            'content' => str_repeat('Pack a pasta dinner in the vehicle. ', 20),
+        ]]);
+        $search->index(self::INDEX, ['id' => 'short', 'content' => [
+            'title' => 'Buying a car',
+            'route' => '/buying',
+            'content' => 'Pick the right sedan or truck.',
+        ]]);
+        $search->embedPending(self::INDEX);
+
+        $response = $search->search(self::INDEX, 'automobile', ['unique_by_route' => true]);
+
+        $this->assertTrue($response['semantic']);
+        $this->assertSame('short', $response['results'][0]['id']);
+        $this->assertCount(2, $response['results']);
+    }
+
     public function testDropIndexRemovesVectors(): void
     {
         $search = $this->build(new FakeEmbeddingProvider());

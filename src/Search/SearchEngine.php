@@ -422,9 +422,49 @@ class SearchEngine implements SearchEngineInterface
             }
         }
 
+        $vectorScores = [];
+        foreach ($nearest as $id => $similarity) {
+            $vectorScores[(string)$id] = $similarity;
+        }
+
+        // One result per page: rank pages, not chunks. Otherwise the chunks of
+        // one long page fill the vector ranking and push every other page
+        // down it, and the route deduplication that follows adds up their
+        // scores, so a page wins by length rather than by how well it matches.
+        // Each page is ranked by its best chunk on each side.
+        $representative = [];
+        if ($unique) {
+            $pageOf = function (string $id) use ($rows): string {
+                $route = (string)($rows[$id]['route'] ?? '');
+                return $route !== '' ? 'route:' . $route : 'id:' . $id;
+            };
+            $keywordPages = [];
+            foreach ($keywordIds as $id) {
+                $page = $pageOf($id);
+                if (!isset($representative[$page])) {
+                    $representative[$page] = $id;
+                    $keywordPages[] = $page;
+                }
+            }
+            $vectorPages = [];
+            foreach ($vectorScores as $id => $similarity) {
+                $id = (string)$id;
+                if (!isset($rows[$id])) {
+                    continue;
+                }
+                $page = $pageOf($id);
+                if (!isset($vectorPages[$page])) {
+                    $vectorPages[$page] = $similarity;
+                    $representative[$page] = $representative[$page] ?? $id;
+                }
+            }
+            $keywordIds = $keywordPages;
+            $vectorScores = $vectorPages;
+        }
+
         $results = [];
-        foreach (SemanticSearch::fuse($keywordIds, $nearest, $weight, (int)$config['rrf_k']) as $id => $score) {
-            $id = (string)$id;
+        foreach (SemanticSearch::fuse($keywordIds, $vectorScores, $weight, (int)$config['rrf_k']) as $key => $score) {
+            $id = $unique ? $representative[(string)$key] : (string)$key;
             if (!isset($rows[$id])) {
                 continue;
             }
