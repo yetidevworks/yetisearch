@@ -32,6 +32,10 @@ A powerful, pure-PHP search engine library with advanced full-text search capabi
   - [Highlighting](#highlighting)
   - [Fuzzy Search](#fuzzy-search)
   - [Semantic Search (Hybrid)](#semantic-search-hybrid)
+    - [Noise calibration](#noise-calibration)
+    - [Measuring the gate over a subset](#measuring-the-gate-over-a-subset)
+    - [Query frame](#query-frame)
+    - [Meaning-only documents](#meaning-only-documents)
   - [Faceted Search](#faceted-search)
 - [Architecture](#architecture)
 - [Testing](#testing)
@@ -57,6 +61,7 @@ A powerful, pure-PHP search engine library with advanced full-text search capabi
 
 - 🔍 **Full-text search** powered by SQLite FTS5 with BM25 relevance scoring
 - 🧠 **Semantic search (optional)** - hybrid keyword + meaning ranking with any OpenAI-compatible embedding API or your own provider
+- 🎚️ **Self-tuning noise gate** - each index measures what nonsense scores against it, so `asdf` finds nothing while real queries still match by meaning
 - 📄 **Automatic document chunking** for indexing large documents
 - 🎯 **Smart result deduplication** - shows best match per document by default
 - 🌍 **Multi-language support** with built-in stemming for multiple languages
@@ -499,6 +504,18 @@ $config = [
         'result_fields' => [            // Fields to include in results
             'title', 'content', 'excerpt', 'url', 'author', 'tags', 'route'
         ]
+    ],
+
+    // Semantic search (v2.4.0+), off until a provider is set. See "Semantic Search (Hybrid)".
+    'semantic' => [
+        'provider' => null,             // An EmbeddingProviderInterface
+        'weight' => 0.5,                // Share of the ranking from meaning
+        'min_similarity' => 0.25,       // Floor for results found by meaning alone
+        'min_margin' => 0.15,           // Noise gate used until the index is calibrated
+        'relative_similarity' => 0.6,   // Keep matches at least this share as similar as the best
+        'calibration' => 'auto',        // v2.5.0+: 'auto' measures the gate per index, 'off' uses min_margin
+        'gate_filters' => [],           // v2.5.0+: documents the gate compares against, e.g. [['field' => 'type', 'value' => 'card']]
+        'query_frame' => null,          // v2.5.0+: e.g. 'a {query}'; queries only, documents are not framed
     ]
 ];
 
