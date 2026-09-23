@@ -23,7 +23,16 @@ namespace YetiSearch\Semantic;
  * 0.200 over the 4,415. Two deviations rather than the highest probe, because
  * a few probes on any index land well above the rest, and the mean and
  * deviation of 88 probes move far less from one probe set to another than a
- * maximum or a high percentile does.
+ * maximum or a high percentile does. The median plus a multiple of the median
+ * absolute deviation and the 90th percentile were both tried on three indexes;
+ * neither separated real searches from nonsense as well.
+ *
+ * A probe the index finds by keyword is not noise there (`just testing` on a
+ * site full of test pages), so calibrate() leaves those out of the
+ * measurement and lists them in excluded(), unless that would leave fewer
+ * than MIN_PROBES. The gate uses minMarginAt() with the configured
+ * `calibration_strictness`, worked out from the stored probe margins, so
+ * changing it needs no new measurement.
  *
  * A calibration applies while it was measured with the current model id,
  * dimensions, query frame, gate filters and probe set (matches()), and while
@@ -48,6 +57,15 @@ final class NoiseCalibration
      * measured, before the calibration stops applying.
      */
     public const DRIFT = 0.25;
+
+    /**
+     * Probes left after keyword hits are excluded, at the least. With fewer,
+     * every probe is measured.
+     */
+    public const MIN_PROBES = 44;
+
+    /** Part of probeSet(): changing how probes are measured makes every calibration stale. */
+    private const METHOD = 'keyword-excluded';
 
     /** The gate applies the margin from ten documents up; below that there is nothing to calibrate. */
     public const MIN_DOCUMENTS = 10;
@@ -90,6 +108,8 @@ final class NoiseCalibration
     private array $noise;
     /** @var array<string, array{best:float, median:float, margin:float}> */
     private array $probes;
+    /** @var string[] */
+    private array $excluded;
     private float $minMargin;
     private int $measuredAt;
 
@@ -108,7 +128,8 @@ final class NoiseCalibration
         array $noise,
         array $probes,
         float $minMargin,
-        int $measuredAt
+        int $measuredAt,
+        array $excluded = []
     ) {
         $this->model = $model;
         $this->dimensions = $dimensions;
@@ -120,12 +141,14 @@ final class NoiseCalibration
         $this->probes = $probes;
         $this->minMargin = $minMargin;
         $this->measuredAt = $measuredAt;
+        $this->excluded = array_values(array_map('strval', $excluded));
     }
 
     /**
      * A calibration from each probe's gate question, the rule applied.
      *
      * @param array<string, array{best:float, median:float, margin:float}> $measured NoiseCalibration::measure()
+     * @param string[] $excluded probes left out as keyword hits
      */
     public static function fromMeasurement(
         string $model,
@@ -134,7 +157,8 @@ final class NoiseCalibration
         string $frame,
         array $gateFilters,
         array $measured,
-        ?int $now = null
+        ?int $now = null,
+        array $excluded = []
     ): self {
         $margins = array_column($measured, 'margin');
 
@@ -148,27 +172,36 @@ final class NoiseCalibration
             self::distribution($margins),
             $measured,
             self::ceiling($margins),
-            $now ?? time()
+            $now ?? time(),
+            $excluded
         );
     }
 
-    /** The probe set's version: changing PROBES or SPREAD makes every calibration stale. */
+    /** The probe set's version: changing PROBES, SPREAD or how probes are measured makes every calibration stale. */
     public static function probeSet(): string
     {
-        return substr(sha1(implode("\n", self::PROBES) . "\0" . self::SPREAD), 0, 12);
+        return substr(sha1(implode("\n", self::PROBES) . "\0" . self::SPREAD . "\0" . self::METHOD), 0, 12);
     }
 
     /**
-     * The noise ceiling: the mean margin plus SPREAD standard deviations, to
-     * four places.
+     * The noise ceiling: the mean margin plus $spread standard deviations
+     * (SPREAD by default), to four places.
      *
      * @param float[] $margins
      */
-    public static function ceiling(array $margins): float
+    public static function ceiling(array $margins, float $spread = self::SPREAD): float
     {
-        $noise = self::distribution($margins);
+        // Unrounded, unlike distribution(), so the ceiling carries no rounding.
+        $margins = array_values(array_map('floatval', $margins));
+        $n = count($margins);
+        $mean = $n > 0 ? array_sum($margins) / $n : 0.0;
+        $variance = 0.0;
+        foreach ($margins as $margin) {
+            $variance += ($margin - $mean) ** 2;
+        }
+        $sd = $n > 0 ? sqrt($variance / $n) : 0.0;
 
-        return round(max(0.0, min(1.0, $noise['mean'] + self::SPREAD * $noise['sd'])), 4);
+        return round(max(0.0, min(1.0, $mean + $spread * $sd)), 4);
     }
 
     /**
@@ -330,9 +363,34 @@ final class NoiseCalibration
         return $this->probes;
     }
 
+    /** The noise ceiling at SPREAD standard deviations, as measured. */
     public function minMargin(): float
     {
         return $this->minMargin;
+    }
+
+    /**
+     * The noise ceiling at $spread standard deviations, from the stored probe
+     * margins. minMargin() when $spread is SPREAD.
+     */
+    public function minMarginAt(float $spread): float
+    {
+        if (abs($spread - self::SPREAD) < 1e-9 || $this->probes === []) {
+            return $this->minMargin;
+        }
+
+        return self::ceiling(array_column($this->probes, 'margin'), $spread);
+    }
+
+    /**
+     * Probes left out of the measurement because the index finds them by
+     * keyword.
+     *
+     * @return string[]
+     */
+    public function excluded(): array
+    {
+        return $this->excluded;
     }
 
     public function measuredAt(): int
@@ -362,7 +420,8 @@ final class NoiseCalibration
             self::numbers((array)($data['stats'] ?? []), ['count']),
             $probes,
             (float)$data['min_margin'],
-            (int)($data['measured_at'] ?? 0)
+            (int)($data['measured_at'] ?? 0),
+            (array)($data['excluded'] ?? [])
         );
     }
 
@@ -380,6 +439,7 @@ final class NoiseCalibration
             'measured_at' => $this->measuredAt,
             'stats' => $this->noise,
             'probes' => $this->probes,
+            'excluded' => $this->excluded,
         ];
     }
 

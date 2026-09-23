@@ -234,7 +234,20 @@ class YetiSearch
         $options = $this->config['semantic'];
         unset($options['provider']);
 
-        return new SemanticSearch($this->embeddingProvider, $this->getStorage(), $options, $this->logger);
+        $semantic = new SemanticSearch($this->embeddingProvider, $this->getStorage(), $options, $this->logger);
+        // Calibration leaves out probes that keywords find: they are not noise here.
+        $semantic->setKeywordMatcher(function (string $index, string $text): bool {
+            $found = $this->search($index, $text, [
+                'limit' => 1,
+                'semantic' => false,
+                'fuzzy' => false,
+                'bypass_cache' => true,
+            ]);
+
+            return !empty($found['results']);
+        });
+
+        return $semantic;
     }
 
     private function requireSemantic(): SemanticSearch

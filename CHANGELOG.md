@@ -2,11 +2,16 @@
 
 ## [2.5.1] - 2026-09-23
 
+### Improvements
+- **Probes that keywords find are left out of calibration**: A probe the index finds by keyword is not noise there (`just testing` on a site full of test pages), and a search that keywords answer does not depend on the gate. `calibrate()` now leaves those probes out of the measurement and lists them in `NoiseCalibration::excluded()`, unless fewer than 44 probes would be left. On a 1,013-document documentation site this left out 13 probes and moved the cutoff from 0.244 to 0.231, so `logo branding` (0.236) finds its page again while `asdf`, `qwerty`, `xyzzy`, `zxcv` and `hjkl` still find nothing; on two product stores it left out 5 and barely moved the cutoff. The change in method makes calibrations stored by 2.5.0 stale, so the next `embedPending()` run that finishes an index measures it again.
+- **`semantic.calibration_strictness`**: How many standard deviations above the mean probe margin a calibrated gate sits (default `2.0`, from 0 to 5). Lower keeps more borderline real searches and lets more nonsense through. The gate works it out from the stored probe margins with `NoiseCalibration::minMarginAt()`, so changing it needs no new calibration. The median plus a multiple of the median absolute deviation and the 90th percentile were tried as the rule on three indexes, and neither did as well as the mean plus two deviations.
+
 ### Bug Fixes
 - **Calibration failed with every real provider**: `probeVectors()` built its list of texts from array keys, and PHP turns the key of the probe `1234567` into an integer, so the request sent a number inside `input`. OpenAI and OpenRouter reject that with HTTP 400, `embedPending()` reported a `calibration_error`, and every index stayed on the configured `min_margin`. Probe texts are now strings, and `OpenAICompatibleEmbeddingProvider::embed()` casts every input to a string before the request, so no caller can send a number.
 
 ### Tests
 - A strict mode on the fake provider rejects non-string input as the real APIs do; calibration runs against it, and a unit test checks the provider sends numbers as strings.
+- New tests cover a probe left out because a page contains it, and a looser strictness moving the gate without a new measurement.
 
 ## [2.5.0] - 2026-09-23
 

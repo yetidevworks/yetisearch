@@ -514,6 +514,7 @@ $config = [
         'min_margin' => 0.15,           // Noise gate used until the index is calibrated
         'relative_similarity' => 0.6,   // Keep matches at least this share as similar as the best
         'calibration' => 'auto',        // v2.5.0+: 'auto' measures the gate per index, 'off' uses min_margin
+        'calibration_strictness' => 2.0, // v2.5.1+: standard deviations above the mean probe margin
         'gate_filters' => [],           // v2.5.0+: documents the gate compares against, e.g. [['field' => 'type', 'value' => 'card']]
         'query_frame' => null,          // v2.5.0+: e.g. 'a {query}'; queries only, documents are not framed
     ]
@@ -1445,6 +1446,7 @@ Semantic search needs an embedding model somewhere. On shared PHP hosting that m
 | `batch_size` | `32` | Documents per provider call in `embedPending()`. |
 | `query_cache_size` | `5000` | Query embeddings kept in the database. |
 | `calibration` | `'auto'` | `'auto'` gates on the `min_margin` measured for the index while that measurement still describes it; `'off'` always uses the configured `min_margin`. |
+| `calibration_strictness` | `2.0` | Standard deviations above the mean probe margin at which a calibrated gate sits. Lower keeps more borderline real searches and lets more nonsense through. Changing it needs no new calibration. |
 | `gate_filters` | `[]` | Filters that pick the documents the noise gate compares a query with, such as `[['field' => 'type', 'value' => 'card']]`. Every document is still ranked. Empty means all of them. |
 | `query_frame` | `null` | A sentence a query is put in before it is embedded, holding `{query}`, such as `'a {query}'`. Documents are not framed. |
 | `calibration_store` | `null` | A `YetiSearch\Semantic\CalibrationStore` to keep calibrations and probe vectors in, instead of the index's own database. |
@@ -1459,9 +1461,13 @@ Other calls: `embeddingStats($index)` returns `total`, `embedded`, `pending` and
 |---|---|---|---|
 | 17 product cards | up to 0.060 | 0.141 and up | 0.119 |
 | 4,415 product cards | 0.124 to 0.196 | 0.200 to 0.362 | 0.200 |
-| about 1,000 short documentation pages and their chunks | 0.12 to 0.14 | 0.23 to 0.47 | |
+| 1,013 documentation pages and chunks | 0.12 to 0.35 | 0.16 to 0.52 | 0.231 |
 
 No single number serves all of them, so each index measures its own. `calibrate()` embeds a fixed set of 88 probes (made-up words, keyboard mashes, placeholder Latin, everyday phrases nobody searches for) exactly as a search is embedded, asks each the gate's question against the index, and sets `min_margin` at the mean probe margin plus two standard deviations. Only the margin is calibrated; gating on the best similarity turned away real queries.
+
+A probe that keywords find in the index is left out of the measurement: `just testing` is not noise on a site full of test pages, and a search that keywords answer does not depend on the gate anyway. On the documentation site above, 13 probes were keyword hits (`just testing`, `placeholder text`, `error 404` and some everyday phrases), and leaving them out moved the cutoff from 0.244 to 0.231, enough for `logo branding` (0.236) to find the design services page while `asdf`, `qwerty`, `xyzzy`, `zxcv` and `hjkl` still find nothing. On the two stores 5 probes were keyword hits and the cutoff barely moved. `excluded()` lists them. If fewer than 44 probes would be left, every probe is measured.
+
+Two standard deviations is a default, not a law. Where real searches and nonsense overlap (on the documentation site, `frobnitz` stands 0.293 above the median and the real search `case studies` 0.162), no cutoff keeps every real search and blocks every piece of nonsense. `calibration_strictness` sets how many deviations to use: `1.5` on that site gives 0.211 and still blocks the nonsense above, while on the 4,415-product store it lets `qwerty` through. The gate works it out from the stored probe margins, so changing it takes effect on the next search. The median plus a multiple of the median absolute deviation and the 90th percentile were both tried on all three indexes, and neither separated real searches from nonsense as well.
 
 ```php
 // Nothing to do by default: with calibration 'auto', the embedPending() run
@@ -1475,6 +1481,8 @@ $calibration = $search->calibrate('pages');     // null below 10 documents
 $calibration->minMargin();  // 0.2003
 $calibration->stats();      // count, min, median, mean, sd, p95, max of the probe margins
 $calibration->probes();     // each probe's best, median and margin
+$calibration->excluded();   // probes left out because keywords find them
+$calibration->minMarginAt(1.5); // the cutoff at another strictness
 
 $search->calibration('pages');   // what is stored, without a provider
 $search->semanticGate('pages');  // ['min_margin' => 0.2003, 'source' => 'calibrated', 'configured' => 0.15, ...]

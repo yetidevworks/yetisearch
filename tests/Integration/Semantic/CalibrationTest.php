@@ -75,7 +75,9 @@ class CalibrationTest extends TestCase
         $this->assertInstanceOf(NoiseCalibration::class, $calibration);
         $this->assertSame('fake-noisy', $calibration->model());
         $this->assertSame(12, $calibration->documents());
-        $this->assertSame(88, $calibration->stats()['count']);
+        // 'please call me back' is left out: a page says "get back into your account".
+        $this->assertSame(['please call me back'], $calibration->excluded());
+        $this->assertSame(87, $calibration->stats()['count']);
         $this->assertSame(22, $calibration->dimensions());
         $stats = $calibration->stats();
         $this->assertEqualsWithDelta(
@@ -155,6 +157,36 @@ class CalibrationTest extends TestCase
         $this->assertNull($run['calibration_error']);
         $this->assertTrue($run['calibrated']);
         $this->assertNotNull($search->calibrate(self::INDEX));
+    }
+
+    public function testProbesKeywordsFindAreLeftOut(): void
+    {
+        $search = $this->build();
+        $search->index(self::INDEX, ['id' => 'wibble', 'content' => ['title' => 'Wibble wobble', 'content' => 'A jelly that wibbles.']]);
+
+        $this->assertTrue($search->embedPending(self::INDEX)['calibrated']);
+        $calibration = $search->calibration(self::INDEX);
+
+        $this->assertSame(['wibble', 'please call me back'], $calibration->excluded());
+        $this->assertArrayNotHasKey('wibble', $calibration->probes());
+        $this->assertCount(count(NoiseCalibration::PROBES) - 2, $calibration->probes());
+    }
+
+    public function testStrictnessMovesTheGateWithoutANewMeasurement(): void
+    {
+        $provider = new NoisyEmbeddingProvider();
+        $search = $this->build([], $provider);
+        $search->embedPending(self::INDEX);
+        $calibration = $search->calibration(self::INDEX);
+        $this->assertSame($calibration->minMargin(), $search->semanticGate(self::INDEX)['min_margin']);
+
+        $looser = $this->build(['calibration_strictness' => 1.0], $provider, $this->getTestDbPathOf($search));
+        $gate = $looser->semanticGate(self::INDEX);
+
+        $this->assertSame('calibrated', $gate['source']);
+        $this->assertSame($calibration->minMarginAt(1.0), $gate['min_margin']);
+        $this->assertLessThan($calibration->minMargin(), $gate['min_margin']);
+        $this->assertFalse($looser->embedPending(self::INDEX)['calibrated']);
     }
 
     public function testASecondCalibrationCostsNoProviderCall(): void

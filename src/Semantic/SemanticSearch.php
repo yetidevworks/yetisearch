@@ -23,6 +23,12 @@ class SemanticSearch
     private array $config;
     private LoggerInterface $logger;
     private CalibrationStore $calibrationStore;
+    /**
+     * Whether keywords find a text on an index: (string $index, string $text): bool.
+     *
+     * @var callable|null
+     */
+    private $keywordMatcher = null;
 
     public function __construct(
         EmbeddingProviderInterface $provider,
@@ -80,6 +86,11 @@ class SemanticSearch
             // describes it, and on min_margin above otherwise. 'off' always
             // uses min_margin, exactly as 2.4.0 did.
             'calibration' => NoiseCalibration::MODE_AUTO,
+            // How far above the mean probe margin, in standard deviations,
+            // a calibrated gate sits. Lower keeps more borderline real
+            // searches and lets more nonsense through. Changing it needs no
+            // new calibration.
+            'calibration_strictness' => NoiseCalibration::SPREAD,
             // Filters that pick the documents the noise gate compares a
             // query with: its best match and median are taken over these
             // alone, while every document is still ranked. Empty means all.
@@ -92,6 +103,18 @@ class SemanticSearch
             // CalibrationStore, or null for the index's own database.
             'calibration_store' => null,
         ];
+    }
+
+    /**
+     * How calibrate() asks whether keywords find a probe on an index, so it
+     * can leave out probes that are not noise there. Without one, every probe
+     * is measured.
+     *
+     * @param callable|null $matcher (string $index, string $text): bool
+     */
+    public function setKeywordMatcher(?callable $matcher): void
+    {
+        $this->keywordMatcher = $matcher;
     }
 
     public function getProvider(): EmbeddingProviderInterface
@@ -207,6 +230,12 @@ class SemanticSearch
         }
 
         $probeVectors = $this->probeVectors();
+        $excluded = $this->keywordProbes($index);
+        if (count(NoiseCalibration::PROBES) - count($excluded) >= NoiseCalibration::MIN_PROBES) {
+            $probeVectors = array_diff_key($probeVectors, array_flip($excluded));
+        } else {
+            $excluded = [];
+        }
         $measured = NoiseCalibration::measure(
             $probeVectors,
             $this->storage->iterateVectors($index, $model, $filters),
@@ -224,7 +253,8 @@ class SemanticSearch
             $this->frame(),
             $filters,
             $measured,
-            $now
+            $now,
+            $excluded
         );
         $this->calibrationStore->saveCalibration($index, $calibration->toArray());
 
@@ -290,7 +320,7 @@ class SemanticSearch
             return $gate;
         }
         if (!$calibration->drifted($documents)) {
-            $gate['min_margin'] = $calibration->minMargin();
+            $gate['min_margin'] = $calibration->minMarginAt($this->strictness());
             $gate['source'] = 'calibrated';
         }
 
@@ -308,6 +338,44 @@ class SemanticSearch
         }
 
         return $this->gate($index)['source'] !== 'calibrated';
+    }
+
+    /** calibration_strictness, from 0 to 5 standard deviations. */
+    public function strictness(): float
+    {
+        $value = $this->config['calibration_strictness'] ?? NoiseCalibration::SPREAD;
+
+        return is_numeric($value) ? max(0.0, min(5.0, (float)$value)) : NoiseCalibration::SPREAD;
+    }
+
+    /**
+     * The probes keywords find anywhere in the index. A probe that matches
+     * real content is not noise there. A matcher that fails counts as no hit.
+     *
+     * @return string[]
+     */
+    private function keywordProbes(string $index): array
+    {
+        if ($this->keywordMatcher === null) {
+            return [];
+        }
+
+        $hits = [];
+        foreach (NoiseCalibration::PROBES as $probe) {
+            try {
+                if (($this->keywordMatcher)($index, $probe)) {
+                    $hits[] = $probe;
+                }
+            } catch (\Throwable $e) {
+                $this->logger->debug('Keyword check of a calibration probe failed', [
+                    'index' => $index,
+                    'probe' => $probe,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        return $hits;
     }
 
     public function calibrationMode(): string
