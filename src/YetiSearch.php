@@ -13,6 +13,7 @@ use YetiSearch\Geo\GeoBounds;
 use YetiSearch\Cache\CacheManager;
 use YetiSearch\Contracts\EmbeddingProviderInterface;
 use YetiSearch\Exceptions\YetiSearchException;
+use YetiSearch\Semantic\NoiseCalibration;
 use YetiSearch\Semantic\SemanticSearch;
 use Psr\Log\LoggerInterface;
 
@@ -127,16 +128,69 @@ class YetiSearch
      * again while 'pending' is above zero. A provider error stops the run
      * and is returned in 'error'; what was embedded before it is kept.
      *
-     * @return array{embedded:int, pending:int, total:int, pruned:int, error:?string}
+     * With semantic.calibration 'auto', the run that leaves nothing pending
+     * also measures the index's noise gate again when the stored measurement
+     * no longer describes it ('calibrated' is then true). See calibrate().
+     *
+     * @return array{embedded:int, pending:int, total:int, pruned:int, error:?string,
+     *                calibrated:bool, calibration_error:?string}
      */
     public function embedPending(string $index, int $limit = 200): array
     {
         $result = $this->requireSemantic()->embedPending($index, $limit);
-        if ($result['embedded'] > 0 || $result['pruned'] > 0) {
+        if ($result['embedded'] > 0 || $result['pruned'] > 0 || $result['calibrated']) {
             $this->clearEngineResults($index);
         }
 
         return $result;
+    }
+
+    /**
+     * Measure an index's semantic noise gate now and store it: a fixed set of
+     * nonsense probes is embedded as queries are, and min_margin is set just
+     * above the margins they reach (the mean plus two standard deviations).
+     * The probes' vectors are cached per model and query frame, so only the
+     * first calibration with a model calls the provider.
+     *
+     * Null, with nothing stored, when fewer than ten of the gate's documents
+     * hold a vector. Throws when the provider fails.
+     *
+     * @param array $filters The documents to measure over; empty for the
+     *        configured semantic.gate_filters. The gate only uses a
+     *        calibration measured with the filters it is configured with.
+     */
+    public function calibrate(string $index, array $filters = []): ?NoiseCalibration
+    {
+        $calibration = $this->requireSemantic()->calibrate($index, empty($filters) ? null : $filters);
+        $this->clearEngineResults($index);
+
+        return $calibration;
+    }
+
+    /**
+     * The noise calibration stored for an index, whatever model it was
+     * measured with, or null. semanticGate() says whether the gate uses it.
+     * Needs no provider.
+     */
+    public function calibration(string $index): ?NoiseCalibration
+    {
+        $store = $this->config['semantic']['calibration_store'] ?? null;
+        $store = $store instanceof \YetiSearch\Semantic\CalibrationStore ? $store : $this->getStorage();
+        $data = $store->loadCalibration($index);
+
+        return is_array($data) ? NoiseCalibration::fromArray($data) : null;
+    }
+
+    /**
+     * The min_margin the noise gate uses on an index and where it comes from
+     * ('calibrated' or 'configured'), with the configured value and the
+     * stored calibration.
+     *
+     * @return array{min_margin:float, source:string, configured:float, calibration:?NoiseCalibration}
+     */
+    public function semanticGate(string $index): array
+    {
+        return $this->requireSemantic()->gate($index);
     }
 
     /**
@@ -155,7 +209,12 @@ class YetiSearch
      */
     public function clearEmbeddings(string $index): void
     {
+        // Drops the index's calibration with the vectors it measured.
         $this->getStorage()->clearVectors($index);
+        $store = $this->config['semantic']['calibration_store'] ?? null;
+        if ($store instanceof \YetiSearch\Semantic\CalibrationStore) {
+            $store->deleteCalibration($index);
+        }
         $this->clearEngineResults($index);
     }
 
@@ -256,6 +315,10 @@ class YetiSearch
     {
         $storage = $this->getStorage();
         $storage->dropIndex($name);
+        $store = $this->config['semantic']['calibration_store'] ?? null;
+        if ($store instanceof \YetiSearch\Semantic\CalibrationStore) {
+            $store->deleteCalibration($name);
+        }
 
         unset($this->indexers[$name]);
         unset($this->searchEngines[$name]);

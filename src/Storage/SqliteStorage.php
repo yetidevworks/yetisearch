@@ -9,10 +9,11 @@ use YetiSearch\Geo\GeoBounds;
 use YetiSearch\Cache\QueryCache;
 use YetiSearch\Storage\PreparedStatementCache;
 use YetiSearch\Helpers\UTF8Helper as UTF8;
+use YetiSearch\Semantic\CalibrationStore;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
-class SqliteStorage implements StorageInterface
+class SqliteStorage implements StorageInterface, CalibrationStore
 {
     private ?\PDO $connection = null;
     private array $config = [];
@@ -350,6 +351,7 @@ class SqliteStorage implements StorageInterface
         } catch (\PDOException $e) {
             throw new StorageException("Failed to drop index '{$name}': " . $e->getMessage());
         }
+        $this->deleteCalibration($name);
     }
 
     public function indexExists(string $name): bool
@@ -403,6 +405,10 @@ class SqliteStorage implements StorageInterface
                         ];
                     }
                 }
+            }
+            $meaningOnly = self::isMeaningOnly($document, $metadataArr);
+            if ($meaningOnly) {
+                $metadataArr['_meaning_only'] = true;
             }
             $metadata = json_encode($metadataArr);
             $language = $document['language'] ?? null;
@@ -464,10 +470,16 @@ class SqliteStorage implements StorageInterface
                     $this->deleteFtsRow($index, $previousFtsRow[0], $previousFtsRow[1]);
                 }
 
-                // Now insert the new FTS entry
-                $ftsSql = "INSERT INTO {$index}_fts (rowid, content) VALUES (?, ?)";
-                $ftsStmt = $this->connection->prepare($ftsSql);
-                $ftsStmt->execute([$docId, $contentText]);
+                // Now insert the new FTS entry. A meaning-only document gets
+                // none: it is ranked by its vector and never by keywords.
+                if (!$meaningOnly) {
+                    $ftsSql = "INSERT INTO {$index}_fts (rowid, content) VALUES (?, ?)";
+                    $ftsStmt = $this->connection->prepare($ftsSql);
+                    $ftsStmt->execute([$docId, $contentText]);
+                }
+            } elseif ($meaningOnly) {
+                // Drop whatever this id was indexed as before it became meaning-only.
+                $this->connection->prepare("DELETE FROM {$index}_fts WHERE id = ?")->execute([$id]);
             } else {
                 $placeholders = implode(', ', array_fill(0, count($ftsColumns) + 1, '?'));
                 $columnsSql = 'id, ' . implode(', ', $ftsColumns);
@@ -482,7 +494,7 @@ class SqliteStorage implements StorageInterface
 
             // Only index terms if Levenshtein fuzzy search is enabled
             if ($this->useTermsIndex) {
-                $this->indexTerms($index, $id, $document['content']);
+                $this->indexTerms($index, $id, $meaningOnly ? [] : $document['content']);
             }
 
             // Handle spatial indexing
@@ -586,6 +598,7 @@ class SqliteStorage implements StorageInterface
 
             // Collect FTS data for batch insert
             $ftsData = [];
+            $meaningOnlyIds = [];
             $staleFtsRows = [];
             $termsData = [];
             $spatialDocs = [];
@@ -618,6 +631,10 @@ class SqliteStorage implements StorageInterface
                         }
                     }
                 }
+                $meaningOnly = self::isMeaningOnly($document, $metadataArr);
+                if ($meaningOnly) {
+                    $metadataArr['_meaning_only'] = true;
+                }
                 $metadata = json_encode($metadataArr);
                 $language = $document['language'] ?? null;
                 $type = $document['type'] ?? 'default';
@@ -649,7 +666,14 @@ class SqliteStorage implements StorageInterface
                     }
                     // Keyed by doc_id so a repeated id is inserted into FTS once,
                     // with the last version of the document to appear in the batch.
-                    $ftsData[(int)$docId] = [$docId, $this->getFieldText($document['content'], 'content', $index)];
+                    // A meaning-only document gets no FTS entry at all.
+                    if ($meaningOnly) {
+                        unset($ftsData[(int)$docId]);
+                    } else {
+                        $ftsData[(int)$docId] = [$docId, $this->getFieldText($document['content'], 'content', $index)];
+                    }
+                } elseif ($meaningOnly) {
+                    $meaningOnlyIds[] = $id;
                 } else {
                     $values = [$id];
                     foreach ($ftsColumns as $col) {
@@ -659,7 +683,7 @@ class SqliteStorage implements StorageInterface
                 }
 
                 // Collect terms data if enabled
-                if ($this->useTermsIndex) {
+                if ($this->useTermsIndex && !$meaningOnly) {
                     $termsData[] = [$id, $document['content']];
                 }
 
@@ -670,6 +694,18 @@ class SqliteStorage implements StorageInterface
             // Drop the terms of every row being replaced before re-inserting it
             foreach ($staleFtsRows as [$staleDocId, $staleText]) {
                 $this->deleteFtsRow($index, $staleDocId, $staleText);
+            }
+
+            // Meaning-only documents lose whatever FTS rows their ids had
+            if (!empty($meaningOnlyIds)) {
+                foreach (array_chunk(array_values(array_unique($meaningOnlyIds)), 500) as $chunk) {
+                    $in = implode(',', array_fill(0, count($chunk), '?'));
+                    $this->connection->prepare("DELETE FROM {$index}_fts WHERE id IN ({$in})")->execute($chunk);
+                    if ($this->useTermsIndex) {
+                        $this->connection->prepare("DELETE FROM {$index}_terms WHERE document_id IN ({$in})")
+                            ->execute($chunk);
+                    }
+                }
             }
 
             // Batch insert FTS entries
@@ -853,6 +889,7 @@ class SqliteStorage implements StorageInterface
                 if ($rebuildFts) {
                     // A full rebuild resyncs the vocabulary in one pass
                     $this->connection->exec("INSERT INTO {$index}_fts({$index}_fts) VALUES('rebuild')");
+                    $this->dropMeaningOnlyFromRebuiltFts($index);
                 } else {
                     // Otherwise drop each row's terms individually, using the text
                     // read before the content rows were deleted
@@ -1789,6 +1826,8 @@ class SqliteStorage implements StorageInterface
         if ($this->hasVectorTable($index)) {
             $this->connection->exec("DELETE FROM {$index}_vectors");
         }
+        // The calibration measured those vectors; it describes nothing now.
+        $this->deleteCalibration($index);
     }
 
     /**
@@ -1810,9 +1849,10 @@ class SqliteStorage implements StorageInterface
     }
 
     /**
-     * Number of documents holding a vector from $model.
+     * Number of documents holding a vector from $model, among those that pass
+     * $filters when given.
      */
-    public function countVectors(string $index, string $model): int
+    public function countVectors(string $index, string $model, array $filters = []): int
     {
         $this->validateIndexName($index);
         $this->ensureConnected();
@@ -1820,12 +1860,59 @@ class SqliteStorage implements StorageInterface
             return 0;
         }
 
+        [$where, $params] = $this->filterSql($filters);
         $stmt = $this->connection->prepare(
-            "SELECT COUNT(*) FROM {$index}_vectors v INNER JOIN {$index} d ON d.id = v.id WHERE v.model = ?"
+            "SELECT COUNT(*) FROM {$index}_vectors v INNER JOIN {$index} d ON d.id = v.id WHERE v.model = ?" . $where
         );
-        $stmt->execute([$model]);
+        $stmt->execute(array_merge([$model], $params));
 
         return (int)$stmt->fetchColumn();
+    }
+
+    /**
+     * The stored vectors from $model, zero-indexed, among the documents that
+     * pass $filters. For measuring an index (noise calibration), not for
+     * searching it.
+     *
+     * @return \Generator<int, float[]>
+     */
+    public function iterateVectors(string $index, string $model, array $filters = []): \Generator
+    {
+        $this->validateIndexName($index);
+        $this->ensureConnected();
+        if (!$this->hasVectorTable($index)) {
+            return;
+        }
+
+        [$where, $params] = $this->filterSql($filters);
+        $stmt = $this->connection->prepare(
+            "SELECT v.vector FROM {$index}_vectors v INNER JOIN {$index} d ON d.id = v.id WHERE v.model = ?" . $where
+        );
+        $stmt->execute(array_merge([$model], $params));
+        while (($blob = $stmt->fetchColumn()) !== false) {
+            yield \YetiSearch\Semantic\VectorMath::unpack((string)$blob);
+        }
+    }
+
+    /**
+     * Filters as the " AND ..." clauses buildFilterClause() writes, joined,
+     * with their parameters.
+     *
+     * @return array{0:string, 1:array}
+     */
+    private function filterSql(array $filters): array
+    {
+        $sql = '';
+        $params = [];
+        foreach ($filters as $filter) {
+            [$filterSql, $filterParams] = $this->buildFilterClause($filter);
+            if ($filterSql !== '') {
+                $sql .= $filterSql;
+                $params = array_merge($params, $filterParams);
+            }
+        }
+
+        return [$sql, $params];
     }
 
     /**
@@ -1836,9 +1923,16 @@ class SqliteStorage implements StorageInterface
      * up to tens of thousands of documents; past that it is the thing to
      * replace.
      *
+     * The noise gate's numbers come out of the same pass. With $gateFilters,
+     * they are taken over the candidates that also pass those filters (the
+     * gate's subset, product cards say), while every candidate is still
+     * ranked; without, over every candidate.
+     *
      * @param float[] $queryVector Normalized
-     * @param array|null $stats Filled with the median similarity over every
-     *        candidate and the number of candidates
+     * @param array|null $stats Filled with the gate's numbers: `median` and
+     *        `best` similarity and `count` over the gate's subset, and `total`,
+     *        the number of candidates. `best` is null when the subset is empty.
+     * @param array $gateFilters Filters that pick the gate's subset
      * @return array<string, float> Document id => cosine similarity, best first
      */
     public function nearestVectors(
@@ -1849,29 +1943,31 @@ class SqliteStorage implements StorageInterface
         ?string $language = null,
         int $k = 100,
         float $minSimilarity = 0.0,
-        ?array &$stats = null
+        ?array &$stats = null,
+        array $gateFilters = []
     ): array {
-        $stats = ['median' => 0.0, 'count' => 0];
+        $stats = ['median' => 0.0, 'count' => 0, 'best' => null, 'total' => 0];
         $this->validateIndexName($index);
         $this->ensureConnected();
         if (!$this->hasVectorTable($index) || empty($queryVector)) {
             return [];
         }
 
-        $sql = "SELECT v.id, v.vector FROM {$index}_vectors v INNER JOIN {$index} d ON d.id = v.id"
+        // With a gate subset, a third column says whether the row is in it.
+        [$gateSql, $gateParams] = $this->filterSql($gateFilters);
+        $select = $gateSql !== '' ? ", CASE WHEN 1=1{$gateSql} THEN 1 ELSE 0 END" : '';
+        $sql = "SELECT v.id, v.vector{$select} FROM {$index}_vectors v INNER JOIN {$index} d ON d.id = v.id"
             . " WHERE v.model = ? AND v.dims = ?";
-        $params = [$model, count($queryVector)];
+        $params = $gateSql !== '' ? $gateParams : [];
+        $params[] = $model;
+        $params[] = count($queryVector);
         if ($language) {
             $sql .= " AND d.language = ?";
             $params[] = $language;
         }
-        foreach ($filters as $filter) {
-            [$filterSql, $filterParams] = $this->buildFilterClause($filter);
-            if ($filterSql !== '') {
-                $sql .= $filterSql;
-                $params = array_merge($params, $filterParams);
-            }
-        }
+        [$filterSql, $filterParams] = $this->filterSql($filters);
+        $sql .= $filterSql;
+        $params = array_merge($params, $filterParams);
 
         try {
             $stmt = $this->connection->prepare($sql);
@@ -1881,22 +1977,30 @@ class SqliteStorage implements StorageInterface
         }
 
         $scores = [];
-        $all = [];
+        $gate = [];
+        $total = 0;
+        $subset = $gateSql !== '';
         while ($row = $stmt->fetch(\PDO::FETCH_NUM)) {
             $stored = unpack('g*', $row[1]);
             if ($stored === false) {
                 continue;
             }
             $similarity = \YetiSearch\Semantic\VectorMath::dotOneIndexed($queryVector, $stored);
-            $all[] = $similarity;
+            $total++;
+            if (!$subset || (int)$row[2] === 1) {
+                $gate[] = $similarity;
+            }
             if ($similarity >= $minSimilarity) {
                 $scores[(string)$row[0]] = $similarity;
             }
         }
 
-        if (!empty($all)) {
-            sort($all);
-            $stats = ['median' => $all[intdiv(count($all), 2)], 'count' => count($all)];
+        $stats['total'] = $total;
+        if (!empty($gate)) {
+            sort($gate);
+            $stats['median'] = $gate[intdiv(count($gate), 2)];
+            $stats['count'] = count($gate);
+            $stats['best'] = $gate[count($gate) - 1];
         }
 
         arsort($scores);
@@ -1988,6 +2092,147 @@ class SqliteStorage implements StorageInterface
             // A cache that cannot be written is not worth failing a search over.
             $this->logger->warning('Could not cache a query embedding', ['error' => $e->getMessage()]);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Noise calibration (CalibrationStore). One row per index in
+    // yetisearch_calibration; probe vectors per model and query frame in
+    // yetisearch_probe_embeddings, apart from the query cache so its
+    // eviction never drops them. Both tables are created on first write.
+    // ------------------------------------------------------------------
+
+    public function loadCalibration(string $index): ?array
+    {
+        $this->validateIndexName($index);
+        $this->ensureConnected();
+        try {
+            $stmt = $this->connection->prepare("SELECT record FROM yetisearch_calibration WHERE index_name = ?");
+            $stmt->execute([$index]);
+            $json = $stmt->fetchColumn();
+        } catch (\PDOException $e) {
+            // Table not created yet: nothing measured.
+            return null;
+        }
+        if (!is_string($json)) {
+            return null;
+        }
+        $data = json_decode($json, true);
+
+        return is_array($data) ? $data : null;
+    }
+
+    public function saveCalibration(string $index, array $record): void
+    {
+        $this->validateIndexName($index);
+        $this->ensureConnected();
+        try {
+            $this->ensureCalibrationTables();
+            $stmt = $this->connection->prepare(
+                "INSERT OR REPLACE INTO yetisearch_calibration"
+                . " (index_name, model, dims, documents, probe_set, min_margin, measured_at, record)"
+                . " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            );
+            $stmt->execute([
+                $index,
+                (string)($record['model'] ?? ''),
+                (int)($record['dimensions'] ?? 0),
+                (int)($record['documents'] ?? 0),
+                (string)($record['probe_set'] ?? ''),
+                (float)($record['min_margin'] ?? 0.0),
+                (int)($record['measured_at'] ?? time()),
+                json_encode($record),
+            ]);
+        } catch (\PDOException $e) {
+            throw new StorageException("Failed to save the calibration: " . $e->getMessage());
+        }
+    }
+
+    public function deleteCalibration(string $index): void
+    {
+        $this->validateIndexName($index);
+        $this->ensureConnected();
+        try {
+            $this->connection->prepare("DELETE FROM yetisearch_calibration WHERE index_name = ?")->execute([$index]);
+        } catch (\PDOException $e) {
+            // Table not created yet: nothing to forget.
+        }
+    }
+
+    public function loadProbeVectors(string $model, string $frame = ''): array
+    {
+        $this->ensureConnected();
+        try {
+            $stmt = $this->connection->prepare(
+                "SELECT text, vector FROM yetisearch_probe_embeddings WHERE model = ? AND frame = ?"
+            );
+            $stmt->execute([$model, $frame]);
+        } catch (\PDOException $e) {
+            return [];
+        }
+
+        $vectors = [];
+        while ($row = $stmt->fetch(\PDO::FETCH_NUM)) {
+            $vectors[(string)$row[0]] = \YetiSearch\Semantic\VectorMath::unpack((string)$row[1]);
+        }
+
+        return $vectors;
+    }
+
+    public function saveProbeVectors(string $model, string $frame, array $vectors): void
+    {
+        $this->ensureConnected();
+        if (empty($vectors)) {
+            return;
+        }
+        try {
+            $this->ensureCalibrationTables();
+            $stmt = $this->connection->prepare(
+                "INSERT OR REPLACE INTO yetisearch_probe_embeddings (model, frame, text, vector, created_at)"
+                . " VALUES (?, ?, ?, ?, ?)"
+            );
+            $now = time();
+            $this->connection->beginTransaction();
+            foreach ($vectors as $text => $vector) {
+                $stmt->bindValue(1, $model);
+                $stmt->bindValue(2, $frame);
+                $stmt->bindValue(3, (string)$text);
+                $stmt->bindValue(4, \YetiSearch\Semantic\VectorMath::pack($vector), \PDO::PARAM_LOB);
+                $stmt->bindValue(5, $now, \PDO::PARAM_INT);
+                $stmt->execute();
+            }
+            $this->connection->commit();
+        } catch (\PDOException $e) {
+            if ($this->connection->inTransaction()) {
+                $this->connection->rollBack();
+            }
+            throw new StorageException("Failed to cache probe embeddings: " . $e->getMessage());
+        }
+    }
+
+    private function ensureCalibrationTables(): void
+    {
+        $this->connection->exec("
+            CREATE TABLE IF NOT EXISTS yetisearch_calibration (
+                index_name TEXT PRIMARY KEY,
+                model TEXT NOT NULL,
+                dims INTEGER NOT NULL,
+                documents INTEGER NOT NULL,
+                probe_set TEXT NOT NULL,
+                min_margin REAL NOT NULL,
+                measured_at INTEGER NOT NULL,
+                record TEXT NOT NULL
+            )
+        ");
+        $this->connection->exec("
+            CREATE TABLE IF NOT EXISTS yetisearch_probe_embeddings (
+                model TEXT NOT NULL,
+                frame TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL,
+                vector BLOB NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (model, frame, text)
+            )
+        ");
     }
 
     private function ensureConnected(): void
@@ -2099,13 +2344,15 @@ class SqliteStorage implements StorageInterface
      * the only place they are kept, which is why this has to be read before the
      * row is deleted or overwritten.
      *
-     * @return array{0: int, 1: string}|null doc_id and indexed text, or null when
-     *                                       the document is not in the index
+     * @return array{0: int, 1: ?string}|null doc_id and indexed text (null for a
+     *                                        meaning-only row, which has no FTS
+     *                                        entry), or null when the document
+     *                                        is not in the index
      */
     private function getIndexedFtsRow(string $index, string $id): ?array
     {
         try {
-            $stmt = $this->connection->prepare("SELECT doc_id, content FROM {$index} WHERE id = ?");
+            $stmt = $this->connection->prepare("SELECT doc_id, content, metadata FROM {$index} WHERE id = ?");
             $stmt->execute([$id]);
             $row = $stmt->fetch(\PDO::FETCH_ASSOC);
         } catch (\PDOException $e) {
@@ -2114,6 +2361,13 @@ class SqliteStorage implements StorageInterface
 
         if (!is_array($row) || !isset($row['doc_id'])) {
             return null;
+        }
+
+        // A meaning-only row was never given to FTS, so there is nothing to
+        // drop, and a 'delete' for it would corrupt FTS5's row statistics.
+        $metadata = json_decode((string)($row['metadata'] ?? ''), true);
+        if (is_array($metadata) && !empty($metadata['_meaning_only'])) {
+            return [(int)$row['doc_id'], null];
         }
 
         $content = json_decode((string)($row['content'] ?? ''), true);
@@ -2125,6 +2379,31 @@ class SqliteStorage implements StorageInterface
     }
 
     /**
+     * Whether a document is ranked for meaning only: embedded and found by
+     * its vector, never by keywords. Set with `'meaning_only' => true` on the
+     * document; stored as `_meaning_only` in its metadata.
+     */
+    private static function isMeaningOnly(array $document, array $metadata): bool
+    {
+        return !empty($document['meaning_only']) || !empty($metadata['_meaning_only']);
+    }
+
+    /**
+     * An external-content FTS5 'rebuild' indexes every row of the content
+     * table, meaning-only ones included. Take those back out, with the text
+     * the rebuild read for them: the raw content column.
+     */
+    private function dropMeaningOnlyFromRebuiltFts(string $index): void
+    {
+        $stmt = $this->connection->query(
+            "SELECT doc_id, content FROM {$index} WHERE json_extract(metadata, '$._meaning_only') IS NOT NULL"
+        );
+        foreach ($stmt->fetchAll(\PDO::FETCH_NUM) as $row) {
+            $this->deleteFtsRow($index, (int)$row[0], (string)$row[1]);
+        }
+    }
+
+    /**
      * Remove one external-content FTS5 row's terms from the vocabulary.
      *
      * The text must be what the row was indexed with. Passing anything else — an
@@ -2132,8 +2411,12 @@ class SqliteStorage implements StorageInterface
      * nothing, and the old terms stay in the index pointing at a doc_id SQLite is
      * free to hand to the next document.
      */
-    private function deleteFtsRow(string $index, int $docId, string $indexedText): void
+    private function deleteFtsRow(string $index, int $docId, ?string $indexedText): void
     {
+        if ($indexedText === null) {
+            // Never indexed (a meaning-only row): nothing to remove.
+            return;
+        }
         try {
             $sql = "INSERT INTO {$index}_fts({$index}_fts, rowid, content) VALUES('delete', ?, ?)";
             $this->connection->prepare($sql)->execute([$docId, $indexedText]);
@@ -2162,13 +2445,17 @@ class SqliteStorage implements StorageInterface
         }
         $this->connection->exec($sql);
 
-        // Repopulate from stored docs
-        $stmt = $this->connection->query("SELECT id, content FROM {$index}");
+        // Repopulate from stored docs, leaving out meaning-only ones
+        $stmt = $this->connection->query("SELECT id, content, metadata FROM {$index}");
         $insCols = ($schema === 'external' ? 'rowid, ' : 'id, ') . implode(', ', $ftsColumns);
         $placeholders = implode(', ', array_fill(0, count($ftsColumns) + 1, '?'));
         $ins = $this->connection->prepare("INSERT INTO {$index}_fts ({$insCols}) VALUES ({$placeholders})");
         while ($row = $stmt->fetch(\PDO::FETCH_ASSOC)) {
             $id = $row['id'];
+            $meta = json_decode((string)($row['metadata'] ?? ''), true);
+            if (is_array($meta) && !empty($meta['_meaning_only'])) {
+                continue;
+            }
             $doc = json_decode($row['content'], true) ?: [];
             $vals = [];
             if ($schema === 'external') {

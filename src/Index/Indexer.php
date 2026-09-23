@@ -323,6 +323,12 @@ class Indexer implements IndexerInterface
         $type = $document['type'] ?? 'default';
         $timestamp = $document['timestamp'] ?? time();
 
+        // Meaning-only: embedded and ranked by meaning, never by keywords.
+        // Kept in the metadata so the storage and every chunk see it.
+        if (!empty($document['meaning_only'])) {
+            $metadata['_meaning_only'] = true;
+        }
+
         $processedContent = [];
         $searchableText = [];
 
