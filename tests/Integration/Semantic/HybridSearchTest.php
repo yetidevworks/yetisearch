@@ -262,6 +262,24 @@ class HybridSearchTest extends TestCase
         $this->assertCount(2, $response['results']);
     }
 
+    public function testADocumentMarkedChunkedWithNoChunksIsEmbedded(): void
+    {
+        $search = $this->createSearchInstance();
+        $this->createTestIndex(self::INDEX);
+        $search->setEmbeddingProvider(new FakeEmbeddingProvider());
+        // How a caller that pre-chunks by heading marks a page too short to split.
+        $search->index(self::INDEX, [
+            'id' => 'short-faq',
+            'content' => ['title' => 'Login help', 'content' => 'Forgot your password?'],
+            'metadata' => ['chunked' => true, 'pre_chunked' => true, 'chunks' => 0],
+            'chunks' => [],
+        ]);
+
+        $this->assertSame(1, $search->embeddingStats(self::INDEX)['total']);
+        $search->embedPending(self::INDEX);
+        $this->assertSame(['short-faq'], $this->ids($search->search(self::INDEX, 'credentials')));
+    }
+
     public function testDropIndexRemovesVectors(): void
     {
         $search = $this->build(new FakeEmbeddingProvider());

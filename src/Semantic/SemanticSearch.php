@@ -305,8 +305,11 @@ class SemanticSearch
 
         foreach ($this->storage->iterateDocumentsForEmbedding($index) as $doc) {
             // A chunked document's own row repeats the text its chunks carry;
-            // the chunks are what get embedded.
-            if (!empty($doc['metadata']['chunked']) && empty($doc['metadata']['is_chunk'])) {
+            // the chunks are what get embedded. Callers that pre-chunk can
+            // mark a short document chunked with zero chunks, and that one
+            // has only its own row to embed.
+            $meta = $doc['metadata'];
+            if (!empty($meta['chunked']) && empty($meta['is_chunk']) && (int)($meta['chunks'] ?? 1) > 0) {
                 continue;
             }
 
