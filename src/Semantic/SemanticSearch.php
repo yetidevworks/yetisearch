@@ -339,7 +339,9 @@ class SemanticSearch
         }
 
         if (!empty($missing)) {
-            $texts = array_keys($missing);
+            // array_keys() turns a numeric-string key such as '1234567' into an
+            // int, which an OpenAI-compatible API rejects inside `input`.
+            $texts = array_map('strval', array_keys($missing));
             $embedded = $this->provider->embed($texts, EmbeddingProviderInterface::PURPOSE_QUERY);
             $new = [];
             foreach ($texts as $i => $text) {

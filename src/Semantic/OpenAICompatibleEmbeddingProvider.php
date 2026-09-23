@@ -65,7 +65,8 @@ class OpenAICompatibleEmbeddingProvider implements EmbeddingProviderInterface
 
     public function embed(array $texts, string $purpose = self::PURPOSE_DOCUMENT): array
     {
-        $texts = array_values($texts);
+        // The API accepts strings only; a number in `input` is a 400.
+        $texts = array_map('strval', array_values($texts));
         if (empty($texts)) {
             return [];
         }

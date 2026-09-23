@@ -142,6 +142,21 @@ class CalibrationTest extends TestCase
         $off->close();
     }
 
+    public function testProbesAreSentAsStrings(): void
+    {
+        // The probe '1234567' becomes an int key inside probeVectors().
+        $this->assertContains('1234567', NoiseCalibration::PROBES);
+        $provider = new NoisyEmbeddingProvider();
+        $provider->strict = true;
+        $search = $this->build([], $provider);
+
+        $run = $search->embedPending(self::INDEX);
+
+        $this->assertNull($run['calibration_error']);
+        $this->assertTrue($run['calibrated']);
+        $this->assertNotNull($search->calibrate(self::INDEX));
+    }
+
     public function testASecondCalibrationCostsNoProviderCall(): void
     {
         $provider = new NoisyEmbeddingProvider();

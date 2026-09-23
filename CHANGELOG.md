@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.5.1] - 2026-09-23
+
+### Bug Fixes
+- **Calibration failed with every real provider**: `probeVectors()` built its list of texts from array keys, and PHP turns the key of the probe `1234567` into an integer, so the request sent a number inside `input`. OpenAI and OpenRouter reject that with HTTP 400, `embedPending()` reported a `calibration_error`, and every index stayed on the configured `min_margin`. Probe texts are now strings, and `OpenAICompatibleEmbeddingProvider::embed()` casts every input to a string before the request, so no caller can send a number.
+
+### Tests
+- A strict mode on the fake provider rejects non-string input as the real APIs do; calibration runs against it, and a unit test checks the provider sends numbers as strings.
+
 ## [2.5.0] - 2026-09-23
 
 ### New Features

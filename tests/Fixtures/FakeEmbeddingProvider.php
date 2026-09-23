@@ -23,6 +23,8 @@ class FakeEmbeddingProvider implements EmbeddingProviderInterface
     /** @var array<int, array{texts:string[], purpose:string}> */
     public array $calls = [];
     public bool $fail = false;
+    /** Throw on any text that is not a string, as OpenAI-compatible APIs do. */
+    public bool $strict = false;
     private string $model;
 
     public function __construct(string $model = 'fake-concepts')
@@ -35,6 +37,13 @@ class FakeEmbeddingProvider implements EmbeddingProviderInterface
         $this->calls[] = ['texts' => array_values($texts), 'purpose' => $purpose];
         if ($this->fail) {
             throw new EmbeddingException('Fake provider is down');
+        }
+        if ($this->strict) {
+            foreach ($texts as $i => $text) {
+                if (!is_string($text)) {
+                    throw new EmbeddingException("HTTP 400: input[{$i}] expected string, received " . gettype($text));
+                }
+            }
         }
 
         $vectors = [];

@@ -101,6 +101,23 @@ class SemanticUnitTest extends TestCase
         $this->assertSame(2, $provider->dimensions());
     }
 
+    public function testProviderSendsEveryInputAsAString(): void
+    {
+        $requests = [];
+        $provider = $this->provider(
+            ['api_key' => 'sk-test'],
+            [[200, json_encode(['data' => [
+                ['index' => 0, 'embedding' => [1.0, 0.0]],
+                ['index' => 1, 'embedding' => [0.0, 1.0]],
+            ]])]],
+            $requests
+        );
+
+        $provider->embed([1234567, 'yes or no']);
+
+        $this->assertSame(['1234567', 'yes or no'], $requests[0]['body']['input']);
+    }
+
     public function testProviderAppliesQueryPrefixInputTypeAndQueryTimeout(): void
     {
         $requests = [];
