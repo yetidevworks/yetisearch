@@ -1418,7 +1418,9 @@ Semantic search needs an embedding model somewhere. On shared PHP hosting that m
 |---|---|---|
 | `provider` | `null` | An `EmbeddingProviderInterface`. Semantic search is off without one. |
 | `weight` | `0.5` | Share of the ranking from meaning: `0` is keyword search, `1` is semantic alone. |
-| `min_similarity` | `0.25` | Documents less similar than this never enter the results on meaning alone. Depends on the model; raise it if unrelated results appear. |
+| `min_similarity` | `0.25` | Documents less similar than this never enter the results on meaning alone. Depends on the model. |
+| `min_margin` | `0.15` | How far the best match must stand above the median document before meaning adds anything. Stops a query that means nothing in particular (`asdf`) from returning whatever happens to be closest. Applies from 10 documents up. |
+| `relative_similarity` | `0.6` | Documents must be at least this share as similar as the best match, which trims loosely related results. |
 | `candidates` | `100` | Results each side contributes before fusion. |
 | `rrf_k` | `60` | Reciprocal rank fusion constant. |
 | `fields` | `['title', 'content']` | Document fields that make up the embedded text. |

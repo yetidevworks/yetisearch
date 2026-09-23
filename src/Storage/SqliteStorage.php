@@ -1837,6 +1837,8 @@ class SqliteStorage implements StorageInterface
      * replace.
      *
      * @param float[] $queryVector Normalized
+     * @param array|null $stats Filled with the median similarity over every
+     *        candidate and the number of candidates
      * @return array<string, float> Document id => cosine similarity, best first
      */
     public function nearestVectors(
@@ -1846,8 +1848,10 @@ class SqliteStorage implements StorageInterface
         array $filters = [],
         ?string $language = null,
         int $k = 100,
-        float $minSimilarity = 0.0
+        float $minSimilarity = 0.0,
+        ?array &$stats = null
     ): array {
+        $stats = ['median' => 0.0, 'count' => 0];
         $this->validateIndexName($index);
         $this->ensureConnected();
         if (!$this->hasVectorTable($index) || empty($queryVector)) {
@@ -1877,15 +1881,22 @@ class SqliteStorage implements StorageInterface
         }
 
         $scores = [];
+        $all = [];
         while ($row = $stmt->fetch(\PDO::FETCH_NUM)) {
             $stored = unpack('g*', $row[1]);
             if ($stored === false) {
                 continue;
             }
             $similarity = \YetiSearch\Semantic\VectorMath::dotOneIndexed($queryVector, $stored);
+            $all[] = $similarity;
             if ($similarity >= $minSimilarity) {
                 $scores[(string)$row[0]] = $similarity;
             }
+        }
+
+        if (!empty($all)) {
+            sort($all);
+            $stats = ['median' => $all[intdiv(count($all), 2)], 'count' => count($all)];
         }
 
         arsort($scores);

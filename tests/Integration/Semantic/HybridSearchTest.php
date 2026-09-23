@@ -240,7 +240,8 @@ class HybridSearchTest extends TestCase
     {
         $search = $this->createSearchInstance(['indexer' => ['chunk_size' => 80, 'chunk_overlap' => 0]]);
         $this->createTestIndex(self::INDEX);
-        $search->setEmbeddingProvider(new FakeEmbeddingProvider());
+        // Keep the weaker page in play; this test is about how pages rank.
+        $search->setEmbeddingProvider(new FakeEmbeddingProvider(), ['relative_similarity' => 0.0]);
         // Many chunks, each mostly about food with one vehicle word: every
         // chunk is somewhat similar to a vehicle query.
         $search->index(self::INDEX, ['id' => 'long', 'content' => [
@@ -278,6 +279,39 @@ class HybridSearchTest extends TestCase
         $this->assertSame(1, $search->embeddingStats(self::INDEX)['total']);
         $search->embedPending(self::INDEX);
         $this->assertSame(['short-faq'], $this->ids($search->search(self::INDEX, 'credentials')));
+    }
+
+    public function testAQueryThatMatchesNothingInParticularAddsNothing(): void
+    {
+        $search = $this->createSearchInstance();
+        $this->createTestIndex(self::INDEX);
+        $search->setEmbeddingProvider(new FakeEmbeddingProvider());
+        // Twelve documents with no concept words: every one is as similar to
+        // any query as the next.
+        for ($i = 0; $i < 12; $i++) {
+            $search->index(self::INDEX, ['id' => "plain-{$i}", 'content' => ['title' => "Note {$i}", 'content' => 'Plain words only.']]);
+        }
+        $search->embedPending(self::INDEX);
+
+        $response = $search->search(self::INDEX, 'zzyzx');
+
+        $this->assertSame([], $response['results']);
+    }
+
+    public function testWeakMatchesBelowTheRelativeCutoffAreTrimmed(): void
+    {
+        $search = $this->build(new FakeEmbeddingProvider());
+        $search->index(self::INDEX, ['id' => 'mixed', 'content' => [
+            'title' => 'Evening out',
+            'content' => 'Take the car to a pasta, pizza and food festival.',
+        ]]);
+        $search->embedPending(self::INDEX);
+
+        // "mixed" has one vehicle word to three food words: similar enough to
+        // pass min_similarity, far below the vehicle documents.
+        $ids = $this->ids($search->search(self::INDEX, 'automobile'));
+        sort($ids);
+        $this->assertSame(['cars', 'trucks'], $ids);
     }
 
     public function testDropIndexRemovesVectors(): void

@@ -49,8 +49,19 @@ class SemanticSearch
             // Documents less similar than this never enter the results on
             // meaning alone. Where related text lands depends on the model:
             // around 0.3 to 0.6 for OpenAI's text-embedding-3, higher for
-            // nomic-embed-text. Raise it if unrelated results appear.
+            // nomic-embed-text.
             'min_similarity' => 0.25,
+            // How far the best match must stand above the median document
+            // before meaning adds any results. A query that means nothing in
+            // particular ("asdf", a typo storm) is about as similar to every
+            // document; a real one stands out. Measured with
+            // text-embedding-3-small: 0.23 to 0.47 for real queries, 0.12 to
+            // 0.14 for noise. Applies from 10 candidate documents up, where a
+            // median means something.
+            'min_margin' => 0.15,
+            // Documents must be at least this share as similar as the best
+            // match, which trims the long tail of loosely related ones.
+            'relative_similarity' => 0.6,
             // Document fields that make up the embedded text.
             'fields' => ['title', 'content'],
             // Characters of text per document. Keeps every document inside
@@ -185,15 +196,31 @@ class SemanticSearch
      */
     public function nearest(string $index, array $queryVector, array $filters, ?string $language, int $k): array
     {
-        return $this->storage->nearestVectors(
+        $stats = null;
+        $nearest = $this->storage->nearestVectors(
             $index,
             $queryVector,
             $this->provider->modelId(),
             $filters,
             $language,
             $k,
-            (float)$this->config['min_similarity']
+            (float)$this->config['min_similarity'],
+            $stats
         );
+        if (empty($nearest)) {
+            return [];
+        }
+
+        $best = reset($nearest);
+        if (($stats['count'] ?? 0) >= 10 && $best - (float)($stats['median'] ?? 0.0) < (float)$this->config['min_margin']) {
+            return [];
+        }
+
+        $cutoff = $best * (float)$this->config['relative_similarity'];
+
+        return array_filter($nearest, function ($similarity) use ($cutoff) {
+            return $similarity >= $cutoff;
+        });
     }
 
     /**
