@@ -212,7 +212,8 @@ class SemanticSearch
         }
 
         $best = reset($nearest);
-        if (($stats['count'] ?? 0) >= 10 && $best - (float)($stats['median'] ?? 0.0) < (float)$this->config['min_margin']) {
+        $margin = $best - (float)($stats['median'] ?? 0.0);
+        if (($stats['count'] ?? 0) >= 10 && $margin < (float)$this->config['min_margin']) {
             return [];
         }
 
