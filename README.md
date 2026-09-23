@@ -1419,7 +1419,7 @@ Semantic search needs an embedding model somewhere. On shared PHP hosting that m
 | `provider` | `null` | An `EmbeddingProviderInterface`. Semantic search is off without one. |
 | `weight` | `0.5` | Share of the ranking from meaning: `0` is keyword search, `1` is semantic alone. |
 | `min_similarity` | `0.25` | Documents less similar than this never enter the results on meaning alone. Depends on the model. |
-| `min_margin` | `0.15` | How far the best match must stand above the median document before meaning adds anything. Stops a query that means nothing in particular (`asdf`) from returning whatever happens to be closest. Applies from 10 documents up. |
+| `min_margin` | `0.15` | How far the best match must stand above the median document before meaning adds anything. Stops a query that means nothing in particular (`asdf`) from returning whatever happens to be closest. Applies from 10 documents up. With `calibration: auto`, a measured value replaces it once there is one (see "Noise calibration" below). |
 | `relative_similarity` | `0.6` | Documents must be at least this share as similar as the best match, which trims loosely related results. |
 | `candidates` | `100` | Results each side contributes before fusion. |
 | `rrf_k` | `60` | Reciprocal rank fusion constant. |
@@ -1427,8 +1427,89 @@ Semantic search needs an embedding model somewhere. On shared PHP hosting that m
 | `max_chars` | `6000` | Characters of text embedded per document. |
 | `batch_size` | `32` | Documents per provider call in `embedPending()`. |
 | `query_cache_size` | `5000` | Query embeddings kept in the database. |
+| `calibration` | `'auto'` | `'auto'` gates on the `min_margin` measured for the index while that measurement still describes it; `'off'` always uses the configured `min_margin`. |
+| `gate_filters` | `[]` | Filters that pick the documents the noise gate compares a query with, such as `[['field' => 'type', 'value' => 'card']]`. Every document is still ranked. Empty means all of them. |
+| `query_frame` | `null` | A sentence a query is put in before it is embedded, holding `{query}`, such as `'a {query}'`. Documents are not framed. |
+| `calibration_store` | `null` | A `YetiSearch\Semantic\CalibrationStore` to keep calibrations and probe vectors in, instead of the index's own database. |
 
-Other calls: `embeddingStats($index)` returns `total`, `embedded`, `pending` and `model`; `clearEmbeddings($index)` forgets every vector so the next run starts over.
+Other calls: `embeddingStats($index)` returns `total`, `embedded`, `pending` and `model`; `clearEmbeddings($index)` forgets every vector (and the index's noise calibration) so the next run starts over.
+
+#### Noise calibration
+
+`min_margin` asks how far the best match stands above the median document, and what nonsense scores on that question depends on the index as much as on the model: the more documents there are, the more likely one of them lands near any string at all. Measured with text-embedding-3-small at 512 dimensions:
+
+| Index | Nonsense margin | Real query margin | Calibrated `min_margin` |
+|---|---|---|---|
+| 17 product cards | up to 0.060 | 0.141 and up | 0.119 |
+| 4,415 product cards | 0.124 to 0.196 | 0.200 to 0.362 | 0.200 |
+| about 1,000 short documentation pages and their chunks | 0.12 to 0.14 | 0.23 to 0.47 | |
+
+No single number serves all of them, so each index measures its own. `calibrate()` embeds a fixed set of 88 probes (made-up words, keyboard mashes, placeholder Latin, everyday phrases nobody searches for) exactly as a search is embedded, asks each the gate's question against the index, and sets `min_margin` at the mean probe margin plus two standard deviations. Only the margin is calibrated; gating on the best similarity turned away real queries.
+
+```php
+// Nothing to do by default: with calibration 'auto', the embedPending() run
+// that leaves nothing pending also calibrates when the stored measurement
+// no longer describes the index.
+$run = $search->embedPending('pages');
+$run['calibrated'];         // true when this run measured the gate again
+
+// Or measure now, from a CLI command or a queue job.
+$calibration = $search->calibrate('pages');     // null below 10 documents
+$calibration->minMargin();  // 0.2003
+$calibration->stats();      // count, min, median, mean, sd, p95, max of the probe margins
+$calibration->probes();     // each probe's best, median and margin
+
+$search->calibration('pages');   // what is stored, without a provider
+$search->semanticGate('pages');  // ['min_margin' => 0.2003, 'source' => 'calibrated', 'configured' => 0.15, ...]
+```
+
+The probes' vectors are cached per model and query frame in `yetisearch_probe_embeddings`, apart from the query cache so its eviction never drops them, and shared by every index in the database. Only the first calibration with a model calls the provider (one request of 88 short strings); every one after that is free.
+
+A calibration is stored per index in `yetisearch_calibration`, and the gate uses it while it was measured with the current model id, dimensions, query frame, `gate_filters` and probe set, over a number of documents within 25% of today's. Otherwise, and always with `calibration: 'off'`, the gate uses the configured `min_margin`, exactly as before. Changing the model, `clearEmbeddings()` and `dropIndex()` all invalidate it, and the next `embedPending()` run that finishes the index measures it again. The 25% is loose on purpose: the noise ceiling grows slowly with the number of documents (from 0.119 to 0.200 across a 260-fold difference above), so a quarter more documents moves it by far less than the gap between noise and real queries, and a store that adds a few products a day is not re-measured every day.
+
+A calibrated `min_margin` is the noise ceiling, so a query must stand above it; a configured one is a floor to reach, as it always was.
+
+#### Measuring the gate over a subset
+
+Where some documents say what a thing is and others are long prose (a product's short card beside its full description, a knowledge-base article's summary beside its chunks), the prose can sit close to nonsense and pull the median around. `gate_filters` has the gate take its best match and median over the documents that pass those filters alone, while every document is still ranked. Both come out of the same pass over the vectors. With a subset, its best match must also clear `min_similarity`. When no candidate of a search is in the subset, the margin does not apply, as below 10 documents.
+
+```php
+$search = new YetiSearch([
+    'semantic' => [
+        'provider' => $provider,
+        'gate_filters' => [['field' => 'type', 'value' => 'card']],
+    ],
+]);
+```
+
+`calibrate()` measures over the same subset, and a calibration only applies to the `gate_filters` it was measured with.
+
+#### Query frame
+
+A one-word query embedded on its own is read as a word, not a thing. On a 17-product demo store, `hat` scored 0.20 against the cap's document, fifth of seventeen; `a hat` scored 0.39, first. `query_frame` puts every query in a sentence before it is embedded:
+
+```php
+'semantic' => ['provider' => $provider, 'query_frame' => 'a {query}'],
+```
+
+Only queries are framed, so changing the frame never re-embeds a document. The query cache, the probe cache and the calibration are all keyed on the frame, so a vector framed one way is never compared as if it were framed another.
+
+#### Meaning-only documents
+
+A document marked `meaning_only` is embedded and ranked by meaning, and never found by keywords: it gets no full-text entry, takes no part in BM25 statistics and never matches a word. Use it for text written for the model rather than for readers, such as a short card that says what a product is:
+
+```php
+$search->indexBatch('products', [
+    ['id' => '12', 'type' => 'product', 'content' => ['title' => 'Shorebreak Cap', 'content' => $description, 'route' => '/p/12']],
+    ['id' => '12#card', 'type' => 'card', 'meaning_only' => true,
+     'content' => ['title' => 'Product: Shorebreak Cap (Accessories)', 'content' => 'A cotton cap.', 'route' => '/p/12']],
+]);
+
+// The word "product" finds nothing; a search for "hat" can find the cap by its card.
+$search->search('products', 'hat', ['unique_by_route' => true]);
+```
+
+The flag is stored as `_meaning_only` in the document's metadata, is inherited by its chunks, and survives `rebuildFts()` and `deleteByIdPrefix()`. Index the document again without the flag and keywords find it again. With `unique_by_route`, a card and its product share a route and come back as one result.
 
 **Scale.** Vectors are stored in the index's own SQLite file (`{index}_vectors`), and a search compares the query with every candidate vector in PHP. On an M-series Mac with PHP 8.4 that takes about 110 ms for 10,000 chunks at 512 dimensions, 55 ms at 256, and grows linearly from there. Filters cut the work in proportion. Past a few tens of thousands of chunks, use fewer dimensions or keep semantic search off for that index.
 
@@ -1701,6 +1782,15 @@ $results = $search->execute(SearchQuery $query, string $index): array;
 
 // Suggestions
 $suggestions = $search->generateSuggestions(string $name, string $query, int $maxSuggestions = 3);
+
+// Semantic search
+$search->setEmbeddingProvider(?EmbeddingProviderInterface $provider, array $options = []): self;
+$search->embedPending(string $indexName, int $limit = 200): array;
+$search->embeddingStats(string $indexName): array;
+$search->clearEmbeddings(string $indexName): void;
+$search->calibrate(string $indexName, array $filters = []): ?NoiseCalibration;
+$search->calibration(string $indexName): ?NoiseCalibration;
+$search->semanticGate(string $indexName): array;
 ```
 
 ### Document Structure
@@ -1724,6 +1814,7 @@ $document = [
     'language' => 'en',           // Optional: language code
     'type' => 'article',          // Optional: document type
     'timestamp' => time(),        // Optional: defaults to current time
+    'meaning_only' => false,      // Optional: ranked by meaning only, never by keywords
     'geo' => [                    // Optional: geographic point
         'lat' => 37.7749,
         'lng' => -122.4194
