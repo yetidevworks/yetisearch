@@ -15,6 +15,7 @@ use YetiSearch\Utils\Trigram;
 use YetiSearch\Utils\PhoneticMatcher;
 use YetiSearch\Utils\KeyboardProximity;
 use YetiSearch\Utils\Fts5Escaper;
+use YetiSearch\Semantic\SemanticSearch;
 use YetiSearch\Helpers\UTF8Helper as UTF8;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -31,6 +32,7 @@ class SearchEngine implements SearchEngineInterface
     private ?array $indexedTermsCache = null;
     private float $indexedTermsCacheTime = 0;
     private ?array $synonymsCache = null;
+    private ?SemanticSearch $semantic = null;
 
     public function __construct(
         StorageInterface $storage,
@@ -103,6 +105,30 @@ class SearchEngine implements SearchEngineInterface
         $this->logger = $logger ?? new NullLogger();
     }
 
+    /**
+     * Rank text queries by meaning as well as keywords. With none set (the
+     * default), search behaves exactly as it always has.
+     */
+    public function setSemanticSearch(?SemanticSearch $semantic): void
+    {
+        $this->semantic = $semantic;
+        $this->cache = [];
+    }
+
+    public function getSemanticSearch(): ?SemanticSearch
+    {
+        return $this->semantic;
+    }
+
+    /**
+     * Forget results held in memory, after something changed what a search
+     * would return without going through this engine.
+     */
+    public function clearResultCache(): void
+    {
+        $this->cache = [];
+    }
+
     public function search(SearchQuery $query, array $options = []): SearchResults
     {
         $startTime = microtime(true);
@@ -162,7 +188,20 @@ class SearchEngine implements SearchEngineInterface
             $results = [];
             $totalCount = 0;
 
-            if ($this->config['two_pass_search'] && !empty($this->config['field_weights'])) {
+            $hybrid = null;
+            if ($this->semanticApplies($query, $options)) {
+                $hybrid = $this->hybridSearch(
+                    $storageQuery,
+                    $originalQuery,
+                    $originalLimit,
+                    $originalOffset,
+                    (bool)($options['unique_by_route'] ?? false)
+                );
+            }
+
+            if ($hybrid !== null) {
+                [$results, $totalCount] = $hybrid;
+            } elseif ($this->config['two_pass_search'] && !empty($this->config['field_weights'])) {
                 $this->logger->debug('Executing two-pass search strategy');
 
                 // First pass: Search only primary fields with high weights
@@ -270,6 +309,10 @@ class SearchEngine implements SearchEngineInterface
                 $finalResults->setSuggestion($suggestion);
             }
 
+            if ($this->semantic !== null) {
+                $finalResults->setMetadata(['semantic' => $hybrid !== null]);
+            }
+
             $this->cacheResults($cacheKey, $finalResults);
 
             $this->logger->info('Search completed', [
@@ -291,6 +334,114 @@ class SearchEngine implements SearchEngineInterface
             // Always restore original config, even if an exception is thrown
             $this->config = $originalConfig;
         }
+    }
+
+    /**
+     * Semantic ranking applies to a text query ranked by relevance, on an
+     * index that holds vectors from the configured model. Geo searches and
+     * explicit sorts keep their own ordering.
+     */
+    private function semanticApplies(SearchQuery $query, array $options): bool
+    {
+        if ($this->semantic === null || (array_key_exists('semantic', $options) && !$options['semantic'])) {
+            return false;
+        }
+        if (trim($query->getQuery()) === '' || $query->hasGeoFilters()) {
+            return false;
+        }
+        foreach (array_keys($query->getSort()) as $field) {
+            if ($field !== '_score') {
+                return false;
+            }
+        }
+
+        try {
+            return $this->semantic->hasVectors($this->indexName);
+        } catch (\Throwable $e) {
+            $this->logger->warning('Could not check for vectors; using keyword search', ['error' => $e->getMessage()]);
+            return false;
+        }
+    }
+
+    /**
+     * Run keyword and vector searches over the same filters and fuse their
+     * rankings. Returns null when the query cannot be embedded, and the
+     * caller falls back to keyword search.
+     *
+     * @return array{0:array, 1:int}|null Rows ready for processResults() and the total
+     */
+    private function hybridSearch(array $storageQuery, string $queryText, int $limit, int $offset, bool $unique): ?array
+    {
+        $config = $this->semantic->getConfig();
+        $weight = (float)($this->config['semantic_weight'] ?? $config['weight']);
+        $candidates = max((int)$config['candidates'], $offset + $limit);
+        if ($unique) {
+            // Several chunks of one page collapse into one result later.
+            $candidates *= 4;
+        }
+        $candidates = max(1, min($candidates, (int)$this->config['max_results']));
+
+        try {
+            $vector = $this->semantic->embedQuery($queryText);
+            $nearest = $this->semantic->nearest(
+                $this->indexName,
+                $vector,
+                $storageQuery['filters'] ?? [],
+                $storageQuery['language'] ?? null,
+                $candidates
+            );
+        } catch (\Throwable $e) {
+            $this->logger->warning('Semantic search unavailable; using keyword search', [
+                'index' => $this->indexName,
+                'error' => $e->getMessage(),
+            ]);
+            return null;
+        }
+
+        $keywordQuery = $storageQuery;
+        $keywordQuery['limit'] = $candidates;
+        $keywordQuery['offset'] = 0;
+        $keywordRows = $this->storage->search($this->indexName, $keywordQuery);
+        $keywordTotal = $this->storage->count($this->indexName, $storageQuery);
+
+        $rows = [];
+        $keywordIds = [];
+        foreach ($keywordRows as $row) {
+            $id = (string)$row['id'];
+            if (!isset($rows[$id])) {
+                $rows[$id] = $row;
+                $keywordIds[] = $id;
+            }
+        }
+
+        $vectorIds = array_map('strval', array_keys($nearest));
+        $vectorOnly = array_values(array_diff($vectorIds, $keywordIds));
+        if (!empty($vectorOnly)) {
+            foreach ($this->semantic->getSearchRows($this->indexName, $vectorOnly) as $id => $row) {
+                $rows[(string)$id] = $row;
+            }
+        }
+
+        $results = [];
+        foreach (SemanticSearch::fuse($keywordIds, $nearest, $weight, (int)$config['rrf_k']) as $id => $score) {
+            $id = (string)$id;
+            if (!isset($rows[$id])) {
+                continue;
+            }
+            $row = $rows[$id];
+            $row['score'] = $score;
+            $results[] = $row;
+        }
+
+        // Keyword matches beyond the candidate window still count, plus the
+        // documents only meaning found.
+        $total = $keywordTotal + count($vectorOnly);
+
+        if (!$unique) {
+            $results = array_slice($results, $offset, $limit);
+        }
+
+        return [$results, $total];
     }
 
     public function suggest(string $term, array $options = []): array
@@ -2429,6 +2580,12 @@ class SearchEngine implements SearchEngineInterface
         // Include cache-relevant options that affect result shape
         if (!empty($options['unique_by_route'])) {
             $keyData['_unique_by_route'] = true;
+        }
+        if (array_key_exists('semantic', $options)) {
+            $keyData['_semantic'] = (bool)$options['semantic'];
+        }
+        if (isset($options['semantic_weight'])) {
+            $keyData['_semantic_weight'] = (float)$options['semantic_weight'];
         }
         return md5(json_encode($keyData));
     }

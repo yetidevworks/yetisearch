@@ -346,6 +346,7 @@ class SqliteStorage implements StorageInterface
             $this->connection->exec("DROP TABLE IF EXISTS {$name}_spatial");
             $this->connection->exec("DROP TABLE IF EXISTS {$name}_id_map");
             $this->connection->exec("DROP TABLE IF EXISTS {$name}_meta");
+            $this->connection->exec("DROP TABLE IF EXISTS {$name}_vectors");
         } catch (\PDOException $e) {
             throw new StorageException("Failed to drop index '{$name}': " . $e->getMessage());
         }
@@ -1666,6 +1667,316 @@ class SqliteStorage implements StorageInterface
             'search_time' => $searchTime,
             'indices_searched' => $searchedIndices
         ];
+    }
+
+    // ------------------------------------------------------------------
+    // Semantic search: vectors live in {index}_vectors next to the index,
+    // one row per document row, keyed by the document's string id.
+    // ------------------------------------------------------------------
+
+    public function ensureVectorTable(string $index): void
+    {
+        $this->validateIndexName($index);
+        $this->ensureConnected();
+
+        $this->connection->exec("
+            CREATE TABLE IF NOT EXISTS {$index}_vectors (
+                id TEXT PRIMARY KEY,
+                hash TEXT NOT NULL,
+                model TEXT NOT NULL,
+                dims INTEGER NOT NULL,
+                vector BLOB NOT NULL,
+                updated_at INTEGER DEFAULT (strftime('%s', 'now'))
+            )
+        ");
+        $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$index}_vectors_model ON {$index}_vectors(model)");
+    }
+
+    private function hasVectorTable(string $index): bool
+    {
+        $stmt = $this->connection->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?");
+        $stmt->execute([$index . '_vectors']);
+
+        return $stmt->fetch() !== false;
+    }
+
+    /**
+     * Every document row with the hash and model of its stored vector (null
+     * when it has none), for deciding what needs embedding.
+     *
+     * @return \Generator<int, array{id:string, content:array, metadata:array, hash:?string, model:?string}>
+     */
+    public function iterateDocumentsForEmbedding(string $index): \Generator
+    {
+        $this->validateIndexName($index);
+        $this->ensureConnected();
+        $this->ensureVectorTable($index);
+
+        $stmt = $this->connection->query("
+            SELECT d.id, d.content, d.metadata, v.hash AS vhash, v.model AS vmodel
+            FROM {$index} d
+            LEFT JOIN {$index}_vectors v ON v.id = d.id
+        ");
+        while ($row = $stmt->fetch()) {
+            yield [
+                'id' => (string)$row['id'],
+                'content' => json_decode((string)$row['content'], true) ?: [],
+                'metadata' => json_decode((string)$row['metadata'], true) ?: [],
+                'hash' => $row['vhash'],
+                'model' => $row['vmodel'],
+            ];
+        }
+    }
+
+    /**
+     * @param array<int, array{id:string, hash:string, model:string, vector:float[]}> $rows
+     *        Vectors must already be normalized.
+     */
+    public function upsertVectors(string $index, array $rows): void
+    {
+        $this->validateIndexName($index);
+        $this->ensureConnected();
+        if (empty($rows)) {
+            return;
+        }
+        $this->ensureVectorTable($index);
+
+        $stmt = $this->connection->prepare(
+            "INSERT OR REPLACE INTO {$index}_vectors (id, hash, model, dims, vector, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
+        );
+        $now = time();
+
+        $this->connection->beginTransaction();
+        try {
+            foreach ($rows as $row) {
+                $stmt->bindValue(1, $row['id']);
+                $stmt->bindValue(2, $row['hash']);
+                $stmt->bindValue(3, $row['model']);
+                $stmt->bindValue(4, count($row['vector']), \PDO::PARAM_INT);
+                $stmt->bindValue(5, \YetiSearch\Semantic\VectorMath::pack($row['vector']), \PDO::PARAM_LOB);
+                $stmt->bindValue(6, $now, \PDO::PARAM_INT);
+                $stmt->execute();
+            }
+            $this->connection->commit();
+        } catch (\PDOException $e) {
+            $this->connection->rollBack();
+            throw new StorageException("Failed to store vectors: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Remove vectors whose document is gone. Deletes leave them behind on
+     * purpose: a chunk that is deleted and re-inserted with the same text
+     * keeps its vector instead of being embedded again.
+     */
+    public function pruneVectors(string $index): int
+    {
+        $this->validateIndexName($index);
+        $this->ensureConnected();
+        if (!$this->hasVectorTable($index)) {
+            return 0;
+        }
+
+        return (int)$this->connection->exec(
+            "DELETE FROM {$index}_vectors WHERE id NOT IN (SELECT id FROM {$index})"
+        );
+    }
+
+    public function clearVectors(string $index): void
+    {
+        $this->validateIndexName($index);
+        $this->ensureConnected();
+        if ($this->hasVectorTable($index)) {
+            $this->connection->exec("DELETE FROM {$index}_vectors");
+        }
+    }
+
+    /**
+     * Whether any document holds a vector from $model. Cheap enough to ask
+     * before every search.
+     */
+    public function hasVectors(string $index, string $model): bool
+    {
+        $this->validateIndexName($index);
+        $this->ensureConnected();
+        if (!$this->hasVectorTable($index)) {
+            return false;
+        }
+
+        $stmt = $this->connection->prepare("SELECT 1 FROM {$index}_vectors WHERE model = ? LIMIT 1");
+        $stmt->execute([$model]);
+
+        return $stmt->fetchColumn() !== false;
+    }
+
+    /**
+     * Number of documents holding a vector from $model.
+     */
+    public function countVectors(string $index, string $model): int
+    {
+        $this->validateIndexName($index);
+        $this->ensureConnected();
+        if (!$this->hasVectorTable($index)) {
+            return 0;
+        }
+
+        $stmt = $this->connection->prepare(
+            "SELECT COUNT(*) FROM {$index}_vectors v INNER JOIN {$index} d ON d.id = v.id WHERE v.model = ?"
+        );
+        $stmt->execute([$model]);
+
+        return (int)$stmt->fetchColumn();
+    }
+
+    /**
+     * The $k documents closest to $queryVector, among those that pass the
+     * same language and filters a keyword search would apply.
+     *
+     * This compares the query with every candidate vector in PHP. That holds
+     * up to tens of thousands of documents; past that it is the thing to
+     * replace.
+     *
+     * @param float[] $queryVector Normalized
+     * @return array<string, float> Document id => cosine similarity, best first
+     */
+    public function nearestVectors(
+        string $index,
+        array $queryVector,
+        string $model,
+        array $filters = [],
+        ?string $language = null,
+        int $k = 100,
+        float $minSimilarity = 0.0
+    ): array {
+        $this->validateIndexName($index);
+        $this->ensureConnected();
+        if (!$this->hasVectorTable($index) || empty($queryVector)) {
+            return [];
+        }
+
+        $sql = "SELECT v.id, v.vector FROM {$index}_vectors v INNER JOIN {$index} d ON d.id = v.id"
+            . " WHERE v.model = ? AND v.dims = ?";
+        $params = [$model, count($queryVector)];
+        if ($language) {
+            $sql .= " AND d.language = ?";
+            $params[] = $language;
+        }
+        foreach ($filters as $filter) {
+            [$filterSql, $filterParams] = $this->buildFilterClause($filter);
+            if ($filterSql !== '') {
+                $sql .= $filterSql;
+                $params = array_merge($params, $filterParams);
+            }
+        }
+
+        try {
+            $stmt = $this->connection->prepare($sql);
+            $stmt->execute($params);
+        } catch (\PDOException $e) {
+            throw new StorageException("Vector search failed: " . $e->getMessage());
+        }
+
+        $scores = [];
+        while ($row = $stmt->fetch(\PDO::FETCH_NUM)) {
+            $stored = unpack('g*', $row[1]);
+            if ($stored === false) {
+                continue;
+            }
+            $similarity = \YetiSearch\Semantic\VectorMath::dotOneIndexed($queryVector, $stored);
+            if ($similarity >= $minSimilarity) {
+                $scores[(string)$row[0]] = $similarity;
+            }
+        }
+
+        arsort($scores);
+
+        return array_slice($scores, 0, max(1, $k), true);
+    }
+
+    /**
+     * Document rows in the form search() returns them, keyed by id.
+     *
+     * @param string[] $ids
+     * @return array<string, array>
+     */
+    public function getSearchRows(string $index, array $ids): array
+    {
+        $this->validateIndexName($index);
+        $this->ensureConnected();
+
+        $rows = [];
+        foreach (array_chunk(array_values($ids), 500) as $batch) {
+            $placeholders = implode(',', array_fill(0, count($batch), '?'));
+            $stmt = $this->connection->prepare(
+                "SELECT id, content, metadata, language, type, timestamp FROM {$index} WHERE id IN ({$placeholders})"
+            );
+            $stmt->execute($batch);
+            while ($row = $stmt->fetch()) {
+                $content = json_decode((string)$row['content'], true);
+                $rows[(string)$row['id']] = array_merge($content ?: [], [
+                    'id' => $row['id'],
+                    'score' => 0.0,
+                    'metadata' => json_decode((string)$row['metadata'], true),
+                    'language' => $row['language'],
+                    'type' => $row['type'],
+                    'timestamp' => $row['timestamp'],
+                ]);
+            }
+        }
+
+        return $rows;
+    }
+
+    /**
+     * @return float[]|null
+     */
+    public function getCachedQueryEmbedding(string $key): ?array
+    {
+        $this->ensureConnected();
+        try {
+            $stmt = $this->connection->prepare("SELECT vector FROM yetisearch_query_embeddings WHERE key = ?");
+            $stmt->execute([$key]);
+            $blob = $stmt->fetchColumn();
+        } catch (\PDOException $e) {
+            // Table not created yet: nothing cached.
+            return null;
+        }
+
+        return is_string($blob) ? \YetiSearch\Semantic\VectorMath::unpack($blob) : null;
+    }
+
+    /**
+     * @param float[] $vector
+     */
+    public function cacheQueryEmbedding(string $key, array $vector, int $maxEntries = 5000): void
+    {
+        $this->ensureConnected();
+        try {
+            $this->connection->exec("
+                CREATE TABLE IF NOT EXISTS yetisearch_query_embeddings (
+                    key TEXT PRIMARY KEY,
+                    vector BLOB NOT NULL,
+                    created_at INTEGER NOT NULL
+                )
+            ");
+            $stmt = $this->connection->prepare(
+                "INSERT OR REPLACE INTO yetisearch_query_embeddings (key, vector, created_at) VALUES (?, ?, ?)"
+            );
+            $stmt->bindValue(1, $key);
+            $stmt->bindValue(2, \YetiSearch\Semantic\VectorMath::pack($vector), \PDO::PARAM_LOB);
+            $stmt->bindValue(3, time(), \PDO::PARAM_INT);
+            $stmt->execute();
+
+            // Oldest entries go first once the cache is full.
+            $stmt = $this->connection->prepare(
+                "DELETE FROM yetisearch_query_embeddings WHERE key IN ("
+                . "SELECT key FROM yetisearch_query_embeddings ORDER BY created_at DESC LIMIT -1 OFFSET ?)"
+            );
+            $stmt->execute([max(1, $maxEntries)]);
+        } catch (\PDOException $e) {
+            // A cache that cannot be written is not worth failing a search over.
+            $this->logger->warning('Could not cache a query embedding', ['error' => $e->getMessage()]);
+        }
     }
 
     private function ensureConnected(): void

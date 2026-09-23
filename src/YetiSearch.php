@@ -11,6 +11,9 @@ use YetiSearch\Models\SearchQuery;
 use YetiSearch\Geo\GeoPoint;
 use YetiSearch\Geo\GeoBounds;
 use YetiSearch\Cache\CacheManager;
+use YetiSearch\Contracts\EmbeddingProviderInterface;
+use YetiSearch\Exceptions\YetiSearchException;
+use YetiSearch\Semantic\SemanticSearch;
 use Psr\Log\LoggerInterface;
 
 class YetiSearch
@@ -22,6 +25,7 @@ class YetiSearch
     private array $searchEngines = [];
     private ?LoggerInterface $logger = null;
     private ?CacheManager $cacheManager = null;
+    private ?EmbeddingProviderInterface $embeddingProvider = null;
 
     public function __construct(array $config = [], ?LoggerInterface $logger = null)
     {
@@ -67,12 +71,121 @@ class YetiSearch
                 'ttl' => 300,  // 5 minutes default
                 'max_size' => 1000,  // Max cached queries
                 'table_name' => '_query_cache'
-            ]
+            ],
+            // Semantic (hybrid) search. Off until a provider is set, here as
+            // 'provider' or later with setEmbeddingProvider(). The other keys
+            // are documented in SemanticSearch::defaults().
+            'semantic' => array_merge(['provider' => null], SemanticSearch::defaults()),
         ];
         // Deep-merge user config over defaults so nested arrays keep defaults
         $this->config = self::deepMergeArrays($defaults, $config);
 
         $this->logger = $logger;
+
+        $provider = $this->config['semantic']['provider'] ?? null;
+        if ($provider !== null) {
+            if (!$provider instanceof EmbeddingProviderInterface) {
+                throw new \InvalidArgumentException(
+                    "Config 'semantic.provider' must implement " . EmbeddingProviderInterface::class
+                );
+            }
+            $this->embeddingProvider = $provider;
+        }
+    }
+
+    /**
+     * Turn on semantic search with this provider, or off with null. Options
+     * given here override the 'semantic' config.
+     */
+    public function setEmbeddingProvider(?EmbeddingProviderInterface $provider, array $options = []): self
+    {
+        $this->embeddingProvider = $provider;
+        if (!empty($options)) {
+            $this->config['semantic'] = array_merge($this->config['semantic'], $options);
+        }
+
+        foreach ($this->searchEngines as $engine) {
+            $engine->setSemanticSearch($this->createSemanticSearch());
+        }
+
+        return $this;
+    }
+
+    public function getEmbeddingProvider(): ?EmbeddingProviderInterface
+    {
+        return $this->embeddingProvider;
+    }
+
+    public function isSemanticEnabled(): bool
+    {
+        return $this->embeddingProvider !== null;
+    }
+
+    /**
+     * Embed up to $limit documents of an index that have no vector yet, or
+     * whose text changed since they got one. Call it after indexing, and
+     * again while 'pending' is above zero. A provider error stops the run
+     * and is returned in 'error'; what was embedded before it is kept.
+     *
+     * @return array{embedded:int, pending:int, total:int, pruned:int, error:?string}
+     */
+    public function embedPending(string $index, int $limit = 200): array
+    {
+        $result = $this->requireSemantic()->embedPending($index, $limit);
+        if ($result['embedded'] > 0 || $result['pruned'] > 0) {
+            $this->clearEngineResults($index);
+        }
+
+        return $result;
+    }
+
+    /**
+     * How much of an index is embedded with the current provider's model.
+     *
+     * @return array{model:string, total:int, embedded:int, pending:int}
+     */
+    public function embeddingStats(string $index): array
+    {
+        return $this->requireSemantic()->stats($index);
+    }
+
+    /**
+     * Forget every stored vector of an index, so the next embedPending()
+     * starts over. Needs no provider.
+     */
+    public function clearEmbeddings(string $index): void
+    {
+        $this->getStorage()->clearVectors($index);
+        $this->clearEngineResults($index);
+    }
+
+    private function clearEngineResults(string $index): void
+    {
+        if (isset($this->searchEngines[$index])) {
+            $this->searchEngines[$index]->clearResultCache();
+        }
+    }
+
+    private function createSemanticSearch(): ?SemanticSearch
+    {
+        if ($this->embeddingProvider === null) {
+            return null;
+        }
+
+        $options = $this->config['semantic'];
+        unset($options['provider']);
+
+        return new SemanticSearch($this->embeddingProvider, $this->getStorage(), $options, $this->logger);
+    }
+
+    private function requireSemantic(): SemanticSearch
+    {
+        $semantic = $this->createSemanticSearch();
+        if ($semantic === null) {
+            throw new YetiSearchException('Semantic search needs an embedding provider; call setEmbeddingProvider() first');
+        }
+
+        return $semantic;
     }
 
     private static function deepMergeArrays(array $base, array $overrides): array
@@ -239,7 +352,10 @@ class YetiSearch
             'search_time' => $results->getSearchTime(),
             'facets' => $results->getFacets(),
             'suggestion' => $suggestion,  // Singular for "did you mean?" feature
-            'suggestions' => $suggestion ? [$suggestion] : []  // Plural for compatibility
+            'suggestions' => $suggestion ? [$suggestion] : [],  // Plural for compatibility
+            // True when meaning took part in the ranking; false for keyword
+            // search, including a fallback after the provider failed.
+            'semantic' => (bool)($results->getMetadata()['semantic'] ?? false),
         ];
     }
 
@@ -526,6 +642,7 @@ class YetiSearch
                 array_merge($this->config['search'], $this->config['storage']),
                 $this->logger
             );
+            $this->searchEngines[$name]->setSemanticSearch($this->createSemanticSearch());
         }
 
         return $this->searchEngines[$name];

@@ -31,6 +31,7 @@ A powerful, pure-PHP search engine library with advanced full-text search capabi
   - [Search Result Deduplication](#search-result-deduplication)
   - [Highlighting](#highlighting)
   - [Fuzzy Search](#fuzzy-search)
+  - [Semantic Search (Hybrid)](#semantic-search-hybrid)
   - [Faceted Search](#faceted-search)
 - [Architecture](#architecture)
 - [Testing](#testing)
@@ -55,6 +56,7 @@ A powerful, pure-PHP search engine library with advanced full-text search capabi
 ## Features
 
 - 🔍 **Full-text search** powered by SQLite FTS5 with BM25 relevance scoring
+- 🧠 **Semantic search (optional)** - hybrid keyword + meaning ranking with any OpenAI-compatible embedding API or your own provider
 - 📄 **Automatic document chunking** for indexing large documents
 - 🎯 **Smart result deduplication** - shows best match per document by default
 - 🌍 **Multi-language support** with built-in stemming for multiple languages
@@ -1360,6 +1362,73 @@ foreach (['trigram', 'levenshtein', 'jaro_winkler'] as $algorithm) {
     // Run your test queries and measure accuracy/speed
 }
 ```
+
+### Semantic Search (Hybrid)
+
+Keyword search finds documents that contain the words you typed. Semantic search also finds documents that mean the same thing: a search for `automobile` finds a page about cars, and `can't log in` finds the page titled "Reset your password". YetiSearch runs both and merges the two rankings with reciprocal rank fusion, so a document that matches on keywords *and* meaning ranks highest, and one found by meaning alone still makes it into the results.
+
+It is off until you give YetiSearch an embedding provider. Without one, nothing changes: same queries, same results, no network calls.
+
+```php
+use YetiSearch\YetiSearch;
+use YetiSearch\Semantic\OpenAICompatibleEmbeddingProvider;
+
+$search = new YetiSearch(['storage' => ['path' => 'search.db']]);
+
+$search->setEmbeddingProvider(new OpenAICompatibleEmbeddingProvider([
+    'api_key'    => getenv('OPENAI_API_KEY'),
+    'model'      => 'text-embedding-3-small',
+    'dimensions' => 512,
+]));
+
+// Index as usual, then embed. Embedding is its own step so a slow or failing
+// provider never holds up indexing. Each call embeds up to $limit documents;
+// run it from a queue, a cron job or a CLI command until nothing is pending.
+$search->indexBatch('pages', $documents);
+do {
+    $run = $search->embedPending('pages', 200);
+} while ($run['pending'] > 0 && $run['error'] === null);
+
+$results = $search->search('pages', 'automobile');
+$results['semantic']; // true when meaning took part in the ranking
+```
+
+**Providers.** `OpenAICompatibleEmbeddingProvider` speaks the OpenAI `/embeddings` API, which most embedding services copy. Point `base_url` elsewhere for the rest:
+
+| Service | Settings |
+|---|---|
+| OpenAI | `api_key`, `model: text-embedding-3-small`, `dimensions: 512` |
+| OpenRouter | `base_url: https://openrouter.ai/api/v1`, `api_key`, `model: openai/text-embedding-3-small`, `dimensions: 512` |
+| Ollama (self-hosted) | `base_url: http://localhost:11434/v1`, `model: nomic-embed-text`, `query_prefix: "search_query: "`, `document_prefix: "search_document: "` |
+| Voyage | `base_url: https://api.voyageai.com/v1`, `api_key`, `model: voyage-3.5-lite`, `input_type: true` |
+| Mistral | `base_url: https://api.mistral.ai/v1`, `api_key`, `model: mistral-embed` |
+| LM Studio | `base_url: http://localhost:1234/v1`, `model: <loaded model>` |
+
+Anything else can implement `YetiSearch\Contracts\EmbeddingProviderInterface`: `embed(array $texts, string $purpose)`, `dimensions()` and `modelId()`. `$purpose` is `PURPOSE_QUERY` or `PURPOSE_DOCUMENT` for models that embed the two differently.
+
+Semantic search needs an embedding model somewhere. On shared PHP hosting that means a hosted API; running a model inside PHP isn't practical. Ollama or another local server is the self-hosted route.
+
+**What gets embedded.** Each document row is embedded as its `title` and `content` fields, as plain text, cut to 6000 characters. Long documents are chunked by the indexer, and their chunks are embedded instead of the whole document. A hash of the text is stored with each vector, so `embedPending()` only sends documents whose text changed, and re-indexing unchanged content costs nothing. Changing the model or its dimensions (anything in `modelId()`) marks every document as pending; until they are re-embedded, searches on that index use keywords only rather than compare vectors from two different models.
+
+**Filters and fallbacks.** The vector side applies the same `filters` and `language` as the keyword side. Geo searches and searches sorted by anything other than relevance keep their own ordering and skip semantic ranking. If the provider fails or times out (`query_timeout`, 5 seconds by default), the search falls back to keywords, logs a warning, and returns `'semantic' => false`. Query embeddings are cached in the database, so a repeated search makes no provider call. Pass `'semantic' => false` in the search options to turn it off for one query, or `'semantic_weight'` to change the balance for one query.
+
+**Options** (under `'semantic'` in the config, or as the second argument to `setEmbeddingProvider()`):
+
+| Option | Default | What it does |
+|---|---|---|
+| `provider` | `null` | An `EmbeddingProviderInterface`. Semantic search is off without one. |
+| `weight` | `0.5` | Share of the ranking from meaning: `0` is keyword search, `1` is semantic alone. |
+| `min_similarity` | `0.25` | Documents less similar than this never enter the results on meaning alone. Depends on the model; raise it if unrelated results appear. |
+| `candidates` | `100` | Results each side contributes before fusion. |
+| `rrf_k` | `60` | Reciprocal rank fusion constant. |
+| `fields` | `['title', 'content']` | Document fields that make up the embedded text. |
+| `max_chars` | `6000` | Characters of text embedded per document. |
+| `batch_size` | `32` | Documents per provider call in `embedPending()`. |
+| `query_cache_size` | `5000` | Query embeddings kept in the database. |
+
+Other calls: `embeddingStats($index)` returns `total`, `embedded`, `pending` and `model`; `clearEmbeddings($index)` forgets every vector so the next run starts over.
+
+**Scale.** Vectors are stored in the index's own SQLite file (`{index}_vectors`), and a search compares the query with every candidate vector in PHP. On an M-series Mac with PHP 8.4 that takes about 110 ms for 10,000 chunks at 512 dimensions, 55 ms at 256, and grows linearly from there. Filters cut the work in proportion. Past a few tens of thousands of chunks, use fewer dimensions or keep semantic search off for that index.
 
 ### Faceted Search
 

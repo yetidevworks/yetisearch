@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.4.0] - 2026-09-23
+
+### New Features
+- **Semantic search (hybrid)**: Search can now rank by meaning as well as keywords. Give YetiSearch an embedding provider (`setEmbeddingProvider()`, or `'semantic' => ['provider' => ...]` in the config), run `embedPending()` after indexing, and text queries run a BM25 search and a vector search over the same filters and language, merged with reciprocal rank fusion (`weight`, default `0.5`). The vector share is scaled by each document's similarity relative to the best match, so a weak semantic match no longer displays almost the same score as a strong one. A search for `automobile` now finds a page about cars. Without a provider nothing changes: same queries, same results, no network calls. See "Semantic Search (Hybrid)" in the README.
+- **Embedding providers**: `YetiSearch\Contracts\EmbeddingProviderInterface` (`embed()`, `dimensions()`, `modelId()`) lets any embedding service plug in. `YetiSearch\Semantic\OpenAICompatibleEmbeddingProvider` covers OpenAI and everything that speaks its `/embeddings` API (OpenRouter, Ollama, LM Studio, Voyage, Mistral, Together), with optional `dimensions`, query/document prefixes for models such as nomic-embed-text, Voyage's `input_type`, batching, retries for 429/5xx on document batches, and a separate short `query_timeout`.
+- **Incremental embedding**: Vectors are stored per document row in `{index}_vectors`, in the index's own SQLite file, as normalized float32 with a hash of the embedded text. `embedPending($index, $limit)` embeds only rows that are new or whose text or model changed, keeps finished batches when a later one fails, returns the error instead of throwing, and prunes vectors of deleted documents. A chunk deleted and re-inserted with the same text keeps its vector. Chunked documents embed their chunks, not the parent row. `embeddingStats()` and `clearEmbeddings()` report on and reset an index.
+- **Graceful fallback**: A provider error or timeout at query time falls back to keyword search and logs a warning; the result carries `'semantic' => false`. Changing the model marks every document pending, and searches on that index stay keyword-only until they are re-embedded, so vectors from two models are never compared. Query embeddings are cached in `yetisearch_query_embeddings` (5000 entries), so repeated searches make no provider call. `'semantic' => false` and `'semantic_weight'` in the search options override per query.
+
+### Performance
+- The vector side compares the query with every candidate vector in PHP: about 110 ms for 10,000 chunks at 512 dimensions on PHP 8.4, linear in documents times dimensions, and proportionally less with filters. Keyword-only searches are unaffected.
+
+### Tests
+- `tests/Integration/Semantic/HybridSearchTest.php` covers the unchanged no-provider path, incremental embedding, meaning-only matches, fusion order, filters on the vector side, provider failure at query and embed time, the query-embedding cache, per-query opt-out, model changes, pruning, chunked documents, `dropIndex()`, the external-content schema and config-supplied providers, using a deterministic fake provider. Verified against a real model (`openai/text-embedding-3-small` at 512 dimensions via OpenRouter): "can't log in" finds the password-reset article and "automobile" the car article with no shared keyword, while an unrelated query returns nothing. `tests/Unit/Semantic/SemanticUnitTest.php` covers fusion, vector packing and the OpenAI-compatible request and response handling.
+
 ## [2.3.6] - 2026-08-31
 
 ### Bug Fixes
