@@ -14,7 +14,9 @@
 /.gitignore         export-ignore
 /benchmarks         export-ignore
 /examples           export-ignore
-/scripts            export-ignore
+# The SQLite feature check is something site owners run, so it ships; the other scripts are development tools
+/scripts/*          export-ignore
+/scripts/check_sqlite_features.php -export-ignore
 /tests              export-ignore
 /Makefile           export-ignore
 /Makefile.tmp       export-ignore

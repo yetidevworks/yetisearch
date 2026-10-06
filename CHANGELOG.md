@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.5.2] - 2026-10-06
+
+### Bug Fixes
+- **`scripts/check_sqlite_features.php` ships again**: Leaving development files out of the Packagist dist in 2.3.5 also took out the SQLite feature check, the one script site owners are told to run to see whether their PHP has FTS5 and R-tree support. It is back in the dist; the benchmark, coverage and migration scripts still stay out.
+
 ## [2.5.1] - 2026-09-23
 
 ### Improvements
