@@ -240,6 +240,25 @@ class SearchQuery
         return $this;
     }
 
+    /**
+     * Return only the k documents nearest to the sortByDistance() point, nearest first
+     */
+    public function nearest(int $k): self
+    {
+        $this->geoFilters['nearest'] = $k;
+        return $this;
+    }
+
+    /**
+     * Leave out documents farther than this from the sortByDistance() point, in the
+     * geo units (meters by default)
+     */
+    public function maxDistance(float $distance): self
+    {
+        $this->geoFilters['max_distance'] = $distance;
+        return $this;
+    }
+
     public function geoUnits(string $units): self
     {
         $this->geoFilters['units'] = strtolower($units);

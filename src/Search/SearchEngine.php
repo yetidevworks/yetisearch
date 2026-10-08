@@ -4,6 +4,7 @@ namespace YetiSearch\Search;
 
 use YetiSearch\Contracts\SearchEngineInterface;
 use YetiSearch\Contracts\StorageInterface;
+use YetiSearch\Contracts\TracksIndexChanges;
 use YetiSearch\Contracts\AnalyzerInterface;
 use YetiSearch\Models\SearchQuery;
 use YetiSearch\Models\SearchResults;
@@ -137,7 +138,10 @@ class SearchEngine implements SearchEngineInterface
         $originalConfig = $this->config;
         $this->config = array_merge($this->config, $options);
 
-        $cacheKey = $this->getCacheKey($query, $options);
+        // bypass_cache skips the results held here as well as the storage's
+        // query cache.
+        $cacheKey = !empty($query->getOptions()['bypass_cache']) ? null : $this->getCacheKey($query, $options);
+        $changeToken = $cacheKey === null ? null : $this->indexChangeToken();
 
         $this->logger->debug('SearchEngine::search called', [
             'query_text' => $query->getQuery(),
@@ -146,7 +150,7 @@ class SearchEngine implements SearchEngineInterface
             'config_fuzzy_algorithm' => $this->config['fuzzy_algorithm'] ?? 'not set'
         ]);
 
-        if ($this->isCached($cacheKey)) {
+        if ($this->isCached($cacheKey, $changeToken)) {
             $this->logger->debug('Returning cached results', ['query' => $query->getQuery()]);
             // Restore original config before returning cached results
             $cachedResults = $this->cache[$cacheKey]['results'];
@@ -166,7 +170,7 @@ class SearchEngine implements SearchEngineInterface
                 $this->logger->debug('Query holds no searchable term', ['query' => $originalQuery]);
 
                 $emptyResults = new SearchResults([], 0, microtime(true) - $startTime);
-                $this->cacheResults($cacheKey, $emptyResults);
+                $this->cacheResults($cacheKey, $emptyResults, $changeToken);
 
                 return $emptyResults;
             }
@@ -313,7 +317,7 @@ class SearchEngine implements SearchEngineInterface
                 $finalResults->setMetadata(['semantic' => $hybrid !== null]);
             }
 
-            $this->cacheResults($cacheKey, $finalResults);
+            $this->cacheResults($cacheKey, $finalResults, $changeToken);
 
             $this->logger->info('Search completed', [
                 'query' => $query->getQuery(),
@@ -942,6 +946,12 @@ class SearchEngine implements SearchEngineInterface
                 $geoFilters['distance_sort']['from'] = $geoFilters['distance_sort']['from']->toArray();
             }
 
+            // search.geo_units is the unit of a near() radius and max_distance when
+            // the query names none
+            if (!isset($geoFilters['units']) && is_string($this->config['geo_units'] ?? null)) {
+                $geoFilters['units'] = strtolower($this->config['geo_units']);
+            }
+
             $storageQuery['geoFilters'] = $geoFilters;
         }
 
@@ -1085,7 +1095,7 @@ class SearchEngine implements SearchEngineInterface
     private function bearingToCardinal(float $bearing): string
     {
         $dirs = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
-        $idx = (int)round(($bearing % 360) / 22.5) % 16;
+        $idx = (int)round(fmod($bearing, 360.0) / 22.5) % 16;
         return $dirs[$idx];
     }
 
@@ -1473,7 +1483,11 @@ class SearchEngine implements SearchEngineInterface
                     $counts = array_fill(0, count($ranges), 0);
                     $beyond = 0;
                     foreach ($results as $row) {
-                        $dist = (float)($row['distance'] ?? 0.0);
+                        // A document with no geo has no distance, so it belongs in no bucket
+                        if (!isset($row['distance'])) {
+                            continue;
+                        }
+                        $dist = (float)$row['distance'];
                         $dUnits = $dist / $factor;
                         $placed = false;
                         foreach ($ranges as $i => $r) {
@@ -1495,7 +1509,7 @@ class SearchEngine implements SearchEngineInterface
                         $facetResults[] = ['value' => sprintf('> %s %s', end($ranges), $units), 'count' => $beyond];
                     }
                     $facets['distance'] = $facetResults;
-                } catch (\Exception $e) {
+                } catch (\Throwable $e) {
                     $this->logger->warning('Failed to compute distance facet', ['error' => $e->getMessage()]);
                 }
                 continue;
@@ -1582,7 +1596,9 @@ class SearchEngine implements SearchEngineInterface
                 });
 
                 $facets[$name] = array_slice($facetResults, 0, $options['limit'] ?? 10);
-            } catch (\Exception $e) {
+            } catch (\Throwable $e) {
+                // One facet that cannot be counted leaves the others and the
+                // results standing
                 $this->logger->warning('Failed to compute facet', [
                     'facet' => $name,
                     'field' => $field,
@@ -2779,21 +2795,43 @@ class SearchEngine implements SearchEngineInterface
         return md5(json_encode($keyData));
     }
 
-    private function isCached(string $key): bool
+    /**
+     * The storage's token for this index, or null when the storage cannot
+     * tell; then a result held in memory lasts its cache_ttl whatever changes.
+     */
+    private function indexChangeToken(): ?string
     {
-        if (!isset($this->cache[$key])) {
+        return $this->storage instanceof TracksIndexChanges
+            ? $this->storage->indexChangeToken($this->indexName)
+            : null;
+    }
+
+    private function isCached(?string $key, ?string $changeToken): bool
+    {
+        if ($key === null || !isset($this->cache[$key])) {
             return false;
         }
 
         $cached = $this->cache[$key];
+        // A write since the result was cached makes it stale
+        if ($cached['token'] !== $changeToken) {
+            unset($this->cache[$key]);
+            return false;
+        }
+
         return (time() - $cached['time']) < $this->config['cache_ttl'];
     }
 
-    private function cacheResults(string $key, SearchResults $results): void
+    private function cacheResults(?string $key, SearchResults $results, ?string $changeToken): void
     {
+        if ($key === null) {
+            return;
+        }
+
         $this->cache[$key] = [
             'results' => $results,
-            'time' => time()
+            'time' => time(),
+            'token' => $changeToken,
         ];
 
         if (count($this->cache) > 100) {

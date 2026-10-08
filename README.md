@@ -1130,7 +1130,8 @@ $results = $search->search('articles', 'PHP programming');  // Cached: <0.5ms
 ```
 
 **Cache Features:**
-- **Automatic invalidation** - Cache clears when documents are added, updated, or deleted
+- **Automatic invalidation** - Cache clears when documents are added, updated, or deleted, and when an index is cleared, dropped or has its full-text table rebuilt
+- **Results in memory** - Each search engine also keeps its recent results in memory for `search.cache_ttl` seconds (default 300), whether or not the query cache is on. Any write to the index makes them stale at once, through `YetiSearch`, an indexer or the storage, in this process or another, so a long-running worker never sees results from before a write. `clearCache()` empties them too, and the `bypass_cache` search option skips both caches
 - **LRU eviction** - Least recently used entries are removed when cache is full
 - **SQLite-based storage** - Cache persists across PHP requests
 - **Hit tracking** - Monitor cache effectiveness with built-in statistics
@@ -1585,8 +1586,8 @@ See the architecture overview diagram and component notes in `docs/architecture-
 
 YetiSearch supports location filtering and sorting with SQLite R-tree and accurate distances:
 
-- Accurate distances: uses Haversine great‑circle distance (meters) when SQLite math functions are available; otherwise falls back to a planar approximation.
-- `near` radius filter: radius (in meters) is applied in SQL using the computed distance for better performance and correctness.
+- Accurate distances: uses Haversine great‑circle distance (meters). SQLite computes it when its math functions are available, and PHP does when they are not.
+- `near` radius filter: the radius (in meters unless you set units) is applied in SQL using the computed distance, so the limit, the offset and the total count are about the circle. A radius that crosses the antimeridian or reaches a pole works.
 - `within` bounds: supports standard bounding boxes; if the bounds cross the antimeridian (west > east), the query splits into two longitude ranges.
 - Distance sorting: include a sort‑by‑distance option in your query for nearest‑first results.
 
@@ -1612,7 +1613,33 @@ foreach ($results->getResults() as $r) {
 ```
 
 Note
-- R-tree is used when available; if not, geo search gracefully degrades but may be slower. Ensure your SQLite build has RTREE (check with `scripts/check_sqlite_features.php`).
+- R-tree is used when your SQLite build has it. When it does not, geo search runs on a plain table and gives the same results, only without the spatial index. See [Without R-Tree](#without-r-tree).
+
+### Without R-Tree
+
+R-Tree is an optional SQLite module, and some PHP builds ship a SQLite without it. YetiSearch checks for it when it first needs it. If it is missing, the index's `<index>_spatial` table is a plain table with the same minimum and maximum latitude and longitude columns, and the same queries run against it. Your code does not change: `near()`, `within()`, `sortByDistance()`, the distance facet and `nearest` take the same arguments and return the same documents, in both storage schemas (`external_content` on or off).
+
+To see whether your PHP has R-Tree, run `php scripts/check_sqlite_features.php`. Look for `RTREE: OK` under Runtime Probes (the compile options line reads `RTREE=yes` or `RTREE=no`). If it says `FAIL`, you are on the plain table.
+
+How `near()` works, with or without R-Tree:
+
+- It first narrows to a box that encloses the circle, then keeps the documents whose haversine distance from your point is within the radius. Both steps run in SQL, so the limit, the offset and the total count are about the circle and not the box: a document in a corner of the box but outside the radius is not returned, not counted, and does not take a place on a page.
+- The box is the smallest latitude and longitude box that holds the circle. At high latitude it is much wider than the radius in degrees of longitude (a 500 km radius at 70 degrees north reaches 13.25 degrees either side of the center), and a document 246 m inside the edge of that circle is found.
+- A radius that crosses the antimeridian works: the box splits into two longitude ranges, so a `near()` centered at longitude 179.95 finds a document at 179.99 and one 8.9 km away at -179.97. A radius that reaches a pole takes every longitude.
+- `distance` on each result is in meters, from your point to the point of the document (the center of its bounds, for a document indexed with `geo_bounds`).
+- `max_distance` with a distance sort, and `nearest`, use the same SQL distance test.
+
+What differs without R-Tree:
+
+- There is no spatial index to narrow the search, so a `near()` or `within()` query checks every geo row of the index. For a `near()` with no text query, `EXPLAIN QUERY PLAN` shows a `SCAN` of the spatial table, where R-Tree shows a search through the virtual table index. That is fine for thousands of documents; measure with your own data beyond that.
+- Distances are slightly more precise. R-Tree stores coordinates as 32-bit floats, so distances read from it differ from an exact haversine by up to about a meter in the test data, and a document within a meter of your radius can land on either side of it. The plain table keeps full precision.
+
+### Without SQL math functions
+
+Computing a haversine distance in SQL needs SQLite's math functions (`sin`, `cos`, `asin` and so on), which are a compile-time option of SQLite and arrived in version 3.35. If your SQLite lacks them, with R-Tree or without, YetiSearch keeps the box in SQL and runs the radius test in PHP on the rows that come back. Results are still exact: `near()` returns only documents inside the radius, with the right `distance`, and `within()` is unchanged. Two things differ:
+
+- Without `sortByDistance()`, the limit and offset are applied before the radius test, so a page can come back short or empty when the best text matches are in a corner of the box. When you page through `near()` results, add `sortByDistance()`: it sorts the matches by distance before the page is cut.
+- The reported total count is the number of documents inside the box, so it can be higher than the number inside the radius.
 
 ### Global Units & Composite Scoring
 
@@ -1668,6 +1695,8 @@ foreach (($faceted['facets']['distance'] ?? []) as $bucket) {
 }
 ```
 
+Documents with no geo are left out of the buckets.
+
 ### k‑Nearest Neighbors (k‑NN)
 
 Return the k nearest documents by distance, optionally clamped by max distance:
@@ -1683,6 +1712,8 @@ $knn = $search->search('places', '', [
   'limit' => 5
 ]);
 ```
+
+The same on a `SearchQuery` is `(new SearchQuery(''))->sortByDistance($point)->nearest(5)->maxDistance(10)->geoUnits('km')`. The `total` it reports is not capped at k: it counts every matching document within `max_distance`.
 
 YetiSearch follows a modular architecture with clear separation of concerns:
 

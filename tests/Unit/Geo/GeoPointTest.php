@@ -75,6 +75,57 @@ class GeoPointTest extends TestCase
         $this->assertTrue($bounds->contains($point));
     }
     
+    public function testBoundingBoxEnclosesTheCircleAtItsWidestPoint(): void
+    {
+        // 500 km at 70N: the circle is widest east and west where a meridian touches it,
+        // about 13.25 degrees from the center, more than the 13.17 that cos(70N) gives
+        $point = new GeoPoint(70.0, 10.0);
+        $bounds = $point->getBoundingBox(500000);
+
+        $angular = 500000 / 6371000;
+        $expectedHalfWidth = rad2deg(asin(sin($angular) / cos(deg2rad(70.0))));
+        $this->assertEqualsWithDelta(10.0 + $expectedHalfWidth, $bounds->getEast(), 1e-9);
+        $this->assertEqualsWithDelta(10.0 - $expectedHalfWidth, $bounds->getWest(), 1e-9);
+        $this->assertGreaterThan(13.25, $bounds->getEast() - 10.0);
+        $this->assertEqualsWithDelta(70.0 + rad2deg($angular), $bounds->getNorth(), 1e-9);
+        $this->assertEqualsWithDelta(70.0 - rad2deg($angular), $bounds->getSouth(), 1e-9);
+    }
+
+    public function testBoundingBoxAcrossTheAntimeridianHasWestGreaterThanEast(): void
+    {
+        $east = (new GeoPoint(0.0, 179.95))->getBoundingBox(10000);
+        $this->assertTrue($east->crossesDateLine());
+        $this->assertEqualsWithDelta(179.95 - 0.0899, $east->getWest(), 1e-3);
+        $this->assertEqualsWithDelta(-179.9601, $east->getEast(), 1e-3);
+        $this->assertTrue($east->contains(new GeoPoint(0.0, 179.99)));
+        $this->assertTrue($east->contains(new GeoPoint(0.0, -179.97)));
+        $this->assertFalse($east->contains(new GeoPoint(0.0, -179.5)));
+
+        $west = (new GeoPoint(0.0, -179.95))->getBoundingBox(10000);
+        $this->assertTrue($west->crossesDateLine());
+        $this->assertTrue($west->contains(new GeoPoint(0.0, 179.99)));
+        $this->assertTrue($west->contains(new GeoPoint(0.0, -179.97)));
+    }
+
+    public function testBoundingBoxHoldingAPoleTakesEveryLongitude(): void
+    {
+        $bounds = (new GeoPoint(89.95, 0.0))->getBoundingBox(20000);
+        $this->assertEquals(90.0, $bounds->getNorth());
+        $this->assertEquals(-180.0, $bounds->getWest());
+        $this->assertEquals(180.0, $bounds->getEast());
+        $this->assertFalse($bounds->crossesDateLine());
+
+        $south = (new GeoPoint(-89.95, 120.0))->getBoundingBox(20000);
+        $this->assertEquals(-90.0, $south->getSouth());
+        $this->assertEquals(-180.0, $south->getWest());
+        $this->assertEquals(180.0, $south->getEast());
+
+        // A radius past a quarter of the globe also holds a pole
+        $wide = (new GeoPoint(0.0, 0.0))->getBoundingBox(12000000);
+        $this->assertEquals(90.0, $wide->getNorth());
+        $this->assertEquals(-90.0, $wide->getSouth());
+    }
+
     public function testToArray(): void
     {
         $point = new GeoPoint(45.5152, -122.6784);

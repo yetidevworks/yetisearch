@@ -4,7 +4,11 @@ namespace YetiSearch\Geo;
 
 use YetiSearch\Exceptions\InvalidArgumentException;
 
-class GeoPoint
+/**
+ * Encodes as toArray() in JSON, so a query's cache key and its logged form
+ * carry the coordinates.
+ */
+class GeoPoint implements \JsonSerializable
 {
     private float $latitude;
     private float $longitude;
@@ -66,7 +70,14 @@ class GeoPoint
     }
 
     /**
-     * Calculate bounding box for a given radius
+     * Calculate the bounding box that encloses a circle of the given radius
+     *
+     * The box is the smallest one that holds every point within the radius. Its
+     * longitude half-width is asin(sin(r / R) / cos(latitude)), which is wider
+     * than the radius in degrees at the center's latitude. A box that crosses
+     * the antimeridian comes back with west greater than east, the same way
+     * GeoBounds represents any box that crosses it. When the circle holds a
+     * pole, the box is clamped at the pole and takes every longitude.
      *
      * @param float $radiusInMeters
      * @return GeoBounds
@@ -76,38 +87,50 @@ class GeoPoint
         $earthRadius = 6371000; // Earth radius in meters
 
         // Angular distance in radians
-        $angularDistance = $radiusInMeters / $earthRadius;
+        $angularDistance = max(0.0, $radiusInMeters) / $earthRadius;
 
         $lat = deg2rad($this->latitude);
         $lng = deg2rad($this->longitude);
 
-        // Calculate min/max latitude
         $minLat = $lat - $angularDistance;
         $maxLat = $lat + $angularDistance;
 
-        // Calculate min/max longitude
-        $deltaLng = asin(sin($angularDistance) / cos($lat));
-        $minLng = $lng - $deltaLng;
-        $maxLng = $lng + $deltaLng;
+        if ($minLat <= -M_PI / 2 || $maxLat >= M_PI / 2) {
+            // The circle holds a pole, so it reaches every longitude
+            return new GeoBounds(
+                min(90.0, rad2deg($maxLat)),
+                max(-90.0, rad2deg($minLat)),
+                180.0,
+                -180.0
+            );
+        }
 
-        // Handle poles
-        if ($minLat > deg2rad(-90) && $maxLat < deg2rad(90)) {
-            $minLng = $lng - $deltaLng;
-            $maxLng = $lng + $deltaLng;
-        } else {
-            // Near poles, use full longitude range
-            $minLat = max($minLat, deg2rad(-90));
-            $maxLat = min($maxLat, deg2rad(90));
-            $minLng = deg2rad(-180);
-            $maxLng = deg2rad(180);
+        // Half the width of the box in longitude: the circle's widest east-west reach is
+        // where a meridian is tangent to it, not at the center's latitude
+        $deltaLng = asin(min(1.0, sin($angularDistance) / cos($lat)));
+
+        $west = rad2deg($lng - $deltaLng);
+        $east = rad2deg($lng + $deltaLng);
+
+        // Past +-180 the box wraps, which leaves west greater than east
+        if ($west < -180.0) {
+            $west += 360.0;
+        }
+        if ($east > 180.0) {
+            $east -= 360.0;
         }
 
         return new GeoBounds(
             rad2deg($maxLat), // north
             rad2deg($minLat), // south
-            rad2deg($maxLng), // east
-            rad2deg($minLng)  // west
+            $east,
+            $west
         );
+    }
+
+    public function jsonSerialize(): array
+    {
+        return $this->toArray();
     }
 
     public function toArray(): array

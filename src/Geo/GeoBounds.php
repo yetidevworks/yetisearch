@@ -4,7 +4,11 @@ namespace YetiSearch\Geo;
 
 use YetiSearch\Exceptions\InvalidArgumentException;
 
-class GeoBounds
+/**
+ * Encodes as toArray() in JSON, so a query's cache key and its logged form
+ * carry the coordinates.
+ */
+class GeoBounds implements \JsonSerializable
 {
     private float $north;
     private float $south;
@@ -163,6 +167,11 @@ class GeoBounds
             max($this->east, $newBounds->getEast()),
             min($this->west, $newBounds->getWest())
         );
+    }
+
+    public function jsonSerialize(): array
+    {
+        return $this->toArray();
     }
 
     public function toArray(): array

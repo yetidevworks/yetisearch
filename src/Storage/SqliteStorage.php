@@ -3,6 +3,7 @@
 namespace YetiSearch\Storage;
 
 use YetiSearch\Contracts\StorageInterface;
+use YetiSearch\Contracts\TracksIndexChanges;
 use YetiSearch\Exceptions\StorageException;
 use YetiSearch\Geo\GeoPoint;
 use YetiSearch\Geo\GeoBounds;
@@ -13,7 +14,7 @@ use YetiSearch\Semantic\CalibrationStore;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
-class SqliteStorage implements StorageInterface, CalibrationStore
+class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexChanges
 {
     private ?\PDO $connection = null;
     private array $config = [];
@@ -27,6 +28,8 @@ class SqliteStorage implements StorageInterface, CalibrationStore
     private array $spatialEnabledCache = [];
     private bool $externalContentDefault = false;
     private ?QueryCache $queryCache = null;
+    /** @var array<string, int> Writes through this connection, per index */
+    private array $indexChanges = [];
     private LoggerInterface $logger;
 
     public function __construct(?LoggerInterface $logger = null)
@@ -352,6 +355,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore
             throw new StorageException("Failed to drop index '{$name}': " . $e->getMessage());
         }
         $this->deleteCalibration($name);
+        $this->indexChanged($name);
     }
 
     public function indexExists(string $name): bool
@@ -367,15 +371,35 @@ class SqliteStorage implements StorageInterface, CalibrationStore
         return $stmt->fetch() !== false;
     }
 
+    public function indexChangeToken(string $index): string
+    {
+        $this->ensureConnected();
+        // data_version moves when another connection commits; this
+        // connection's own writes are counted per index.
+        $dataVersion = (int)$this->connection->query('PRAGMA data_version')->fetchColumn();
+
+        return ($this->indexChanges[$index] ?? 0) . ':' . $dataVersion;
+    }
+
+    /**
+     * What a search of the index returns may have changed: move its change
+     * token on and, when its documents changed, forget its cached keyword
+     * results.
+     */
+    private function indexChanged(string $index, bool $documents = true): void
+    {
+        $this->indexChanges[$index] = ($this->indexChanges[$index] ?? 0) + 1;
+        if ($documents && $this->queryCache) {
+            $this->queryCache->invalidate($index);
+        }
+    }
+
     public function insert(string $index, array $document): void
     {
         $this->validateIndexName($index);
         $this->ensureConnected();
 
-        // Invalidate cache for this index when inserting
-        if ($this->queryCache) {
-            $this->queryCache->invalidate($index);
-        }
+        $this->indexChanged($index);
 
         try {
             $this->connection->beginTransaction();
@@ -512,10 +536,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore
         $this->validateIndexName($index);
         $this->ensureConnected();
 
-        // Invalidate cache for this index when batch inserting
-        if ($this->queryCache) {
-            $this->queryCache->invalidate($index);
-        }
+        $this->indexChanged($index);
 
         if (empty($documents)) {
             return;
@@ -758,10 +779,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore
     public function update(string $index, string $id, array $document): void
     {
         $this->validateIndexName($index);
-        // Invalidate cache for this index when updating
-        if ($this->queryCache) {
-            $this->queryCache->invalidate($index);
-        }
+        $this->indexChanged($index);
 
         $document['id'] = $id;
         $this->insert($index, $document);
@@ -772,10 +790,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore
         $this->validateIndexName($index);
         $this->ensureConnected();
 
-        // Invalidate cache for this index when deleting
-        if ($this->queryCache) {
-            $this->queryCache->invalidate($index);
-        }
+        $this->indexChanged($index);
 
         try {
             $this->connection->beginTransaction();
@@ -844,10 +859,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore
         $this->validateIndexName($index);
         $this->ensureConnected();
 
-        // Invalidate cache for this index
-        if ($this->queryCache) {
-            $this->queryCache->invalidate($index);
-        }
+        $this->indexChanged($index);
 
         $schema = $this->getSchemaMode($index);
         $deletedCount = 0;
@@ -1018,7 +1030,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore
                             $maxD *= 1609.344;
                         }
                     }
-                    $sql .= " AND (" . $distanceExpr . ") <= ?";
+                    $sql .= " AND (" . $distanceExpr . ") <= CAST(? AS REAL)";
                     $params[] = $maxD;
                 }
                 // Apply standard filters
@@ -1038,10 +1050,11 @@ class SqliteStorage implements StorageInterface, CalibrationStore
                     $results = [];
                     while ($row = $stmt->fetch()) {
                         $content = json_decode($row['content'], true);
-                        $results[] = [
+                        // Content fields at the top level, as every other search returns
+                        // them; nested under 'document' the engine found no fields at all
+                        $results[] = array_merge($content ?: [], [
                             'id' => $row['id'],
                             'score' => abs($row['rank'] ?? 0),
-                            'document' => $content,
                             'metadata' => json_decode($row['metadata'], true),
                             'language' => $row['language'],
                             'type' => $row['type'],
@@ -1049,7 +1062,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore
                             'distance' => (float)($row['distance'] ?? 0),
                             'centroid_lat' => $row['_centroid_lat'] ?? null,
                             'centroid_lng' => $row['_centroid_lng'] ?? null,
-                        ];
+                        ]);
                     }
 
                     // Cache the results before returning
@@ -1123,7 +1136,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore
                         $radius *= 1609.344;
                     }
                 }
-                $sql = "SELECT * FROM (" . $inner . ") t WHERE t.distance <= ?";
+                $sql = "SELECT * FROM (" . $inner . ") t WHERE t.distance <= CAST(? AS REAL)";
                 $params[] = $radius;
             } else {
                 $sql = $inner;
@@ -1241,6 +1254,11 @@ class SqliteStorage implements StorageInterface, CalibrationStore
                         $radiusFilter *= 1609.344;
                     }
                 }
+            }
+            // max_distance trims distance-sorted results by the same rule; SQL applies it
+            // when it can compute the distance, this covers the fallback without SQL math
+            if (isset($geoFilters['max_distance']) && !isset($geoFilters['near'])) {
+                $radiusFilter = $this->geoDistanceToMeters((float)$geoFilters['max_distance'], $geoFilters);
             }
 
             $rowCount = 0;
@@ -1397,7 +1415,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore
                         $radius *= 1609.344;
                     }
                 }
-                $sql = "SELECT COUNT(*) as total FROM (" . $inner . ") t WHERE t.distance <= ?";
+                $sql = "SELECT COUNT(*) as total FROM (" . $inner . ") t WHERE t.distance <= CAST(? AS REAL)";
                 $params[] = $radius;
             } else {
                 $sql = "SELECT COUNT(*) as total FROM (" . $inner . ") t";
@@ -1645,6 +1663,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore
             $this->connection->rollBack();
             throw new StorageException("Failed to clear index: " . $e->getMessage());
         }
+        $this->indexChanged($index);
     }
 
     public function searchMultiple(array $indices, array $query): array
@@ -1799,6 +1818,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore
             $this->connection->rollBack();
             throw new StorageException("Failed to store vectors: " . $e->getMessage());
         }
+        $this->indexChanged($index, false);
     }
 
     /**
@@ -2145,6 +2165,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore
         } catch (\PDOException $e) {
             throw new StorageException("Failed to save the calibration: " . $e->getMessage());
         }
+        $this->indexChanged($index, false);
     }
 
     public function deleteCalibration(string $index): void
@@ -2156,6 +2177,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore
         } catch (\PDOException $e) {
             // Table not created yet: nothing to forget.
         }
+        $this->indexChanged($index, false);
     }
 
     public function loadProbeVectors(string $model, string $frame = ''): array
@@ -2472,6 +2494,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore
             }
             $ins->execute($vals);
         }
+        $this->indexChanged($index);
     }
 
     private function getFtsColumns(string $index): array
@@ -2686,6 +2709,50 @@ class SqliteStorage implements StorageInterface, CalibrationStore
         return (int)hexdec($hex);
     }
 
+    /**
+     * Convert a distance from the query's units (or the configured default) to meters
+     */
+    private function geoDistanceToMeters(float $distance, array $geoFilters): float
+    {
+        $units = $geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? null);
+        if (is_string($units)) {
+            $u = strtolower($units);
+            if ($u === 'km') {
+                $distance *= 1000.0;
+            } elseif ($u === 'mi' || $u === 'mile' || $u === 'miles') {
+                $distance *= 1609.344;
+            }
+        }
+        return $distance;
+    }
+
+    /**
+     * SQL and params that keep rows whose stored bounding box touches the given box.
+     * A box that crosses the antimeridian (west greater than east) splits into two
+     * longitude ranges. Every bound goes through CAST(? AS REAL): PDO binds each value as
+     * text, and a text parameter compared with a computed expression (which has no type
+     * affinity) is always greater than any number.
+     *
+     * @return array{0:string,1:array<int,float>}
+     */
+    private function buildBoundsIntersectSql(GeoBounds $bounds): array
+    {
+        $north = $bounds->getNorth();
+        $south = $bounds->getSouth();
+        $east = $bounds->getEast();
+        $west = $bounds->getWest();
+
+        if ($west > $east) {
+            $sql = " AND s.minLat <= CAST(? AS REAL) AND s.maxLat >= CAST(? AS REAL)"
+                . " AND ((s.minLng <= CAST(? AS REAL) AND s.maxLng >= -180) OR (s.minLng <= 180 AND s.maxLng >= CAST(? AS REAL)))";
+        } else {
+            $sql = " AND s.minLat <= CAST(? AS REAL) AND s.maxLat >= CAST(? AS REAL)"
+                . " AND s.minLng <= CAST(? AS REAL) AND s.maxLng >= CAST(? AS REAL)";
+        }
+
+        return [$sql, [$north, $south, $east, $west]];
+    }
+
     private function buildSpatialQuery(string $index, array $geoFilters): array
     {
         $spatialSql = '';
@@ -2699,8 +2766,10 @@ class SqliteStorage implements StorageInterface, CalibrationStore
             return [ 'join' => '', 'where' => '', 'params' => [], 'select' => '' ];
         }
 
-        // JSON-based fallback when R-tree or SQL math functions are unavailable
-        if (!$this->hasRTreeSupport() || !$this->hasMathFunctions) {
+        // Fallback when SQL math functions are unavailable, so the distance cannot be computed in SQL.
+        // A missing R-tree needs no fallback: the plain spatial table has the same columns, so the
+        // queries below run on it as they are and give the same results.
+        if (!$this->hasMathFunctions) {
             $where = '';
             $params = [];
             $select = '';
@@ -2717,43 +2786,20 @@ class SqliteStorage implements StorageInterface, CalibrationStore
             if (isset($geoFilters['near'])) {
                 $near = $geoFilters['near'];
                 $point = is_array($near['point']) ? new GeoPoint($near['point']['lat'], $near['point']['lng']) : $near['point'];
-                $radius = (float)$near['radius'];
-                $units = $geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? null);
-                if (is_string($units)) {
-                    $u = strtolower($units);
-                    if ($u === 'km') {
-                        $radius *= 1000.0;
-                    } elseif (in_array($u, ['mi','mile','miles'])) {
-                        $radius *= 1609.344;
-                    }
-                }
-                // Bounding box approximation with lon scaling by cos(lat)
-                $degLat = $radius / 111000.0;
-                $latRad = deg2rad($point->getLatitude());
-                $cosLat = max(0.000001, cos($latRad));
-                $degLon = $radius / (111000.0 * $cosLat);
-                $where .= " AND ((s.minLat+s.maxLat)/2.0) BETWEEN ? AND ? AND ((s.minLng+s.maxLng)/2.0) BETWEEN ? AND ?";
-                $params[] = $point->getLatitude() - $degLat;
-                $params[] = $point->getLatitude() + $degLat;
-                $params[] = $point->getLongitude() - $degLon;
-                $params[] = $point->getLongitude() + $degLon;
+                $radius = $this->geoDistanceToMeters((float)$near['radius'], $geoFilters);
+                // The enclosing box; the radius test itself runs in PHP on the centroid, since SQL has no math here
+                [$boxSql, $boxParams] = $this->buildBoundsIntersectSql($point->getBoundingBox($radius));
+                $where .= $boxSql;
+                $params = array_merge($params, $boxParams);
             }
 
             if (isset($geoFilters['within'])) {
                 $b = $geoFilters['within']['bounds'];
                 $bounds = is_array($b) ? GeoBounds::fromArray($b) : $b;
-                $north = $bounds->getNorth();
-                $south = $bounds->getSouth();
-                $east = $bounds->getEast();
-                $west = $bounds->getWest();
                 // Intersection test using stored bbox
-                if ($west > $east) {
-                    $where .= " AND ((s.maxLat >= ? AND s.minLat <= ?) AND ((s.minLng <= ? AND s.maxLng >= -180) OR (s.minLng <= 180 AND s.maxLng >= ?)))";
-                    array_push($params, $south, $north, $east, $west);
-                } else {
-                    $where .= " AND (s.maxLat >= ? AND s.minLat <= ? AND s.maxLng >= ? AND s.minLng <= ?)";
-                    array_push($params, $south, $north, $east, $west);
-                }
+                [$boxSql, $boxParams] = $this->buildBoundsIntersectSql($bounds);
+                $where .= $boxSql;
+                $params = array_merge($params, $boxParams);
             }
 
             if (isset($geoFilters['distance_sort']) && isset($geoFilters['distance_sort']['from'])) {
@@ -2761,24 +2807,12 @@ class SqliteStorage implements StorageInterface, CalibrationStore
                 if (is_array($from)) {
                     $from = new GeoPoint($from['lat'], $from['lng']);
                 }
-                // Centroid already selected
+                // Centroid already selected; the box narrows the rows and search() trims by distance in PHP
                 if (isset($geoFilters['max_distance'])) {
-                    $maxD = (float)$geoFilters['max_distance'];
-                    $u = strtolower($geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? 'm'));
-                    if ($u === 'km') {
-                        $maxD *= 1000.0;
-                    } elseif (in_array($u, ['mi','mile','miles'])) {
-                        $maxD *= 1609.344;
-                    }
-                    $degLat = $maxD / 111000.0;
-                    $latRad = deg2rad($from->getLatitude());
-                    $cosLat = max(0.000001, cos($latRad));
-                    $degLon = $maxD / (111000.0 * $cosLat);
-                    $where .= " AND ((s.minLat+s.maxLat)/2.0) BETWEEN ? AND ? AND ((s.minLng+s.maxLng)/2.0) BETWEEN ? AND ?";
-                    $params[] = $from->getLatitude() - $degLat;
-                    $params[] = $from->getLatitude() + $degLat;
-                    $params[] = $from->getLongitude() - $degLon;
-                    $params[] = $from->getLongitude() + $degLon;
+                    $maxD = $this->geoDistanceToMeters((float)$geoFilters['max_distance'], $geoFilters);
+                    [$boxSql, $boxParams] = $this->buildBoundsIntersectSql($from->getBoundingBox($maxD));
+                    $where .= $boxSql;
+                    $params = array_merge($params, $boxParams);
                 }
             }
 
@@ -2821,7 +2855,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore
                         $maxD *= 1609.344;
                     }
                 }
-                $spatialSql .= " AND (" . $this->getDistanceExpression($lat, $lng) . ") <= ?";
+                $spatialSql .= " AND (" . $this->getDistanceExpression($lat, $lng) . ") <= CAST(? AS REAL)";
                 $spatialParams[] = $maxD;
             }
         }
@@ -2829,17 +2863,8 @@ class SqliteStorage implements StorageInterface, CalibrationStore
         if (isset($geoFilters['near'])) {
             $near = $geoFilters['near'];
             $point = is_array($near['point']) ? new GeoPoint($near['point']['lat'], $near['point']['lng']) : $near['point'];
-            $radius = (float)$near['radius'];
             // Units: default meters; support 'km' and 'mi' via per-query or config
-            $units = $geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? null);
-            if (is_string($units)) {
-                $u = strtolower($units);
-                if ($u === 'km') {
-                    $radius *= 1000.0;
-                } elseif ($u === 'mi' || $u === 'mile' || $u === 'miles') {
-                    $radius *= 1609.344;
-                }
-            }
+            $radius = $this->geoDistanceToMeters((float)$near['radius'], $geoFilters);
 
             // Calculate bounding box for initial R-tree filtering
             $bounds = $point->getBoundingBox($radius);
@@ -2851,20 +2876,8 @@ class SqliteStorage implements StorageInterface, CalibrationStore
                 $spatialJoin = " INNER JOIN {$index}_id_map m ON m.string_id = d.id INNER JOIN {$index}_spatial s ON s.id = m.numeric_id";
             }
 
-            // R-tree bounding box filter with dateline handling
-            $north = $bounds->getNorth();
-            $south = $bounds->getSouth();
-            $east = $bounds->getEast();
-            $west = $bounds->getWest();
-
-            if ($west > $east) {
-                // Crosses the antimeridian: split into two longitude ranges
-                $spatialSql = " AND s.minLat <= ? AND s.maxLat >= ? AND ((s.minLng <= ? AND s.maxLng >= -180) OR (s.minLng <= 180 AND s.maxLng >= ?))";
-                $spatialParams = [$north, $south, $east, $west];
-            } else {
-                $spatialSql = " AND s.minLat <= ? AND s.maxLat >= ? AND s.minLng <= ? AND s.maxLng >= ?";
-                $spatialParams = [$north, $south, $east, $west];
-            }
+            // Bounding box filter (an R-tree search when available), split in two across the antimeridian
+            [$spatialSql, $spatialParams] = $this->buildBoundsIntersectSql($bounds);
 
             // Add distance calculation for post-filtering and sorting
             $lat = $point->getLatitude();
@@ -2873,7 +2886,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore
             $distanceSelect = ", " . $distanceExpr . " as distance";
             $centroidSelect = ", ((s.minLat+s.maxLat)/2.0) AS _centroid_lat, ((s.minLng+s.maxLng)/2.0) AS _centroid_lng";
             // Also filter by radius in SQL
-            $spatialSql .= " AND (" . $distanceExpr . ") <= ?";
+            $spatialSql .= " AND (" . $distanceExpr . ") <= CAST(? AS REAL)";
             $spatialParams[] = (float)$radius; // radius expected in meters
         } elseif (isset($geoFilters['within'])) {
             $boundsData = $geoFilters['within']['bounds'];
@@ -2887,18 +2900,11 @@ class SqliteStorage implements StorageInterface, CalibrationStore
             }
             $centroidSelect = ", ((s.minLat+s.maxLat)/2.0) AS _centroid_lat, ((s.minLng+s.maxLng)/2.0) AS _centroid_lng";
 
-            // R-tree intersection query with dateline handling
-            $north = $bounds->getNorth();
-            $south = $bounds->getSouth();
-            $east = $bounds->getEast();
-            $west = $bounds->getWest();
-            if ($west > $east) {
-                $spatialSql = " AND s.minLat <= ? AND s.maxLat >= ? AND ((s.minLng <= ? AND s.maxLng >= -180) OR (s.minLng <= 180 AND s.maxLng >= ?))";
-                $spatialParams = [$north, $south, $east, $west];
-            } else {
-                $spatialSql = " AND s.minLat <= ? AND s.maxLat >= ? AND s.minLng <= ? AND s.maxLng >= ?";
-                $spatialParams = [$north, $south, $east, $west];
-            }
+            // Bounding box intersection (an R-tree search when available), split in two across the antimeridian.
+            // Appended, so a max_distance clause from a distance sort stays in force.
+            [$boxSql, $boxParams] = $this->buildBoundsIntersectSql($bounds);
+            $spatialSql .= $boxSql;
+            $spatialParams = array_merge($spatialParams, $boxParams);
         }
 
         return [

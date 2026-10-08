@@ -396,25 +396,46 @@ class YetiSearch
         if (isset($options['geoFilters'])) {
             $geo = $options['geoFilters'];
 
+            // Units go to the query as they are, and the storage converts once. A
+            // per-near 'units' wins over the filter's top-level 'units'.
+            $units = $geo['near']['units'] ?? ($geo['units'] ?? null);
+
             if (isset($geo['near'])) {
                 $point = new \YetiSearch\Geo\GeoPoint($geo['near']['point']['lat'], $geo['near']['point']['lng']);
                 $radius = $geo['near']['radius'] ?? 1000;
-                $units = $geo['near']['units'] ?? 'm';
-
-                // Convert to meters if needed
-                if ($units === 'km') {
-                    $radius *= 1000;
-                } elseif ($units === 'mi' || $units === 'mile' || $units === 'miles') {
-                    $radius *= 1609.344;
-                }
-
-                $searchQuery->near($point, $radius);
+                $searchQuery->near($point, (float)$radius);
             }
 
-            if (isset($geo['distance_sort'])) {
-                $from = new \YetiSearch\Geo\GeoPoint($geo['distance_sort']['from']['lat'], $geo['distance_sort']['from']['lng']);
-                $direction = $geo['distance_sort']['direction'] ?? 'asc';
-                $searchQuery->sortByDistance($from, $direction);
+            if (isset($geo['within'])) {
+                // ['bounds' => [...]], a GeoBounds, or the bounds array itself
+                $bounds = $geo['within']['bounds'] ?? $geo['within'];
+                if (is_array($bounds)) {
+                    $bounds = \YetiSearch\Geo\GeoBounds::fromArray($bounds);
+                }
+                $searchQuery->within($bounds);
+            }
+
+            // k-nearest takes its point from nearest['from'] or else from distance_sort
+            $nearestFrom = is_array($geo['nearest'] ?? null) ? ($geo['nearest']['from'] ?? null) : null;
+            $sortFrom = $geo['distance_sort']['from'] ?? $nearestFrom;
+            if ($sortFrom !== null) {
+                if (is_array($sortFrom)) {
+                    $sortFrom = new \YetiSearch\Geo\GeoPoint($sortFrom['lat'], $sortFrom['lng']);
+                }
+                $searchQuery->sortByDistance($sortFrom, $geo['distance_sort']['direction'] ?? 'asc');
+            }
+
+            if (isset($geo['nearest'])) {
+                $k = is_array($geo['nearest']) ? ($geo['nearest']['k'] ?? 10) : $geo['nearest'];
+                $searchQuery->nearest((int)$k);
+            }
+
+            if (isset($geo['max_distance'])) {
+                $searchQuery->maxDistance((float)$geo['max_distance']);
+            }
+
+            if ($units !== null) {
+                $searchQuery->geoUnits((string)$units);
             }
         }
 
@@ -662,7 +683,8 @@ class YetiSearch
     }
 
     /**
-     * Clear all caches
+     * Clear all caches: the storage's query cache and the results each
+     * search engine holds in memory.
      */
     public function clearCache(): void
     {
@@ -672,6 +694,10 @@ class YetiSearch
 
         if ($this->cacheManager) {
             $this->cacheManager->clearAll();
+        }
+
+        foreach ($this->searchEngines as $engine) {
+            $engine->clearResultCache();
         }
     }
 

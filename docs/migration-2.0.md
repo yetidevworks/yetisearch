@@ -4,7 +4,7 @@ This release focuses on stability, performance, and clearer defaults. Most apps 
 
 ## Highlights
 - External-content schema is the default (FTS5 with `content='<index>'`, `content_rowid='doc_id'`). Legacy mode remains supported.
-- Windows-friendly geo fallback: when SQLite lacks RTree, geo is stored in metadata (`_geo`, `_geo_bounds`) and distance/near work via JSON expressions.
+- Windows-friendly geo fallback: when SQLite lacks RTree, geo is kept in a plain `<index>_spatial` table (and copied into metadata as `_geo`, `_geo_bounds`) and `near()`, `within()`, `sortByDistance()` and distance facets still work. See [Without R-Tree](../README.md#without-r-tree) for what differs.
 - No FTS5 triggers: indexing sync remains explicit in code for performance and flexibility. See Architecture notes.
 
 ## Behavior Changes
