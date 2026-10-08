@@ -1,6 +1,6 @@
 # Changelog
 
-## [2.5.5] - 2026-10-07
+## [2.5.5] - 2026-10-08
 
 ### Bug Fixes
 - **k-NN failed on SQLite without math functions**: `nearest` always measured distance in SQL, and the expression meant for SQLite without math functions used `SQRT`, `POWER` and `COS`, which are math functions too. Since 2.5.4 passes `nearest` through `YetiSearch::search()`, the README's k-NN example threw `no such function` on such builds, the Windows builds of PHP among them. Without math functions, `nearest` now narrows the rows to the box around `max_distance` in SQL and measures, sorts and takes the k nearest in PHP.
