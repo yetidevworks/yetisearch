@@ -72,7 +72,7 @@ A powerful, pure-PHP search engine library with advanced full-text search capabi
 - 🔤 **Advanced fuzzy matching** with automatic typo correction and multi-algorithm consensus scoring (Trigram, Jaro-Winkler, Levenshtein, Phonetic, Keyboard Proximity)
 - 🎯 **Enhanced multi-word matching** for more accurate search results
 - 🏆 **Smart result ranking** prioritizing exact matches over fuzzy matches
-- 📈 **Faceted search** and aggregations support
+- 📈 **Faceted search**: value, numeric range and distance facets
 - 📍 **Geo-spatial search** with R-tree indexing for location-based queries
 - 🚀 **Zero dependencies** except PHP extensions and small utility packages
 - 💾 **Persistent storage** with automatic database management
@@ -354,7 +354,7 @@ $results = $search->search('products', 'book', [
         'category' => ['limit' => 10],
         'brand' => ['limit' => 5],
         'price_range' => [
-            'type' => 'range',
+            'field' => 'price',
             'ranges' => [
                 ['to' => 20],
                 ['from' => 20, 'to' => 50],
@@ -1540,37 +1540,42 @@ The flag is stored as `_meaning_only` in the document's metadata, is inherited b
 
 ### Faceted Search
 
-Get aggregated counts for categories, tags, etc:
+Get counts for categories, tags, price bands, etc:
 
 ```php
 $results = $search->search('products', 'laptop', [
     'facets' => [
         'brand' => ['limit' => 10],
-        'category' => ['limit' => 5],
-        'price' => [
-            'type' => 'range',
+        'tags' => ['limit' => 5],
+        'price_band' => [
+            'field' => 'price',
             'ranges' => [
                 ['to' => 500, 'key' => 'budget'],
                 ['from' => 500, 'to' => 1000, 'key' => 'mid-range'],
                 ['from' => 1000, 'key' => 'premium']
             ]
         ]
-    ],
-    'aggregations' => [
-        'avg_price' => ['type' => 'avg', 'field' => 'price'],
-        'max_price' => ['type' => 'max', 'field' => 'price'],
-        'min_price' => ['type' => 'min', 'field' => 'price']
     ]
 ]);
 
-// Display facets
+// Value facets, most common first
 foreach ($results['facets']['brand'] as $brand) {
     echo "{$brand['value']}: {$brand['count']} products\n";
 }
 
-// Display aggregations
-echo "Average price: $" . $results['aggregations']['avg_price'] . "\n";
+// Range facets, in the order the ranges were given
+foreach ($results['facets']['price_band'] as $band) {
+    echo "{$band['value']}: {$band['count']} products\n";   // budget: 12 products
+}
 ```
+
+A facet counts a content field or a metadata field of the matching documents. Its name is the key it comes back under, and `field` counts a different field than the name (`price_band` above counts `price`).
+
+- **Value facets** (no `ranges`) return `['value' => ..., 'count' => ...]` for each distinct value, most common first, up to `limit` (default 10). A field holding a list, such as tags, counts each of its values once per document. Values seen fewer than `facet_min_count` times (search config, default 1) are left out.
+- **Range facets** (`ranges`, optionally with `'type' => 'range'`) count numeric values into buckets. Each range has a `from` (inclusive), a `to` (exclusive) or both, so `['to' => 500]` and `['from' => 500]` never count the same price twice. A bucket comes back as `['value' => ..., 'count' => ..., 'from' => ..., 'to' => ...]`, where `value` is the range's `key`, or a label such as `< 500`, `500 - 1000` or `>= 1000` without one. Every bucket comes back, in the order given, empty ones included. Numeric strings count as numbers, and a document with a list of numbers counts once in each bucket one of them falls in. A range without a numeric `from` or `to` is left out and logged as a warning.
+- **Distance facets** bucket results by distance from a point; see [Geo Search](#geo-search).
+
+Facets are counted over the first 1,000 matching documents. When no matching document has the facet's field at all, the search logs a notice naming the field, which usually means a misspelled field or a missing `field` option.
 
 ## Architecture
 

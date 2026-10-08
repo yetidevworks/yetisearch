@@ -451,6 +451,7 @@ $results = $builder->query('wireless headphones')
     ->fields(['name', 'price', 'brand', 'rating', 'image_url'])
     ->facet('brand')
     ->facet('price_range', [
+        'field' => 'price',
         'ranges' => [
             ['to' => 100],
             ['from' => 100, 'to' => 200],

@@ -381,6 +381,16 @@ class YetiSearch
         if (isset($options['bypass_cache'])) {
             $searchQuery->setOptions(['bypass_cache' => $options['bypass_cache']]);
         }
+        if (isset($options['facets']) && is_array($options['facets'])) {
+            foreach ($options['facets'] as $facet => $facetOptions) {
+                // ['brand', 'category'] asks for those facets with their defaults
+                if (is_int($facet) && is_string($facetOptions)) {
+                    $searchQuery->facet($facetOptions);
+                } elseif (is_string($facet)) {
+                    $searchQuery->facet($facet, is_array($facetOptions) ? $facetOptions : []);
+                }
+            }
+        }
 
         // Handle geo filters
         if (isset($options['geoFilters'])) {

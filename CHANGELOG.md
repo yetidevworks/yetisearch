@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.5.3] - 2026-10-07
+
+### Bug Fixes
+- **Range facets work on any numeric field** ([#46](https://github.com/yetidevworks/yetisearch/issues/46)): `ranges` was only read by the `distance` facet, so the range facets in the README and `docs/DSL.md` counted distinct values of a field named after the facet and came back empty without a word. A facet with `ranges` now counts numbers into buckets: each range has a `from` (inclusive), a `to` (exclusive) or both, and an optional `key` to label it. Buckets come back in the order given, empty ones included, as `value`, `count`, `from` and `to`. A new `field` option lets a facet named `price_range` count `price`, numeric strings count as numbers, a list of numbers counts once per bucket, and a range without a numeric bound is left out and logged as a warning.
+- **`YetiSearch::search()` dropped the `facets` option**: The facade never handed `facets` to the query, so every facet requested through it, including the distance facets in the README, came back as an empty list. It now does, and also takes a plain list of fields (`'facets' => ['brand', 'tags']`).
+- **Facets on a list field failed the whole search**: A facet on a metadata field holding a list, such as tags, threw a `TypeError` that no catch stopped. Each value in the list now counts once per document.
+- **Float facet values were cut to integers**: A facet on a rating of 4.5 came back as 4, with a PHP 8.1+ deprecation notice for every row. Float values now come back as they are, and the distance facet no longer puts a 1.5 km threshold in the same bucket as 1 km.
+- **A facet with nothing to count says so**: When no matching document has a facet's field, the search logs a notice naming the field, and a distance facet without a `from` point or `ranges` logs a warning instead of disappearing.
+
+### Tests
+- `tests/Integration/Search/FacetsTest.php` covers range facets in both schemas (bounds, keys, labels, empty buckets, a facet named after its field, numeric strings, lists of numbers), unusable ranges and the notice for a missing field, float and list values in value facets, and facets passed through `YetiSearch::search()`. The distance facet test now checks its buckets, with a 1.5 km threshold.
+
 ## [2.5.2] - 2026-10-06
 
 ### Bug Fixes

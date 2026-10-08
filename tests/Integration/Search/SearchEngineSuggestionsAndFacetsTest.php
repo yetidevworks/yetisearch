@@ -36,13 +36,13 @@ class SearchEngineSuggestionsAndFacetsTest extends TestCase
         $texts = array_map(fn($s) => $s['text'] ?? '', $suggestions);
         $this->assertIsArray($suggestions);
 
-        // Distance facets with 1km and 5km buckets
+        // Distance facets with 1km, 1.5km and 5km buckets
         $res = $search->search($index, '', [
             'limit' => 100,
             'facets' => [
                 'distance' => [
                     'from' => ['lat' => 37.7749, 'lng' => -122.4194],
-                    'ranges' => [1, 5],
+                    'ranges' => [1, 1.5, 5],
                     'units' => 'km'
                 ]
             ],
@@ -54,6 +54,11 @@ class SearchEngineSuggestionsAndFacetsTest extends TestCase
             ]
         ]);
         $this->assertArrayHasKey('facets', $res);
-        $this->assertIsArray($res['facets']);
+        // s1 is at the point, s2 about 1.4 km away and d1 about 4.2 km
+        $this->assertSame([
+            ['value' => '<= 1 km', 'count' => 1],
+            ['value' => '<= 1.5 km', 'count' => 1],
+            ['value' => '<= 5 km', 'count' => 1],
+        ], $res['facets']['distance']);
     }
 }

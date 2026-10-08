@@ -1430,19 +1430,21 @@ class SearchEngine implements SearchEngineInterface
     {
         $facets = [];
 
-        foreach ($query->getFacets() as $field => $options) {
+        foreach ($query->getFacets() as $name => $options) {
             // Distance facet: bucket results by distance thresholds from a point
-            if ($field === 'distance') {
+            if ($name === 'distance') {
                 $from = $options['from'] ?? null;
                 if ($from instanceof \YetiSearch\Geo\GeoPoint) {
                     $fromArr = $from->toArray();
                 } elseif (is_array($from) && isset($from['lat'], $from['lng'])) {
                     $fromArr = ['lat' => (float)$from['lat'],'lng' => (float)$from['lng']];
                 } else {
+                    $this->logger->warning('Distance facet skipped: it needs a from point with lat and lng');
                     continue;
                 }
                 $ranges = $options['ranges'] ?? [];
                 if (empty($ranges) || !is_array($ranges)) {
+                    $this->logger->warning('Distance facet skipped: it needs a list of distance thresholds in ranges');
                     continue;
                 }
                 $units = strtolower($options['units'] ?? ($this->config['geo_units'] ?? 'm'));
@@ -1465,32 +1467,32 @@ class SearchEngine implements SearchEngineInterface
                 ];
                 try {
                     $results = $this->storage->search($this->indexName, $facetQuery);
-                    $buckets = [];
-                    foreach ($ranges as $r) {
-                        $buckets[(float)$r] = 0;
-                    }
-                    $buckets[INF] = 0;
+                    // Counted by position: a float array key would be cut to
+                    // an int, putting 1.5 km in the 1 km bucket.
+                    $ranges = array_values($ranges);
+                    $counts = array_fill(0, count($ranges), 0);
+                    $beyond = 0;
                     foreach ($results as $row) {
                         $dist = (float)($row['distance'] ?? 0.0);
                         $dUnits = $dist / $factor;
                         $placed = false;
-                        foreach ($ranges as $r) {
+                        foreach ($ranges as $i => $r) {
                             if ($dUnits <= (float)$r) {
-                                $buckets[(float)$r]++;
+                                $counts[$i]++;
                                 $placed = true;
                                 break;
                             }
                         }
                         if (!$placed) {
-                            $buckets[INF]++;
+                            $beyond++;
                         }
                     }
                     $facetResults = [];
-                    foreach ($ranges as $r) {
-                        $facetResults[] = ['value' => sprintf('<= %s %s', $r, $units), 'count' => $buckets[(float)$r] ?? 0];
+                    foreach ($ranges as $i => $r) {
+                        $facetResults[] = ['value' => sprintf('<= %s %s', $r, $units), 'count' => $counts[$i]];
                     }
-                    if (($buckets[INF] ?? 0) > 0) {
-                        $facetResults[] = ['value' => sprintf('> %s %s', end($ranges), $units), 'count' => $buckets[INF]];
+                    if ($beyond > 0) {
+                        $facetResults[] = ['value' => sprintf('> %s %s', end($ranges), $units), 'count' => $beyond];
                     }
                     $facets['distance'] = $facetResults;
                 } catch (\Exception $e) {
@@ -1498,6 +1500,24 @@ class SearchEngine implements SearchEngineInterface
                 }
                 continue;
             }
+
+            // The facet's name is the key it comes back under; 'field' lets a
+            // facet named price_range count the price field.
+            $field = $options['field'] ?? $name;
+            if (!is_string($field) || $field === '') {
+                $this->logger->warning('Facet skipped: field must be a field name', ['facet' => $name]);
+                continue;
+            }
+
+            $buckets = null;
+            if (array_key_exists('ranges', $options) || ($options['type'] ?? null) === 'range') {
+                $buckets = $this->facetRangeBuckets($name, $options['ranges'] ?? null);
+                if ($buckets === []) {
+                    $facets[$name] = [];
+                    continue;
+                }
+            }
+
             $facetQuery = [
                 'query' => $query->getQuery(),
                 'filters' => $query->getFilters(),
@@ -1510,24 +1530,49 @@ class SearchEngine implements SearchEngineInterface
                     'offset' => 0
                 ]));
 
+                // A misspelled field, or a facet named after a field no
+                // document has, would otherwise come back empty unexplained.
+                if ($results !== [] && !$this->rowsHaveField($results, $field)) {
+                    $this->logger->notice('Facet field has no value in any matching document', [
+                        'facet' => $name,
+                        'field' => $field,
+                    ]);
+                }
+
+                if ($buckets !== null) {
+                    $facets[$name] = $this->countFacetRanges($results, $field, $buckets);
+                    continue;
+                }
+
                 $facetValues = [];
                 foreach ($results as $result) {
-                    // Extract value from content fields or metadata
+                    // Extract value from content fields or metadata. A list
+                    // (tags, categories) counts each of its values once.
                     $value = $result[$field] ?? ($result['metadata'][$field] ?? null);
-                    if ($value !== null) {
-                        if (!isset($facetValues[$value])) {
-                            $facetValues[$value] = 0;
+                    $seen = [];
+                    foreach (is_array($value) ? $value : [$value] as $item) {
+                        if ($item === null || !is_scalar($item)) {
+                            continue;
                         }
-                        $facetValues[$value]++;
+                        // A float as an array key would be cut to an int (4.5 to 4)
+                        $key = is_float($item) ? (string)$item : $item;
+                        if (isset($seen[$key])) {
+                            continue;
+                        }
+                        $seen[$key] = true;
+                        if (!isset($facetValues[$key])) {
+                            $facetValues[$key] = ['value' => $item, 'count' => 0];
+                        }
+                        $facetValues[$key]['count']++;
                     }
                 }
 
                 $facetResults = [];
-                foreach ($facetValues as $value => $count) {
-                    if ($count >= $this->config['facet_min_count']) {
+                foreach ($facetValues as $key => $entry) {
+                    if ($entry['count'] >= $this->config['facet_min_count']) {
                         $facetResults[] = [
-                            'value' => $value,
-                            'count' => $count
+                            'value' => is_float($entry['value']) ? $entry['value'] : $key,
+                            'count' => $entry['count']
                         ];
                     }
                 }
@@ -1536,9 +1581,10 @@ class SearchEngine implements SearchEngineInterface
                     return $b['count'] <=> $a['count'];
                 });
 
-                $facets[$field] = array_slice($facetResults, 0, $options['limit'] ?? 10);
+                $facets[$name] = array_slice($facetResults, 0, $options['limit'] ?? 10);
             } catch (\Exception $e) {
                 $this->logger->warning('Failed to compute facet', [
+                    'facet' => $name,
                     'field' => $field,
                     'error' => $e->getMessage()
                 ]);
@@ -1546,6 +1592,109 @@ class SearchEngine implements SearchEngineInterface
         }
 
         return $facets;
+    }
+
+    /**
+     * The buckets of a range facet, from its 'ranges' option: each range has
+     * a numeric 'from' (inclusive) and/or 'to' (exclusive) and an optional
+     * 'key' to label it. A range the engine cannot use is left out and logged.
+     *
+     * @param mixed $ranges
+     * @return array<int, array{key: string, from: int|float|null, to: int|float|null}>
+     */
+    private function facetRangeBuckets(string $name, $ranges): array
+    {
+        if (!is_array($ranges) || $ranges === []) {
+            $this->logger->warning('Range facet skipped: ranges must be a list of ranges', ['facet' => $name]);
+            return [];
+        }
+
+        $buckets = [];
+        foreach ($ranges as $range) {
+            $from = is_array($range) ? ($range['from'] ?? null) : null;
+            $to = is_array($range) ? ($range['to'] ?? null) : null;
+            if (($from === null && $to === null)
+                || ($from !== null && !is_numeric($from))
+                || ($to !== null && !is_numeric($to))
+            ) {
+                $this->logger->warning('Facet range ignored: a range needs a numeric from, to, or both', [
+                    'facet' => $name,
+                    'range' => $range,
+                ]);
+                continue;
+            }
+
+            $from = $from === null ? null : $from + 0;
+            $to = $to === null ? null : $to + 0;
+            if (isset($range['key']) && is_scalar($range['key'])) {
+                $key = (string)$range['key'];
+            } elseif ($from === null) {
+                $key = '< ' . $to;
+            } elseif ($to === null) {
+                $key = '>= ' . $from;
+            } else {
+                $key = $from . ' - ' . $to;
+            }
+
+            $buckets[] = ['key' => $key, 'from' => $from, 'to' => $to];
+        }
+
+        return $buckets;
+    }
+
+    private function rowsHaveField(array $rows, string $field): bool
+    {
+        foreach ($rows as $row) {
+            if (($row[$field] ?? ($row['metadata'][$field] ?? null)) !== null) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Count the rows whose numeric field value falls in each range bucket.
+     * Buckets come back in the order they were given, empty ones included.
+     * A row with a list of numbers counts once in each bucket one of them
+     * falls in.
+     */
+    private function countFacetRanges(array $rows, string $field, array $buckets): array
+    {
+        $counts = array_fill(0, count($buckets), 0);
+
+        foreach ($rows as $row) {
+            $value = $row[$field] ?? ($row['metadata'][$field] ?? null);
+            $numbers = [];
+            foreach (is_array($value) ? $value : [$value] as $item) {
+                if (is_numeric($item)) {
+                    $numbers[] = $item + 0;
+                }
+            }
+
+            foreach ($buckets as $i => $bucket) {
+                foreach ($numbers as $number) {
+                    if (($bucket['from'] === null || $number >= $bucket['from'])
+                        && ($bucket['to'] === null || $number < $bucket['to'])
+                    ) {
+                        $counts[$i]++;
+                        break;
+                    }
+                }
+            }
+        }
+
+        $facetResults = [];
+        foreach ($buckets as $i => $bucket) {
+            $facetResults[] = [
+                'value' => $bucket['key'],
+                'count' => $counts[$i],
+                'from' => $bucket['from'],
+                'to' => $bucket['to'],
+            ];
+        }
+
+        return $facetResults;
     }
 
     private function computeAggregations(SearchQuery $query): array
