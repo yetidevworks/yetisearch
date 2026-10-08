@@ -1495,7 +1495,50 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             'language' => $row['language'],
             'type' => $row['type'],
             'timestamp' => $row['timestamp']
-        ];
+        ] + $this->storedLocation($index, $row);
+    }
+
+    /**
+     * The location a document was indexed with, as the `geo` or `geo_bounds` it would be
+     * indexed with again, so a caller that edits a document and writes it back keeps it.
+     * R-Tree stores 32-bit floats and widens a point into a box about a meter across, so a
+     * box that small comes back as its center point, rounded to 6 decimals (about 0.1 m).
+     *
+     * @param array<string, mixed> $row The document's row
+     * @return array{geo?: array{lat: float, lng: float}, geo_bounds?: array{north: float, south: float, east: float, west: float}}
+     */
+    private function storedLocation(string $index, array $row): array
+    {
+        if (!$this->isSpatialEnabled($index)) {
+            return [];
+        }
+        try {
+            if (!$this->hasSpatialRows($index)) {
+                return [];
+            }
+            $spatialId = isset($row['doc_id']) ? (int)$row['doc_id'] : $this->getNumericId((string)$row['id']);
+            $stmt = $this->connection->prepare("SELECT minLat, maxLat, minLng, maxLng FROM {$index}_spatial WHERE id = ?");
+            $stmt->execute([$spatialId]);
+            $box = $stmt->fetch(\PDO::FETCH_ASSOC);
+        } catch (\PDOException $e) {
+            return [];
+        }
+        if (!$box) {
+            return [];
+        }
+
+        $minLat = (float)$box['minLat'];
+        $maxLat = (float)$box['maxLat'];
+        $minLng = (float)$box['minLng'];
+        $maxLng = (float)$box['maxLng'];
+        if ($maxLat - $minLat < 0.00001 && $maxLng - $minLng < 0.00001) {
+            return ['geo' => [
+                'lat' => round(($minLat + $maxLat) / 2, 6),
+                'lng' => round(($minLng + $maxLng) / 2, 6),
+            ]];
+        }
+
+        return ['geo_bounds' => ['north' => $maxLat, 'south' => $minLat, 'east' => $maxLng, 'west' => $minLng]];
     }
 
     public function optimize(string $index): void

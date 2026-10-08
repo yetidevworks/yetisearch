@@ -450,6 +450,57 @@ class GeoFallbackTest extends TestCase
     /**
      * @dataProvider modesWithoutSqlMath
      */
+    public function test_get_document_returns_the_stored_location(bool $external, string $mode): void
+    {
+        [$search] = $this->build($external, $mode);
+        $storage = $this->storageOf($search);
+
+        $center = $storage->getDocument(self::INDEX, 'p_center');
+        $this->assertEqualsWithDelta(self::CENTER_LAT, $center['geo']['lat'], 0.000001);
+        $this->assertEqualsWithDelta(self::CENTER_LNG, $center['geo']['lng'], 0.000001);
+        $this->assertArrayNotHasKey('geo_bounds', $center);
+
+        $region = $storage->getDocument(self::INDEX, 'region_bounds');
+        $this->assertArrayNotHasKey('geo', $region);
+        $this->assertEqualsWithDelta(self::CENTER_LAT + 0.04, $region['geo_bounds']['north'], 0.0001);
+        $this->assertEqualsWithDelta(self::CENTER_LNG - 0.02, $region['geo_bounds']['west'], 0.0001);
+
+        $this->assertArrayNotHasKey('geo', $storage->getDocument(self::INDEX, 'no_geo'));
+
+        // Writing a fetched document back keeps its place
+        $search->index(self::INDEX, $storage->getDocument(self::INDEX, 'p_north_5km'));
+        $near = ['geoFilters' => ['near' => ['point' => $this->centerArray(), 'radius' => self::RADIUS]], 'limit' => 50];
+        $this->assertContains('p_north_5km', $this->ids($search->search(self::INDEX, 'coffee', $near)['results']));
+    }
+
+    /**
+     * @dataProvider modesWithoutSqlMath
+     */
+    public function test_distance_sort_keeps_its_order_when_results_are_deduplicated(bool $external, string $mode): void
+    {
+        // With routes, unique_by_route groups the results; the corner documents rank first by text
+        $docs = array_map(function (array $doc) {
+            $doc['content']['route'] = '/places/' . $doc['id'];
+            return $doc;
+        }, $this->placeDocs());
+        [$search] = $this->build($external, $mode, $docs);
+
+        $expected = ['p_center', 'region_bounds', 'p_north_5km', 'p_east_9km', 'p_north_11km', 'p_corner_sw'];
+        $sorted = ['distance_sort' => ['from' => $this->centerArray(), 'direction' => 'asc']];
+        $all = $search->search(self::INDEX, 'coffee', ['unique_by_route' => true, 'limit' => 6, 'geoFilters' => $sorted]);
+        $this->assertSame($expected, $this->ids($all['results']));
+
+        $paged = [];
+        for ($offset = 0; $offset < 6; $offset += 2) {
+            $page = $search->search(self::INDEX, 'coffee', ['unique_by_route' => true, 'limit' => 2, 'offset' => $offset, 'geoFilters' => $sorted]);
+            $paged = array_merge($paged, $this->ids($page['results']));
+        }
+        $this->assertSame($expected, $paged);
+    }
+
+    /**
+     * @dataProvider modesWithoutSqlMath
+     */
     public function test_max_distance_clamps_nearest_at_the_storage(bool $external, string $mode): void
     {
         [$search] = $this->build($external, $mode);

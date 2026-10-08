@@ -278,7 +278,7 @@ class SearchEngine implements SearchEngineInterface
             // Apply unique_by_route if requested
             if ($options['unique_by_route'] ?? false) {
                 $this->logger->debug('Applying deduplication', ['unique_by_route' => true]);
-                $searchResults = $this->deduplicateByRoute($searchResults);
+                $searchResults = $this->deduplicateByRoute($searchResults, $this->hasRequestedOrder($query));
                 // Update total count after deduplication
                 $totalCount = count($searchResults);
 
@@ -1361,16 +1361,32 @@ class SearchEngine implements SearchEngineInterface
         return $highlighted;
     }
 
-    private function deduplicateByRoute(array $results): array
+    /**
+     * Whether the query asks for an order of its own (a distance sort or sortBy), which
+     * deduplication must keep instead of ranking by score.
+     */
+    private function hasRequestedOrder(SearchQuery $query): bool
+    {
+        return !empty($query->getSort()) || isset($query->getGeoFilters()['distance_sort']);
+    }
+
+    /**
+     * @param bool $keepOrder Keep each route where it first appears in $results (for a
+     *                        query that sorts by distance or a field) instead of ranking
+     *                        the routes by their composite score
+     */
+    private function deduplicateByRoute(array $results, bool $keepOrder = false): array
     {
         // Aggregate all chunk scores per route and rank by the composite score
         $routeAgg = [];
         $noRoute = [];
+        $position = 0;
 
         foreach ($results as $result) {
+            $position++;
             $route = (string)$result->get('route', '');
             if ($route === '') {
-                $noRoute[] = $result;
+                $noRoute[] = ['result' => $result, 'position' => $position];
                 continue;
             }
             if (!isset($routeAgg[$route])) {
@@ -1379,6 +1395,7 @@ class SearchEngine implements SearchEngineInterface
                     'count' => 0,
                     'best' => $result,
                     'bestScore' => $result->getScore(),
+                    'position' => $position,
                 ];
             }
             $routeAgg[$route]['sum'] += (float)$result->getScore();
@@ -1390,6 +1407,7 @@ class SearchEngine implements SearchEngineInterface
         }
 
         $deduplicated = [];
+        $positions = [];
         foreach ($routeAgg as $route => $agg) {
             $best = $agg['best'];
             // Re-emit a representative result using the best document but composite score
@@ -1408,10 +1426,17 @@ class SearchEngine implements SearchEngineInterface
                 $data['distance'] = $best->getDistance();
             }
             $deduplicated[] = new \YetiSearch\Models\SearchResult($data);
+            $positions[] = $agg['position'];
         }
 
-        foreach ($noRoute as $r) {
-            $deduplicated[] = $r;
+        foreach ($noRoute as $entry) {
+            $deduplicated[] = $entry['result'];
+            $positions[] = $entry['position'];
+        }
+
+        if ($keepOrder) {
+            array_multisort($positions, SORT_ASC, SORT_NUMERIC, $deduplicated);
+            return $deduplicated;
         }
 
         usort($deduplicated, function ($a, $b) {
