@@ -428,6 +428,28 @@ class GeoFallbackTest extends TestCase
     /**
      * @dataProvider modesWithoutSqlMath
      */
+    public function test_a_document_indexed_again_without_geo_loses_its_location(bool $external, string $mode): void
+    {
+        [$search] = $this->build($external, $mode);
+        $near = ['geoFilters' => ['near' => ['point' => $this->centerArray(), 'radius' => self::RADIUS]], 'limit' => 50];
+        $this->assertContains('p_north_5km', $this->ids($search->search(self::INDEX, 'coffee', $near)['results']));
+
+        // A long body, so the document is chunked and its chunks lose the location too
+        $search->index(self::INDEX, [
+            'id' => 'p_north_5km',
+            'content' => ['title' => 'coffee p_north_5km', 'content' => 'coffee ' . str_repeat('moved away without a location. ', 120)],
+        ]);
+        $search->getIndexer(self::INDEX)->flush();
+
+        $ids = $this->ids($search->search(self::INDEX, 'coffee', $near)['results']);
+        $this->assertNotContains('p_north_5km', $ids, 'the old location is gone');
+        $this->assertContains('p_center', $ids, 'other locations stay');
+        $this->assertContains('p_north_5km', $this->ids($search->search(self::INDEX, 'moved', ['limit' => 50])['results']), 'still found by text');
+    }
+
+    /**
+     * @dataProvider modesWithoutSqlMath
+     */
     public function test_max_distance_clamps_nearest_at_the_storage(bool $external, string $mode): void
     {
         [$search] = $this->build($external, $mode);

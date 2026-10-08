@@ -28,6 +28,8 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     private array $spatialEnabledCache = [];
     private bool $externalContentDefault = false;
     private ?QueryCache $queryCache = null;
+    /** @var array<string, bool> Indexes whose spatial table is known to hold rows */
+    private array $spatialRowsKnown = [];
     /** @var array<string, int> Writes through this connection, per index */
     private array $indexChanges = [];
     private LoggerInterface $logger;
@@ -355,6 +357,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             throw new StorageException("Failed to drop index '{$name}': " . $e->getMessage());
         }
         $this->deleteCalibration($name);
+        unset($this->spatialRowsKnown[$name]);
         $this->indexChanged($name);
     }
 
@@ -1684,6 +1687,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             $this->connection->rollBack();
             throw new StorageException("Failed to clear index: " . $e->getMessage());
         }
+        unset($this->spatialRowsKnown[$index]);
         $this->indexChanged($index);
     }
 
@@ -2643,6 +2647,23 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         return $positions;
     }
 
+    /**
+     * Whether the index's spatial table holds any row. Once it has, that is kept for the
+     * connection; until then each call asks again, which is a one-row read.
+     */
+    private function hasSpatialRows(string $index): bool
+    {
+        if (!empty($this->spatialRowsKnown[$index])) {
+            return true;
+        }
+        $found = $this->connection->query("SELECT 1 FROM {$index}_spatial LIMIT 1")->fetchColumn() !== false;
+        if ($found) {
+            $this->spatialRowsKnown[$index] = true;
+        }
+
+        return $found;
+    }
+
     private function indexSpatialData(string $index, string $id, array $document): void
     {
         // Skip if spatial disabled via config
@@ -2652,9 +2673,9 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         // Ensure spatial table exists (handles both R-tree and fallback)
         $this->ensureSpatialTableExists($index);
 
-        // Fast-path exit: if no geo/bounds, skip any ID computation or deletes
         $hasGeo = isset($document['geo']) || isset($document['geo_bounds']);
-        if (!$hasGeo) {
+        // An index with no locations at all skips the lookup and delete below
+        if (!$hasGeo && !$this->hasSpatialRows($index)) {
             return;
         }
 
@@ -2671,9 +2692,13 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             $spatialId = $this->getNumericId($id);
         }
 
-        // Delete any existing spatial data for this document
+        // Delete any existing spatial data for this document, so a document indexed
+        // again without a location loses the one it had
         $deleteStmt = $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?");
         $deleteStmt->execute([$spatialId]);
+        if (!$hasGeo) {
+            return;
+        }
 
 
         $minLat = $maxLat = $minLng = $maxLng = null;
@@ -2718,6 +2743,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 VALUES (?, ?, ?, ?, ?)
             ");
             $spatialStmt->execute([$spatialId, $minLat, $maxLat, $minLng, $maxLng]);
+            $this->spatialRowsKnown[$index] = true;
         }
     }
 

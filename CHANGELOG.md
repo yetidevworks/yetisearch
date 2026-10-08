@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.5.6] - 2026-10-08
+
+### Bug Fixes
+- **A document indexed again without a location kept its old one**: Indexing a document skipped the spatial table whenever the document had no `geo` or `geo_bounds`, so a document (and its chunks) that lost its location stayed in `near()`, `within()` and distance searches at the old place. Indexing it again now removes the old location. An index that has never held a location still skips the lookup.
+
+### Tests
+- `GeoFallbackTest` re-indexes a chunked document without its location in every geo mode and checks it is gone from location searches but still found by text.
+
 ## [2.5.5] - 2026-10-08
 
 ### Bug Fixes
