@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.5.5] - 2026-10-07
+
+### Bug Fixes
+- **k-NN failed on SQLite without math functions**: `nearest` always measured distance in SQL, and the expression meant for SQLite without math functions used `SQRT`, `POWER` and `COS`, which are math functions too. Since 2.5.4 passes `nearest` through `YetiSearch::search()`, the README's k-NN example threw `no such function` on such builds, the Windows builds of PHP among them. Without math functions, `nearest` now narrows the rows to the box around `max_distance` in SQL and measures, sorts and takes the k nearest in PHP.
+
+### Tests
+- The geo tests' "no SQL math" mode now makes every SQLite math function fail on the connection, as a build without them does, so a query that still calls one fails on every platform and not only on Windows. The k-NN and distance facet tests run in that mode too, and the modes that need math are skipped on a build without it.
+
 ## [2.5.4] - 2026-10-07
 
 ### Bug Fixes

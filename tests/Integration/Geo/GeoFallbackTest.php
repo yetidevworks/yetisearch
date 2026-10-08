@@ -93,12 +93,16 @@ class GeoFallbackTest extends TestCase
             'search' => ['cache_ttl' => 0],
         ], $config));
 
+        $storage = $this->storageOf($search);
+        if ($mode === 'nomath') {
+            $this->setPrivate($storage, 'hasMathFunctions', false);
+            $this->removeSqlMathFunctions($storage);
+        } elseif (!$this->getPrivate($storage, 'hasMathFunctions')) {
+            // The Windows PHP builds in CI, for one: the 'nomath' modes cover them
+            $this->markTestSkipped('This SQLite build has no math functions.');
+        }
         if ($mode !== 'rtree') {
-            $storage = $this->storageOf($search);
             $this->setPrivate($storage, 'rtreeSupport', false);
-            if ($mode === 'nomath') {
-                $this->setPrivate($storage, 'hasMathFunctions', false);
-            }
         }
 
         $search->createIndex(self::INDEX, ['external_content' => $external]);
@@ -124,6 +128,36 @@ class GeoFallbackTest extends TestCase
         }
 
         return $method->invoke($search);
+    }
+
+    /** @return mixed */
+    private function getPrivate(object $object, string $property)
+    {
+        $prop = new \ReflectionProperty($object, $property);
+        if (PHP_VERSION_ID < 80100) {
+            $prop->setAccessible(true);
+        }
+
+        return $prop->getValue($object);
+    }
+
+    /**
+     * Make every SQLite math function fail on the storage's connection, as it
+     * does on a build without them (the Windows PHP builds in CI), so a query that
+     * still calls one errors here instead of only there.
+     */
+    private function removeSqlMathFunctions(object $storage): void
+    {
+        $pdo = $this->getPrivate($storage, 'connection');
+        $names = ['acos', 'acosh', 'asin', 'asinh', 'atan', 'atan2', 'atanh', 'ceil', 'ceiling', 'cos', 'cosh',
+            'degrees', 'exp', 'floor', 'ln', 'log', 'log10', 'log2', 'mod', 'pi', 'pow', 'power', 'radians',
+            'sin', 'sinh', 'sqrt', 'tan', 'tanh', 'trunc'];
+        foreach ($names as $name) {
+            // Deprecated on a plain PDO since PHP 8.5, and the only way to reach it here
+            @$pdo->sqliteCreateFunction($name, function () use ($name) {
+                throw new \RuntimeException('no such function: ' . $name);
+            }, -1);
+        }
     }
 
     private function setPrivate(object $object, string $property, $value): void
@@ -392,7 +426,7 @@ class GeoFallbackTest extends TestCase
     }
 
     /**
-     * @dataProvider modes
+     * @dataProvider modesWithoutSqlMath
      */
     public function test_max_distance_clamps_nearest_at_the_storage(bool $external, string $mode): void
     {
@@ -410,7 +444,7 @@ class GeoFallbackTest extends TestCase
     // ----------------------------------------------------------------- facade
 
     /**
-     * @dataProvider modes
+     * @dataProvider modesWithoutSqlMath
      */
     public function test_facade_runs_the_readme_nearest_example(bool $external, string $mode): void
     {
@@ -531,7 +565,7 @@ class GeoFallbackTest extends TestCase
     // ------------------------------------------------------------------ facet
 
     /**
-     * @dataProvider modes
+     * @dataProvider modesWithoutSqlMath
      */
     public function test_distance_facet_leaves_out_documents_without_geo(bool $external, string $mode): void
     {

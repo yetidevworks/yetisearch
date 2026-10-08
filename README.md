@@ -1636,7 +1636,7 @@ What differs without R-Tree:
 
 ### Without SQL math functions
 
-Computing a haversine distance in SQL needs SQLite's math functions (`sin`, `cos`, `asin` and so on), which are a compile-time option of SQLite and arrived in version 3.35. If your SQLite lacks them, with R-Tree or without, YetiSearch keeps the box in SQL and runs the radius test in PHP on the rows that come back. Results are still exact: `near()` returns only documents inside the radius, with the right `distance`, and `within()` is unchanged. Two things differ:
+Computing a haversine distance in SQL needs SQLite's math functions (`sin`, `cos`, `asin` and so on), which are a compile-time option of SQLite and arrived in version 3.35. If your SQLite lacks them, with R-Tree or without, YetiSearch keeps the box in SQL and runs the radius test in PHP on the rows that come back. Results are still exact: `near()` returns only documents inside the radius, with the right `distance`, `nearest` measures and sorts its candidates in PHP before it takes the k nearest, and `within()` is unchanged. The Windows builds of PHP we test on have no math functions, so this is the path they take. Two things differ:
 
 - Without `sortByDistance()`, the limit and offset are applied before the radius test, so a page can come back short or empty when the best text matches are in a corner of the box. When you page through `near()` results, add `sortByDistance()`: it sorts the matches by distance before the page is cut.
 - The reported total count is the number of documents inside the box, so it can be higher than the number inside the radius.

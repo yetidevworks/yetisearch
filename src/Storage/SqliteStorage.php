@@ -1016,22 +1016,27 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 $join = $schema === 'external'
                     ? " INNER JOIN {$index}_spatial s ON s.id = d.doc_id"
                     : " INNER JOIN {$index}_id_map m ON m.string_id = d.id INNER JOIN {$index}_spatial s ON s.id = m.numeric_id";
-                $distanceExpr = $this->getDistanceExpression($lat, $lng);
-                $sql = "SELECT d.id, d.content, d.metadata, d.language, d.type, d.timestamp, " . $distanceExpr . " AS distance, ((s.minLat+s.maxLat)/2.0) AS _centroid_lat, ((s.minLng+s.maxLng)/2.0) AS _centroid_lng FROM {$index} d" . $join . " WHERE 1=1";
+                $maxD = isset($geoFilters['max_distance'])
+                    ? $this->geoDistanceToMeters((float)$geoFilters['max_distance'], $geoFilters)
+                    : null;
+                $centroidSelect = "((s.minLat+s.maxLat)/2.0) AS _centroid_lat, ((s.minLng+s.maxLng)/2.0) AS _centroid_lng";
                 $params = [];
-                if (isset($geoFilters['max_distance'])) {
-                    $maxD = (float)$geoFilters['max_distance'];
-                    $units = $geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? null);
-                    if (is_string($units)) {
-                        $u = strtolower($units);
-                        if ($u === 'km') {
-                            $maxD *= 1000.0;
-                        } elseif ($u === 'mi' || $u === 'mile' || $u === 'miles') {
-                            $maxD *= 1609.344;
-                        }
+                if ($this->hasMathFunctions) {
+                    $distanceExpr = $this->getDistanceExpression($lat, $lng);
+                    $sql = "SELECT d.id, d.content, d.metadata, d.language, d.type, d.timestamp, " . $distanceExpr . " AS distance, " . $centroidSelect . " FROM {$index} d" . $join . " WHERE 1=1";
+                    if ($maxD !== null) {
+                        $sql .= " AND (" . $distanceExpr . ") <= CAST(? AS REAL)";
+                        $params[] = $maxD;
                     }
-                    $sql .= " AND (" . $distanceExpr . ") <= CAST(? AS REAL)";
-                    $params[] = $maxD;
+                } else {
+                    // Without SQL math functions the distance is measured in PHP below,
+                    // after the box around max_distance has narrowed the rows
+                    $sql = "SELECT d.id, d.content, d.metadata, d.language, d.type, d.timestamp, " . $centroidSelect . " FROM {$index} d" . $join . " WHERE 1=1";
+                    if ($maxD !== null) {
+                        [$boxSql, $boxParams] = $this->buildBoundsIntersectSql($from->getBoundingBox($maxD));
+                        $sql .= $boxSql;
+                        $params = array_merge($params, $boxParams);
+                    }
                 }
                 // Apply standard filters
                 foreach ($filters as $filter) {
@@ -1041,14 +1046,24 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                         $params = array_merge($params, $filterParams);
                     }
                 }
-                $sql .= " ORDER BY distance ASC LIMIT ?";
-                $params[] = $k;
+                if ($this->hasMathFunctions) {
+                    $sql .= " ORDER BY distance ASC LIMIT ?";
+                    $params[] = $k;
+                }
 
                 try {
                     $stmt = $this->getPreparedStatement($sql);
                     $stmt->execute($params);
                     $results = [];
                     while ($row = $stmt->fetch()) {
+                        if (isset($row['distance'])) {
+                            $distance = (float)$row['distance'];
+                        } else {
+                            $distance = $from->distanceTo(new GeoPoint((float)$row['_centroid_lat'], (float)$row['_centroid_lng']));
+                            if ($maxD !== null && $distance > $maxD) {
+                                continue;
+                            }
+                        }
                         $content = json_decode($row['content'], true);
                         // Content fields at the top level, as every other search returns
                         // them; nested under 'document' the engine found no fields at all
@@ -1059,10 +1074,16 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                             'language' => $row['language'],
                             'type' => $row['type'],
                             'timestamp' => $row['timestamp'],
-                            'distance' => (float)($row['distance'] ?? 0),
+                            'distance' => $distance,
                             'centroid_lat' => $row['_centroid_lat'] ?? null,
                             'centroid_lng' => $row['_centroid_lng'] ?? null,
                         ]);
+                    }
+                    if (!$this->hasMathFunctions) {
+                        usort($results, function ($a, $b) {
+                            return $a['distance'] <=> $b['distance'];
+                        });
+                        $results = array_slice($results, 0, $k);
                     }
 
                     // Cache the results before returning
