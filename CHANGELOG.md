@@ -7,7 +7,7 @@
 - **A distance sort lost its order with `unique_by_route`**: Grouping results by route ranked the routes by score afterwards, so a search sorted by distance (or by a field with `sortBy()`) came back in relevance order whenever `unique_by_route` was on, and paging through it skipped and repeated places. Grouping now keeps the order the query asked for.
 
 ### Improvements
-- **`getDocument()` returns the document's location**: It now includes the `geo` point or `geo_bounds` the document was indexed with, so a caller that edits a document and writes it back keeps it in location searches; until now that write removed the location. A point stored by R-Tree, which keeps 32-bit floats, comes back as its center rounded to 6 decimals (about 0.1 m).
+- **`getDocument()` returns the document's location**: It now includes the `geo` point or `geo_bounds` the document was indexed with, so a caller that edits a document and writes it back keeps it in location searches, now that writing a document without a location removes the one it had. A point stored by R-Tree, which keeps 32-bit floats, comes back as its center rounded to 6 decimals (about 0.1 m).
 
 ### Tests
 - `GeoFallbackTest` re-indexes a chunked document without its location in every geo mode and checks it is gone from location searches but still found by text, pages a distance-sorted search with `unique_by_route` and checks the order, and round-trips a document through `getDocument()` with its location.
