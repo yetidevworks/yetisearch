@@ -1070,8 +1070,11 @@ class SearchEngine implements SearchEngineInterface
             $processedResults[] = $processedResult;
         }
 
-        // Re-sort results if we applied fuzzy penalties or geo scoring weight
-        if (($query->isFuzzy() && !empty($this->fuzzyTermMap)) || (($this->config['distance_weight'] ?? 0.0) > 0)) {
+        // Re-sort results if we applied fuzzy penalties or geo scoring weight, unless the
+        // query asked for an order of its own (a distance sort or sortBy)
+        if (!$this->hasRequestedOrder($query)
+            && (($query->isFuzzy() && !empty($this->fuzzyTermMap)) || (($this->config['distance_weight'] ?? 0.0) > 0))
+        ) {
             usort($processedResults, function ($a, $b) {
                 return $b->getScore() <=> $a->getScore();
             });

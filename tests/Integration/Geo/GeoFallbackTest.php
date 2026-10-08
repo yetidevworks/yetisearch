@@ -496,6 +496,10 @@ class GeoFallbackTest extends TestCase
             $paged = array_merge($paged, $this->ids($page['results']));
         }
         $this->assertSame($expected, $paged);
+
+        // A fuzzy search re-ranks by score after its penalties, which must not undo the sort either
+        $fuzzy = $search->search(self::INDEX, 'cofee', ['unique_by_route' => true, 'fuzzy' => true, 'limit' => 6, 'geoFilters' => $sorted]);
+        $this->assertSame($expected, $this->ids($fuzzy['results']), 'fuzzy keeps the distance order');
     }
 
     /**
