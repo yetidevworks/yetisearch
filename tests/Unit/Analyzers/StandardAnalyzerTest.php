@@ -6,6 +6,10 @@ use YetiSearch\Tests\TestCase;
 use YetiSearch\Analyzers\StandardAnalyzer;
 use YetiSearch\Stemmer\StemmerFactory;
 use YetiSearch\Stemmer\StemmerInterface;
+use YetiSearch\Stemmer\Languages\EnglishStemmer;
+use YetiSearch\Stemmer\Languages\FrenchStemmer;
+use YetiSearch\Stemmer\Languages\GermanStemmer;
+use YetiSearch\Stemmer\Languages\SpanishStemmer;
 
 class StandardAnalyzerTest extends TestCase
 {
@@ -622,7 +626,7 @@ class StandardAnalyzerTest extends TestCase
         $this->assertSame(2, $made);
     }
 
-    public function testAWordIsStemmedOnceAndAWordMetAgainComesFromMemory(): void
+    public function testCustomStemmersAreCalledForEveryWord(): void
     {
         $calls = new \ArrayObject();
         StemmerFactory::register('english', new CountingTestStemmer($calls));
@@ -631,17 +635,64 @@ class StandardAnalyzerTest extends TestCase
         $this->assertSame(['cat', 'dog', 'cat', 'cat'], $analyzer->analyze('cats dogs cats cats')['tokens']);
         $this->assertSame('cat', $analyzer->stem('cats'));
 
-        $this->assertSame(['cats', 'dogs'], $calls->getArrayCopy());
+        $this->assertSame(['cats', 'dogs', 'cats', 'cats', 'cats'], $calls->getArrayCopy());
+        $this->assertSame([], $this->privateProperty($analyzer, 'stemMemo'));
+    }
+
+    public function testStatefulCustomStemmersAndBuiltInSubclassesAreNotMemoized(): void
+    {
+        $stemmers = [
+            new class implements StemmerInterface {
+                private int $calls = 0;
+                public function stem(string $word): string { return $word . ++$this->calls; }
+                public function getLanguage(): string { return 'en'; }
+            },
+            new class extends EnglishStemmer {
+                private int $calls = 0;
+                public function stem(string $word): string { return $word . ++$this->calls; }
+            },
+            new class extends FrenchStemmer {
+                private int $calls = 0;
+                public function stem(string $word): string { return $word . ++$this->calls; }
+            },
+            new class extends GermanStemmer {
+                private int $calls = 0;
+                public function stem(string $word): string { return $word . ++$this->calls; }
+            },
+            new class extends SpanishStemmer {
+                private int $calls = 0;
+                public function stem(string $word): string { return $word . ++$this->calls; }
+            },
+        ];
+        foreach ($stemmers as $stemmer) {
+            StemmerFactory::register('english', $stemmer);
+            $analyzer = new StandardAnalyzer();
+            $this->assertSame('cats1', $analyzer->stem('cats'));
+            $this->assertSame('cats2', $analyzer->stem('cats'));
+            $this->assertSame(['cats3', 'cats4'], $analyzer->analyze('cats cats')['tokens']);
+            $this->assertSame([], $this->privateProperty($analyzer, 'stemMemo'));
+        }
+    }
+
+    public function testAllFourExactBuiltInClassesRememberStems(): void
+    {
+        foreach (['english', 'french', 'german', 'spanish'] as $language) {
+            $analyzer = new StandardAnalyzer();
+            $expected = StemmerFactory::create($language)->stem('chansons');
+            $this->assertSame($expected, $analyzer->stem('chansons', $language));
+            $this->assertSame($expected, $analyzer->stem('chansons', $language));
+            $this->assertSame([$language => ['chansons' => $expected]], $this->privateProperty($analyzer, 'stemMemo'));
+            $this->assertSame(1, $this->privateProperty($analyzer, 'stemMemoSize'));
+        }
     }
 
     public function testRememberedStemsStayUnderTheirLimit(): void
     {
         $limit = $this->privateConstant('STEM_MEMO_LIMIT');
-        StemmerFactory::register('ewokese', EwokTestStemmer::class);
         $analyzer = new StandardAnalyzer();
 
         for ($i = 0; $i < $limit + 25; $i++) {
-            $this->assertSame('w' . $i . '!', $analyzer->stem('w' . $i, 'ewokese'));
+            $this->assertSame('w' . $i, $analyzer->stem('w' . $i));
         }
 
         $memo = $this->privateProperty($analyzer, 'stemMemo');
@@ -654,7 +705,7 @@ class StandardAnalyzerTest extends TestCase
         $this->assertGreaterThan(0, $remembered);
 
         // What was forgotten is stemmed again, and the same
-        $this->assertSame('w0!', $analyzer->stem('w0', 'ewokese'));
+        $this->assertSame('w0', $analyzer->stem('w0'));
     }
 
     public function testAVeryLongWordIsNotRemembered(): void

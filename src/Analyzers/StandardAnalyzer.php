@@ -4,6 +4,10 @@ namespace YetiSearch\Analyzers;
 
 use YetiSearch\Contracts\AnalyzerInterface;
 use YetiSearch\Stemmer\StemmerFactory;
+use YetiSearch\Stemmer\Languages\EnglishStemmer;
+use YetiSearch\Stemmer\Languages\FrenchStemmer;
+use YetiSearch\Stemmer\Languages\GermanStemmer;
+use YetiSearch\Stemmer\Languages\SpanishStemmer;
 use YetiSearch\Helpers\UTF8Helper as UTF8;
 
 class StandardAnalyzer implements AnalyzerInterface
@@ -138,16 +142,21 @@ class StandardAnalyzer implements AnalyzerInterface
     }
 
     /**
-     * The stem of a word in a language that has a stemmer, remembering it. The stemmer is
-     * deterministic, so a word met again is not stemmed again.
+     * Remember stems only for the four exact built-in classes. Custom stemmers and
+     * subclasses can be stateful and must be called for every word.
      */
     private function stemRemembered(string $canonical, string $language, string $word): string
     {
+        $stemmer = StemmerFactory::create($language);
+        if (!in_array(get_class($stemmer), [EnglishStemmer::class, FrenchStemmer::class, GermanStemmer::class, SpanishStemmer::class], true)) {
+            return $stemmer->stem($word);
+        }
+
         if (isset($this->stemMemo[$canonical][$word])) {
             return $this->stemMemo[$canonical][$word];
         }
 
-        $stem = StemmerFactory::create($language)->stem($word);
+        $stem = $stemmer->stem($word);
 
         if (isset($word[self::STEM_MEMO_MAX_WORD])) {
             return $stem;

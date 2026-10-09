@@ -777,7 +777,7 @@ A rebuild makes the FTS table again with the options it has, its `prefix` indexe
 
 #### What stemming costs
 
-Stemming makes the index bigger and indexing slower, as every document is stemmed when it is written, and a search that also matches by stems matches more documents. On the 31,944 movies of `benchmarks/movies.json` (title, overview and genres in an external-content index, PHP 8.4, batches of 250), indexing took 2.4 seconds with stemming on and 1.0 second with it off, and the database was 35.9 MB against 23.7 MB. A search that finds words by their stems took a median of 1.9 ms against 0.9 ms without stemming, as a word like `movies` then matches 2,990 documents instead of 184. The analyzer remembers the stems of up to 50,000 words (about 6 MB) so a word that comes back is not stemmed again.
+Stemming makes the index bigger and indexing slower, as every document is stemmed when it is written, and a search that also matches by stems matches more documents. On the 31,944 movies of `benchmarks/movies.json` (title, overview and genres in an external-content index, PHP 8.4, batches of 250), indexing took 2.4 seconds with stemming on and 1.0 second with it off, and the database was 35.9 MB against 23.7 MB. A search that finds words by their stems took a median of 1.9 ms against 0.9 ms without stemming, as a word like `movies` then matches 2,990 documents instead of 184. The analyzer remembers the stems of up to 50,000 words (about 6 MB) only for the four exact built-in stemmer classes; registered custom stemmers and subclasses are called for every word.
 
 `benchmarks/stemming-benchmark.php` repeats these measurements on your own machine, with stemming on or off, and prints the median of several runs:
 
