@@ -6,7 +6,9 @@ use YetiSearch\Storage\SqliteStorage;
 use YetiSearch\Analyzers\StandardAnalyzer;
 use YetiSearch\Index\Indexer;
 use YetiSearch\Search\SearchEngine;
+use YetiSearch\Stemmer\StemmerFactory;
 use YetiSearch\Utils\Fts5Escaper;
+use YetiSearch\Utils\StemQuery;
 use YetiSearch\Models\SearchQuery;
 use YetiSearch\Geo\GeoPoint;
 use YetiSearch\Geo\GeoBounds;
@@ -45,6 +47,7 @@ class YetiSearch
                 'strip_punctuation' => true,
                 'expand_contractions' => true,
                 'custom_stop_words' => [],
+                'stop_words' => [],
                 'disable_stop_words' => false
             ],
             'indexer' => [
@@ -65,7 +68,8 @@ class YetiSearch
                 'multi_column_fts' => true,  // Default to multi-column FTS for better performance
                 'cache_ttl' => 300,
                 'trigram_size' => 3,
-                'trigram_threshold' => 0.5
+                'trigram_threshold' => 0.5,
+                'stem_weight' => 0.5  // Weight of a match on a word's stem, on an index created with stemming
             ],
             'cache' => [
                 'enabled' => false,  // Disabled by default for backward compatibility
@@ -546,6 +550,13 @@ class YetiSearch
         $tokens = $analyzer->removeStopWords($tokens, $language);
         $escapedTokens = Fts5Escaper::escapeTokens($tokens);
 
+        // Indexes that stem match each word as typed or by its stem, in the language of
+        // the query, else English; the others use the query as typed
+        $stemLanguage = $language ?: 'english';
+        $stemQuery = StemmerFactory::isSupported($stemLanguage)
+            ? StemQuery::termGroups($analyzer, $tokens, $stemLanguage)['query']
+            : null;
+
         // A termless but non-blank query ("...", ":") must not fall through to
         // storage's match-all branch. An explicitly blank query is left alone:
         // that is how a caller says "no text query" for geo-only or
@@ -571,6 +582,12 @@ class YetiSearch
         // The dedicated $query argument is authoritative. Do not allow an
         // options entry to bypass analysis and FTS5 escaping.
         $queryArray['query'] = implode(' ', $escapedTokens);
+        // Likewise the stem query: it is built here, never taken from the options
+        unset($queryArray['stem_query']);
+        if ($stemQuery !== null) {
+            $queryArray['stem_query'] = $stemQuery;
+            $queryArray['stem_weight'] = (float)($options['stem_weight'] ?? $this->config['search']['stem_weight'] ?? 0.5);
+        }
 
         return $storage->searchMultiple($indices, $queryArray);
     }
@@ -644,9 +661,16 @@ class YetiSearch
      * Useful after batch updates to external content FTS tables to ensure
      * the FTS vocabulary is in sync with the content table.
      *
+     * An index that stems has its stems made again, with the stemmers
+     * registered now. The options switch the index: 'stemming' turns stemming
+     * on or off for an existing index without reading its documents again, and
+     * 'language' sets the language it stems in. Without them the index keeps
+     * the settings it has.
+     *
      * @param string $indexName The index name
+     * @param array{stemming?: bool, language?: ?string} $options
      */
-    public function rebuildFts(string $indexName): void
+    public function rebuildFts(string $indexName, array $options = []): void
     {
         $storage = $this->getStorage();
 
@@ -654,7 +678,8 @@ class YetiSearch
             return;
         }
 
-        $storage->rebuildFts($indexName);
+        $storage->rebuildFts($indexName, $options);
+        $this->clearEngineResults($indexName);
     }
 
     // Clear index method
@@ -914,6 +939,8 @@ class YetiSearch
                 $storageConfig['cache'] = $this->config['cache'];
             }
             $this->storage->connect($storageConfig);
+            // The storage stems an index's text with the analyzer the searches use
+            $this->storage->setAnalyzer($this->getAnalyzer());
         }
 
         return $this->storage;

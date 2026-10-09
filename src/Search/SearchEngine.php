@@ -4,6 +4,7 @@ namespace YetiSearch\Search;
 
 use YetiSearch\Contracts\SearchEngineInterface;
 use YetiSearch\Contracts\StorageInterface;
+use YetiSearch\Contracts\ProvidesStemming;
 use YetiSearch\Contracts\TracksIndexChanges;
 use YetiSearch\Contracts\AnalyzerInterface;
 use YetiSearch\Models\SearchQuery;
@@ -15,7 +16,9 @@ use YetiSearch\Utils\JaroWinkler;
 use YetiSearch\Utils\Trigram;
 use YetiSearch\Utils\PhoneticMatcher;
 use YetiSearch\Utils\KeyboardProximity;
+use YetiSearch\Stemmer\StemmerFactory;
 use YetiSearch\Utils\Fts5Escaper;
+use YetiSearch\Utils\StemQuery;
 use YetiSearch\Semantic\SemanticSearch;
 use YetiSearch\Helpers\UTF8Helper as UTF8;
 use Psr\Log\LoggerInterface;
@@ -34,6 +37,14 @@ class SearchEngine implements SearchEngineInterface
     private float $indexedTermsCacheTime = 0;
     private ?array $synonymsCache = null;
     private ?SemanticSearch $semantic = null;
+    /** The MATCH expression that also finds words by their stems, for the query last processed; null when the index does not stem */
+    private ?string $stemQuery = null;
+    /** @var string[] The stems of the query's terms, for highlighting */
+    private array $queryStems = [];
+    /** The language the index stems in, when it stems */
+    private ?string $indexStemLanguage = null;
+    /** @var array<string, array<string, string>> Stems of document words met while highlighting, by language */
+    private array $wordStems = [];
 
     public function __construct(
         StorageInterface $storage,
@@ -94,6 +105,8 @@ class SearchEngine implements SearchEngineInterface
             // Exact match boosting
             'exact_match_boost' => 2.0,     // Multiplier for exact phrase matches
             'exact_terms_boost' => 1.5,     // Multiplier for all exact terms present
+            // Weight of a match on a word's stem against one on the word as typed, on an index that stems
+            'stem_weight' => 0.5,
             'fuzzy_score_penalty' => 0.25,   // Reduced penalty for better fuzzy results
             // Two-pass search strategy (disabled by default for performance)
             'two_pass_search' => false,     // Enable two-pass search for better field weighting
@@ -652,8 +665,24 @@ class SearchEngine implements SearchEngineInterface
     {
         $queryText = $query->getQuery();
 
+        // An index that stems answers a query in the query's language, else its own
+        $this->stemQuery = null;
+        $this->queryStems = [];
+        $this->wordStems = [];
+        $this->indexStemLanguage = $this->storage instanceof ProvidesStemming
+            ? $this->storage->stemmingFor($this->indexName)
+            : null;
+        $stemLanguage = $this->indexStemLanguage === null
+            ? null
+            : ($query->getLanguage() ?: $this->indexStemLanguage);
+        if ($stemLanguage !== null && !StemmerFactory::isSupported($stemLanguage)) {
+            $stemLanguage = null;
+        }
+
         $tokens = $this->analyzer->tokenize($queryText);
-        $tokens = $this->analyzer->removeStopWords($tokens, $query->getLanguage());
+        // Stop words are those of the query's language; with none, English, or on an
+        // index that stems the language of the index
+        $tokens = $this->analyzer->removeStopWords($tokens, $query->getLanguage() ?: $this->indexStemLanguage);
 
         // Reset fuzzy term map for this query
         $this->fuzzyTermMap = [];
@@ -802,14 +831,26 @@ class SearchEngine implements SearchEngineInterface
             }
         }
 
+        // The raw query is an implicit AND of terms in correction mode, and an OR of
+        // components otherwise; a stem query is built to match
+        $termGroups = false;
+
         // In correction mode with fuzzy, build a clean query with corrected terms
         if ($query->isFuzzy() && $useCorrectionMode && $this->config['enable_fuzzy']) {
+            $termGroups = true;
             // Build a simple query with corrected terms
             // Use the same logic as non-fuzzy search but with corrected tokens
             $escapedTokens = $this->escapeFtsTokens($exactTokens);
 
             // Multiple terms - search for all of them (implicit AND in FTS5)
             $processedQuery = implode(' ', $escapedTokens);
+
+            // Each term may match as typed or by its stem
+            if ($stemLanguage !== null) {
+                $grouped = StemQuery::termGroups($this->analyzer, $exactTokens, $stemLanguage);
+                $this->stemQuery = $grouped['query'];
+                $this->queryStems = $grouped['stems'];
+            }
         } elseif ($query->isFuzzy() && !$useCorrectionMode && !empty($fuzzyTokens)) {
             // Build structured query that strongly prioritizes exact matches
             // Use parentheses to group exact matches with higher priority
@@ -888,6 +929,17 @@ class SearchEngine implements SearchEngineInterface
             $processedQuery = implode(' OR ', array_unique($exactComponents));
         }
 
+        // Where the raw query is an OR of components, the stems of the query's own terms
+        // join it as further alternatives
+        if ($stemLanguage !== null && !$termGroups && $processedQuery !== '') {
+            $this->stemQuery = $this->buildStemAlternatives(
+                $processedQuery,
+                $tokens,
+                $stemLanguage,
+                (bool)($this->config['prefix_last_token'] ?? false)
+            );
+        }
+
         // Debug: Log the processed query
         if ($this->logger) {
             $this->logger->debug('Processed query', ['original' => $queryText, 'processed' => $processedQuery]);
@@ -897,6 +949,38 @@ class SearchEngine implements SearchEngineInterface
         $newQuery->setQuery($processedQuery);
 
         return $newQuery;
+    }
+
+    /**
+     * The stem query for a raw query that is an OR of components: the raw query
+     * as it is, or the stem of any of the query's own terms. Synonyms and fuzzy
+     * variants are left out; they match as typed.
+     *
+     * Null when no term has a stem, as the stem query would only repeat the raw one.
+     *
+     * @param string[] $terms The terms the user typed
+     * @param bool $prefixLast Whether the last term is a prefix, as in the raw query
+     */
+    private function buildStemAlternatives(string $rawQuery, array $terms, string $language, bool $prefixLast): ?string
+    {
+        $alternatives = [];
+        $last = count($terms) - 1;
+
+        foreach (array_values($terms) as $i => $term) {
+            foreach (StemQuery::stemsOfTerm($this->analyzer, $term, $language) as $stem) {
+                $escapedStem = $this->escapeFtsToken($stem . ($prefixLast && $i === $last ? '*' : ''));
+                if ($escapedStem !== '') {
+                    $alternatives['_stems : ' . $escapedStem] = true;
+                    $this->queryStems[] = $stem;
+                }
+            }
+        }
+
+        if (empty($alternatives)) {
+            return null;
+        }
+
+        return '(' . $rawQuery . ') OR ' . implode(' OR ', array_keys($alternatives));
     }
 
     private function buildStorageQuery(SearchQuery $query): array
@@ -912,6 +996,12 @@ class SearchEngine implements SearchEngineInterface
 
         if (!empty($query->getFields())) {
             $storageQuery['fields'] = $query->getFields();
+        }
+
+        // On an index that stems, the words are also matched by their stems
+        if ($this->stemQuery !== null) {
+            $storageQuery['stem_query'] = $this->stemQuery;
+            $storageQuery['stem_weight'] = (float)($this->config['stem_weight'] ?? 0.5);
         }
 
         // Pass field weights if configured
@@ -999,10 +1089,17 @@ class SearchEngine implements SearchEngineInterface
             if ($query->shouldHighlight()) {
                 // Extract content fields for highlighting (exclude metadata and system fields)
                 $contentFields = array_diff_key($result, array_flip(['id', 'score', 'metadata', 'language', 'type', 'timestamp', 'distance']));
+                // On an index that stems, the words found by their stem are marked too, in
+                // the language of the result, else of the query, else of the index
+                $stemLanguage = null;
+                if ($this->indexStemLanguage !== null) {
+                    $stemLanguage = ($result['language'] ?? null) ?: ($query->getLanguage() ?: $this->indexStemLanguage);
+                }
                 $highlights = $this->generateHighlights(
                     $contentFields,
                     $originalQuery ?? $query->getQuery(),
-                    $query->getHighlightLength()
+                    $query->getHighlightLength(),
+                    $stemLanguage
                 );
             }
 
@@ -1225,7 +1322,7 @@ class SearchEngine implements SearchEngineInterface
         return $basePenalty;
     }
 
-    private function generateHighlights(array $document, string $query, int $length): array
+    private function generateHighlights(array $document, string $query, int $length, ?string $stemLanguage = null): array
     {
         $highlights = [];
 
@@ -1249,6 +1346,18 @@ class SearchEngine implements SearchEngineInterface
                 // Un-escape apostrophes in fuzzy terms too
                 $cleanTerm = str_replace("''", "'", $term);
                 $tokens[] = $cleanTerm;
+            }
+        }
+
+        // Words of the document that share a stem with a query term are marked as well.
+        // A word a term already marks (the term itself, or with an 's') is left out, or
+        // it would be marked twice.
+        if ($stemLanguage !== null && !empty($this->queryStems)) {
+            $marked = array_flip($tokens);
+            foreach ($this->wordsSharingQueryStem($document, $stemLanguage) as $word) {
+                if (!isset($marked[$word]) && !(substr($word, -1) === 's' && isset($marked[substr($word, 0, -1)]))) {
+                    $tokens[] = $word;
+                }
             }
         }
 
@@ -1289,6 +1398,51 @@ class SearchEngine implements SearchEngineInterface
         }
 
         return $highlights;
+    }
+
+    /**
+     * The words of a document whose stem is the stem of one of the query's terms,
+     * as they are written in it, lowercased.
+     *
+     * @return string[]
+     */
+    private function wordsSharingQueryStem(array $document, string $language): array
+    {
+        if (!StemmerFactory::isSupported($language)) {
+            return [];
+        }
+
+        $queryStems = array_flip($this->queryStems);
+        $found = [];
+        $visit = function ($value) use (&$visit, &$found, $language, $queryStems) {
+            if (is_array($value)) {
+                foreach ($value as $item) {
+                    $visit($item);
+                }
+                return;
+            }
+            if (!is_string($value) || $value === '') {
+                return;
+            }
+            if (!preg_match_all('/[\p{L}\p{N}]{2,}/u', $value, $matches)) {
+                return;
+            }
+            foreach ($matches[0] as $word) {
+                $word = UTF8::strtolower($word);
+                if (isset($found[$word])) {
+                    continue;
+                }
+                if (!isset($this->wordStems[$language][$word])) {
+                    $this->wordStems[$language][$word] = $this->analyzer->stem($word, $language);
+                }
+                if (isset($queryStems[$this->wordStems[$language][$word]])) {
+                    $found[$word] = true;
+                }
+            }
+        };
+        $visit($document);
+
+        return array_map('strval', array_keys($found));
     }
 
     private function extractSnippet(string $text, array $terms, int $length): string
@@ -1503,6 +1657,9 @@ class SearchEngine implements SearchEngineInterface
                         'distance_sort' => ['from' => $fromArr, 'direction' => 'ASC']
                     ]
                 ];
+                if ($this->stemQuery !== null) {
+                    $facetQuery['stem_query'] = $this->stemQuery;
+                }
                 try {
                     $results = $this->storage->search($this->indexName, $facetQuery);
                     // Counted by position: a float array key would be cut to
@@ -1565,6 +1722,10 @@ class SearchEngine implements SearchEngineInterface
                 'filters' => $query->getFilters(),
                 'language' => $query->getLanguage()
             ];
+            // Counted over the same documents the results are
+            if ($this->stemQuery !== null) {
+                $facetQuery['stem_query'] = $this->stemQuery;
+            }
 
             try {
                 $results = $this->storage->search($this->indexName, array_merge($facetQuery, [
