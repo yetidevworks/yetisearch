@@ -1266,14 +1266,16 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
 
             $schema = $this->getSchemaMode($index);
 
+            // bm25() takes one weight per column of the FTS table, in order, and an
+            // own-content table has the id (UNINDEXED, but still a column) before the fields
+            if ($schema !== 'external') {
+                array_unshift($weights, 1.0);
+            }
+
             // The stems column is weighed below the raw columns, so a document that has
-            // the words as typed ranks above one that only has their stems. bm25() has one
-            // weight per column of the table, and an own-content table has the id first.
+            // the words as typed ranks above one that only has their stems.
             $matchQuery = $searchQuery;
             if ($this->indexStems($index)) {
-                if ($schema !== 'external') {
-                    array_unshift($weights, 1.0);
-                }
                 $stemWeight = max(0.0, (float)($query['stem_weight'] ?? $this->searchConfig['stem_weight'] ?? 0.5));
                 $weights[] = sprintf('%.4F', $stemWeight);
                 if (!empty($query['stem_query']) && is_string($query['stem_query'])) {
