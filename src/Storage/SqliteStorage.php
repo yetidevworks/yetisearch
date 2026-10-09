@@ -444,7 +444,10 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             $this->connection->beginTransaction();
 
             $id = $document['id'];
-            $content = json_encode($document['content']);
+            $content = $this->encodeJson($document['content'], 'content', $id);
+            // What is indexed is the content as stored: a later delete rebuilds the indexed
+            // text from the stored JSON, so both have to come from the same bytes
+            $document['content'] = json_decode($content, true);
             // Persist metadata and, when R-tree or math functions are unavailable, embed geo for JSON fallback
             $metadataArr = $document['metadata'] ?? [];
             if (!$this->hasRTreeSupport() || !$this->hasMathFunctions) {
@@ -473,7 +476,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             if ($meaningOnly) {
                 $metadataArr['_meaning_only'] = true;
             }
-            $metadata = json_encode($metadataArr);
+            $metadata = $this->encodeJson($metadataArr, 'metadata', $id);
             $language = $document['language'] ?? null;
             $type = $document['type'] ?? 'default';
             $timestamp = $document['timestamp'] ?? time();
@@ -725,7 +728,9 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             // Process all documents - insert main docs and collect FTS/terms data
             foreach ($documents as $document) {
                 $id = $document['id'];
-                $content = json_encode($document['content']);
+                $content = $this->encodeJson($document['content'], 'content', $id);
+                // What is indexed is the content as stored (see insert())
+                $document['content'] = json_decode($content, true);
                 // Persist metadata and, when R-tree or math functions are unavailable, embed geo for JSON fallback
                 $metadataArr = $document['metadata'] ?? [];
                 if (!$this->hasRTreeSupport() || !$this->hasMathFunctions) {
@@ -754,7 +759,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 if ($meaningOnly) {
                     $metadataArr['_meaning_only'] = true;
                 }
-                $metadata = json_encode($metadataArr);
+                $metadata = $this->encodeJson($metadataArr, 'metadata', $id);
                 $language = $document['language'] ?? null;
                 $type = $document['type'] ?? 'default';
                 $timestamp = $document['timestamp'] ?? time();
@@ -2729,6 +2734,25 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         $tokens = is_array($analyzed) && isset($analyzed['tokens']) ? $analyzed['tokens'] : $analyzed;
 
         return is_array($tokens) ? implode(' ', array_map('strval', $tokens)) : '';
+    }
+
+    /**
+     * Encode a document's content or metadata for storage. Invalid UTF-8 is replaced rather
+     * than failing the encode, as a failed encode would store an empty string while the
+     * document is still indexed from the original, and no later delete could then rebuild
+     * the text it was indexed with.
+     *
+     * @param mixed $value
+     * @throws StorageException If the value cannot be encoded at all (INF, NAN, too deep)
+     */
+    private function encodeJson($value, string $what, string $id): string
+    {
+        $json = json_encode($value, JSON_INVALID_UTF8_SUBSTITUTE);
+        if ($json === false) {
+            throw new StorageException("Failed to encode the {$what} of document '{$id}': " . json_last_error_msg());
+        }
+
+        return $json;
     }
 
     private function getSchemaMode(string $index): string
