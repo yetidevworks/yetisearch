@@ -150,4 +150,58 @@ class ResultCacheTest extends TestCase
         $search->search(self::INDEX, 'alpha');
         $this->assertSame(1, $this->heldResults($search));
     }
+
+    /** @return array<string, array{0: callable}> Options the cache key cannot be made from */
+    public function unencodableOptions(): array
+    {
+        return [
+            'an object that serializes to NAN' => [fn() => new class implements \JsonSerializable {
+                #[\ReturnTypeWillChange]
+                public function jsonSerialize()
+                {
+                    return NAN;
+                }
+            }],
+            'infinity' => [fn() => INF],
+            'a resource' => [fn() => fopen('php://memory', 'r')],
+            'an object whose serializer throws' => [fn() => new class implements \JsonSerializable {
+                #[\ReturnTypeWillChange]
+                public function jsonSerialize()
+                {
+                    throw new \RuntimeException('cannot serialize');
+                }
+            }],
+        ];
+    }
+
+    /** @dataProvider unencodableOptions */
+    public function test_a_search_whose_options_cannot_be_encoded_is_not_cached(callable $makeOption): void
+    {
+        $search = $this->open(getTestDbPath(uniqid('result_cache_')));
+        $search->indexBatch(self::INDEX, [
+            ['id' => 'z', 'content' => ['title' => 'Zebra page']],
+            ['id' => 'g', 'content' => ['title' => 'Giraffe page']],
+        ]);
+        $engine = $search->getSearchEngine(self::INDEX);
+        $option = $makeOption();
+        $ids = function (string $text) use ($engine, $option): array {
+            return array_map(fn($result) => $result->getId(), $engine->search(new SearchQuery($text), ['marker' => $option])->getResults());
+        };
+
+        // They used to share the key of an empty string, so the second search got the first one's results
+        $this->assertSame(['z'], $ids('zebra'));
+        $this->assertSame(['g'], $ids('giraffe'));
+        $this->assertSame(['z'], $ids('zebra'));
+        $this->assertSame(0, $this->heldResults($search), 'Nothing is held for them');
+
+        $config = new \ReflectionProperty(SearchEngine::class, 'config');
+        if (PHP_VERSION_ID < 80100) {
+            $config->setAccessible(true);
+        }
+        $this->assertArrayNotHasKey('marker', $config->getValue($engine), 'The options of the search are not left in the config');
+
+        // The same engine still caches an ordinary search
+        $this->assertSame(['g'], array_map(fn($result) => $result->getId(), $engine->search(new SearchQuery('giraffe'))->getResults()));
+        $this->assertSame(1, $this->heldResults($search));
+    }
 }

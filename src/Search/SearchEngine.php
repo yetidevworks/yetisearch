@@ -2971,30 +2971,42 @@ class SearchEngine implements SearchEngineInterface
         return min(1.0, $consensusScore);
     }
 
-    private function getCacheKey(SearchQuery $query, array $options = []): string
+    /**
+     * The key a search is held under, or null when it cannot be told from another search and
+     * so is not cached at all: the options hold something that does not encode (an object
+     * whose jsonSerialize() fails or returns NAN, INF or a resource, invalid UTF-8) or throws
+     * while encoding. Searches that failed to encode would all share the key of an empty string.
+     */
+    private function getCacheKey(SearchQuery $query, array $options = []): ?string
     {
-        $keyData = $query->toArray();
-        // Include cache-relevant options that affect result shape
-        if (!empty($options['unique_by_route'])) {
-            $keyData['_unique_by_route'] = true;
-        }
-        if (array_key_exists('semantic', $options)) {
-            $keyData['_semantic'] = (bool)$options['semantic'];
-        }
-        if (isset($options['semantic_weight'])) {
-            $keyData['_semantic_weight'] = (float)$options['semantic_weight'];
-        }
-        // search() merges the runtime options into the config, so they decide what is
-        // returned as much as the query does (min_score, boosts, fuzzy settings, ...).
-        // Sorted by name, so the same options in another order are the same search.
-        if (!empty($options)) {
-            $keyData['_options'] = $this->sortedByKey($options);
-        }
-        // The weight of a stem match is in the key as it applies, whether it comes from
-        // the options or from the config
-        $keyData['_stem_weight'] = (float)($this->config['stem_weight'] ?? 0.5);
+        try {
+            $keyData = $query->toArray();
+            // Include cache-relevant options that affect the results
+            if (!empty($options['unique_by_route'])) {
+                $keyData['_unique_by_route'] = true;
+            }
+            if (array_key_exists('semantic', $options)) {
+                $keyData['_semantic'] = (bool)$options['semantic'];
+            }
+            if (isset($options['semantic_weight'])) {
+                $keyData['_semantic_weight'] = (float)$options['semantic_weight'];
+            }
+            // search() merges the runtime options into the config, so they decide what is
+            // returned as much as the query does (min_score, boosts, fuzzy settings, ...).
+            // Sorted by name, so the same options in another order are the same search.
+            if (!empty($options)) {
+                $keyData['_options'] = $this->sortedByKey($options);
+            }
+            // The weight of a stem match is in the key as it applies, whether it comes from
+            // the options or from the config
+            $keyData['_stem_weight'] = (float)($this->config['stem_weight'] ?? 0.5);
 
-        return md5(json_encode($keyData));
+            $encoded = json_encode($keyData);
+        } catch (\Throwable $e) {
+            return null;
+        }
+
+        return $encoded === false ? null : md5($encoded);
     }
 
     /**
