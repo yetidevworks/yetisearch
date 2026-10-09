@@ -337,6 +337,40 @@ class StemmingStorageTest extends StemmingTestCase
         $this->assertSame([], array_values(array_intersect($this->vocabulary($search), ['gniklaw', 'stac', 'drib', 'cats', 'walking', 'bird'])));
     }
 
+    /** @dataProvider schemaModes */
+    public function test_a_stemmer_that_throws_leaves_no_transaction_open_and_nothing_written(string $mode): void
+    {
+        $search = $this->stemmingSearch($mode);
+        $search->index(self::INDEX, $this->doc('a', 'the dogs were running'));
+        StemmerFactory::register('english', ExplodingStemmer::class);
+
+        $writes = [
+            'insert' => fn() => $search->index(self::INDEX, $this->doc('b', 'a bird in the sky')),
+            'update' => fn() => $search->update(self::INDEX, $this->doc('a', 'the cats were walking')),
+            'batch' => fn() => $search->indexBatch(self::INDEX, [$this->doc('c', 'one'), $this->doc('d', 'two')]),
+        ];
+        foreach ($writes as $name => $write) {
+            try {
+                $write();
+                $this->fail("$name: the stemmer should have thrown");
+            } catch (\RuntimeException $e) {
+                $this->assertSame('no stems today', $e->getMessage(), $name);
+                $this->assertNotInstanceOf(\YetiSearch\Exceptions\StorageException::class, $e, $name);
+            }
+            $this->assertFalse($this->pdo($search)->inTransaction(), "$name left a transaction open");
+        }
+
+        StemmerFactory::reset();
+        $count = (int)$this->pdo($search)->query('SELECT COUNT(*) FROM ' . self::INDEX)->fetchColumn();
+        $this->assertSame(1, $count, 'Nothing of the failed writes was kept');
+        $this->assertSame(['a'], $this->found($search, 'running'), 'The document is as it was');
+
+        // and the next write works
+        $search->index(self::INDEX, $this->doc('e', 'the birds were singing'));
+        $this->assertSame(['e'], $this->found($search, 'sings'));
+        $this->assertIntegrity($search);
+    }
+
     // ------------------------------------------------------------------
     // Switching an existing index
     // ------------------------------------------------------------------

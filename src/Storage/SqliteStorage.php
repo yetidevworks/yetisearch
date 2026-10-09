@@ -599,9 +599,16 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             $this->indexSpatialData($index, $id, $document);
 
             $this->connection->commit();
-        } catch (\PDOException $e) {
-            $this->connection->rollBack();
-            throw new StorageException("Failed to insert document: " . $e->getMessage());
+        } catch (\Throwable $e) {
+            // Whatever failed, a stemmer or analyzer included, the half-written row must not
+            // stay in an open transaction for the next write to run into
+            if ($this->connection->inTransaction()) {
+                $this->connection->rollBack();
+            }
+            if ($e instanceof \PDOException) {
+                throw new StorageException("Failed to insert document: " . $e->getMessage());
+            }
+            throw $e;
         }
     }
 
@@ -875,9 +882,14 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             }
 
             $this->connection->commit();
-        } catch (\PDOException $e) {
-            $this->connection->rollBack();
-            throw new StorageException("Failed to insert batch: " . $e->getMessage());
+        } catch (\Throwable $e) {
+            if ($this->connection->inTransaction()) {
+                $this->connection->rollBack();
+            }
+            if ($e instanceof \PDOException) {
+                throw new StorageException("Failed to insert batch: " . $e->getMessage());
+            }
+            throw $e;
         }
     }
 
