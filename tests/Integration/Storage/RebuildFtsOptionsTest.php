@@ -209,6 +209,14 @@ class RebuildFtsOptionsTest extends TestCase
             'spacing around the equals sign' => ["  prefix  =  '2 4' ,   detail =  full  "],
             'uppercase names' => ["PREFIX = '2 4', DETAIL = 'full'"],
             'a comma-separated prefix' => ["prefix='2,4', detail=full"],
+            'a block comment before the options' => ["/* c */ prefix='2 4', /* c */ detail=full"],
+            'a block comment before the detail' => ["prefix='2 4', /* c */ detail=full"],
+            'comments after the options' => ["prefix='2 4' /* c */, detail=full /* c */ , tokenize='unicode61'"],
+            'a comment before the prefix' => ["/* the prefix indexes */ prefix='2 4', detail=full"],
+            'a line comment' => ["-- the options\nprefix='2 4', -- c, with a comma\ndetail=full"],
+            'a line comment at the end' => ["prefix='2 4', detail=full -- c\n"],
+            'a comment that holds a comma, a quote and option text' => ["/* , ' prefix=9 detail=column */ prefix='2 4', detail=full"],
+            'comment markers inside a quoted tokenizer argument' => ["tokenize=\"unicode61 tokenchars '/* prefix=9 -- detail=column */'\", prefix='2 4', detail=full"],
         ];
     }
 
@@ -241,6 +249,17 @@ class RebuildFtsOptionsTest extends TestCase
         $storage = $this->open();
         $this->createIndex($storage, 'external');
         $this->handWrittenTable($storage, 'detail=[column]');
+        $this->assertStringContainsString("detail='column'", $this->createStatement());
+
+        $this->expectException(\InvalidArgumentException::class);
+        $storage->rebuildFts('docs', ['stemming' => true]);
+    }
+
+    public function test_detail_column_after_a_comment_still_refuses_stemming(): void
+    {
+        $storage = $this->open();
+        $this->createIndex($storage, 'external');
+        $this->handWrittenTable($storage, '/* c */ detail=column');
         $this->assertStringContainsString("detail='column'", $this->createStatement());
 
         $this->expectException(\InvalidArgumentException::class);

@@ -2935,12 +2935,14 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     /**
      * The top-level arguments of the `fts5(...)` in a CREATE VIRTUAL TABLE statement: split on
      * the commas outside any quoted section, which SQLite allows as 'text' and "text" (a doubled
-     * quote is an escaped one), [text] and `text` (a doubled backtick is an escaped one).
+     * quote is an escaped one), [text] and `text` (a doubled backtick is an escaped one). SQL
+     * comments (`/* ... *\/` and `-- ...`) outside a quoted section are not part of an argument.
      *
      * @return string[] The arguments, trimmed
      */
     private static function ftsTableArguments(string $sql): array
     {
+        $sql = self::withoutSqlComments($sql);
         if (!preg_match('/\busing\s+fts5\s*\(/i', $sql, $m, PREG_OFFSET_CAPTURE)) {
             return [];
         }
@@ -2985,6 +2987,50 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         }
 
         return $arguments;
+    }
+
+    /**
+     * The statement with its SQL comments (`/* ... *\/`, which may be left open at the end, and
+     * `-- ...` up to the end of the line) outside quoted sections replaced by a space, as SQLite
+     * reads them. Text inside any of the quoting forms is kept as it is.
+     */
+    private static function withoutSqlComments(string $sql): string
+    {
+        $result = '';
+        $length = strlen($sql);
+        for ($i = 0; $i < $length; $i++) {
+            $char = $sql[$i];
+            if ($char === "'" || $char === '"' || $char === '`' || $char === '[') {
+                $close = $char === '[' ? ']' : $char;
+                $result .= $char;
+                for ($i++; $i < $length; $i++) {
+                    $result .= $sql[$i];
+                    if ($sql[$i] === $close) {
+                        if ($close !== ']' && ($sql[$i + 1] ?? '') === $close) {
+                            $result .= $sql[++$i];
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                continue;
+            }
+            if ($char === '/' && ($sql[$i + 1] ?? '') === '*') {
+                $end = strpos($sql, '*/', $i + 2);
+                $i = $end === false ? $length : $end + 1;
+                $result .= ' ';
+                continue;
+            }
+            if ($char === '-' && ($sql[$i + 1] ?? '') === '-') {
+                $end = strpos($sql, "\n", $i + 2);
+                $i = $end === false ? $length : $end;
+                $result .= $end === false ? ' ' : "\n";
+                continue;
+            }
+            $result .= $char;
+        }
+
+        return $result;
     }
 
     /**
