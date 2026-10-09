@@ -1319,6 +1319,15 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             }
             $params = array_merge([$matchQuery], $spatial['params']);
 
+            // The key to find a result's document by, when a plain text search ranks first
+            // and reads the documents of the best ones only (see rankedRows())
+            $rankKey = $schema === 'external' ? 'doc_id' : 'id';
+            $plainSql = "SELECT d.*, {$bm25} FROM {$index} d INNER JOIN {$index}_fts f ON "
+                . ($schema === 'external' ? 'f.rowid = d.doc_id' : 'd.id = f.id')
+                . " WHERE {$index}_fts MATCH ? ORDER BY rank ASC LIMIT ? OFFSET ?";
+            $rankSql = "SELECT f." . ($schema === 'external' ? 'rowid' : 'id') . " AS rid, {$bm25} FROM {$index}_fts f"
+                . " WHERE {$index}_fts MATCH ? ORDER BY rank ASC LIMIT ? OFFSET ?";
+
             // Apply language filter to inner query (while d is in scope)
             if ($language) {
                 $inner .= " AND d.language = ?";
@@ -1442,8 +1451,28 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 ];
             }
 
-            $stmt = $this->connection->prepare($sql);
-            $stmt->execute($params);
+            // A search with nothing but text (no filter, language, location or sort) is ranked
+            // on the FTS table alone, and only the documents of the page are read
+            $rankedRows = null;
+            if (isset($plainSql) && $sql === $plainSql && $params === [$matchQuery, $effectiveLimit, $offset]) {
+                $rankedRows = $this->rankedRows($index, $rankSql, $rankKey, $params);
+            }
+
+            $stmt = null;
+            if ($rankedRows === null) {
+                $stmt = $this->connection->prepare($sql);
+                $stmt->execute($params);
+            }
+            $nextRow = $rankedRows !== null
+                ? function () use (&$rankedRows) {
+                    $row = current($rankedRows);
+                    next($rankedRows);
+
+                    return $row;
+                }
+                : function () use ($stmt) {
+                    return $stmt->fetch();
+                };
 
             $results = [];
             $radiusFilter = null;
@@ -1481,7 +1510,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 $refPoint = is_array($from) ? new GeoPoint($from['lat'], $from['lng']) : $from;
             }
 
-            while ($row = $stmt->fetch()) {
+            while ($row = $nextRow()) {
                 $rowCount++;
                 $content = json_decode($row['content'], true);
                 $baseScore = abs($row['rank']);
@@ -1573,6 +1602,52 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         } catch (\PDOException $e) {
             throw new StorageException("Search failed: " . $e->getMessage());
         }
+    }
+
+    /**
+     * The rows a plain text search returns, ranked, without joining every match to its
+     * document. The join reads a document for each of the matches, thousands for a common
+     * word, to keep ten of them: here the FTS table ranks the matches on its own, and then
+     * only the documents of the page are read.
+     *
+     * Null when the ranking and the documents do not agree, as when the FTS index still holds
+     * a match whose document is gone, which the join leaves out before it counts a page: the
+     * search is then run as a join.
+     *
+     * @param string $rankSql    Selects `rid`, the key of the match, and `rank`, in order, for one page
+     * @param string $key        The document column `rid` is the value of
+     * @param array  $params     The match query, the limit and the offset
+     * @return array[]|null Document rows with their `rank`, in rank order
+     */
+    private function rankedRows(string $index, string $rankSql, string $key, array $params): ?array
+    {
+        $stmt = $this->connection->prepare($rankSql);
+        $stmt->execute($params);
+        $ranked = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+        if (empty($ranked)) {
+            return [];
+        }
+
+        $documents = [];
+        $wanted = array_unique(array_column($ranked, 'rid'));
+        foreach (array_chunk($wanted, 500) as $chunk) {
+            $in = implode(',', array_fill(0, count($chunk), '?'));
+            $docStmt = $this->connection->prepare("SELECT d.* FROM {$index} d WHERE d.{$key} IN ({$in})");
+            $docStmt->execute($chunk);
+            while ($document = $docStmt->fetch()) {
+                $documents[$document[$key]] = $document;
+            }
+        }
+
+        $rows = [];
+        foreach ($ranked as $match) {
+            if (!isset($documents[$match['rid']])) {
+                return null;
+            }
+            $rows[] = $documents[$match['rid']] + ['rank' => $match['rank']];
+        }
+
+        return $rows;
     }
 
     public function count(string $index, array $query): int
