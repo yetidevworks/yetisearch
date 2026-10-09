@@ -361,6 +361,55 @@ class StemmingSearchTest extends StemmingTestCase
         $this->assertSame(['noun', 'past', 'typed'], $this->ids($withWeight));
     }
 
+    /** @dataProvider schemaModes */
+    public function test_a_held_result_is_not_returned_for_another_stem_weight(string $mode): void
+    {
+        $search = $this->indexSamples($mode);
+        $scoreOf = function (float $weight) use ($search): float {
+            $results = $search->search(self::INDEX, 'connected', ['fuzzy' => false, 'stem_weight' => $weight, 'min_score' => 0.0]);
+            foreach ($results['results'] as $result) {
+                if ($result['id'] === 'typed') {
+                    return $result['score'];
+                }
+            }
+            $this->fail('The document that has the word as a stem was not found');
+        };
+
+        $none = $scoreOf(0.0);
+        $full = $scoreOf(1.0);
+        $this->assertGreaterThan($none, $full, 'The second search was given the first one\'s held result');
+        $this->assertSame($none, $scoreOf(0.0), 'The same search is still answered the same');
+        $this->assertSame($full, $scoreOf(1.0));
+    }
+
+    /** @dataProvider schemaModes */
+    public function test_a_held_result_follows_a_stem_weight_given_against_the_configured_one(string $mode): void
+    {
+        $search = $this->indexSamples($mode, ['search' => ['stem_weight' => 0.0]]);
+
+        $first = $search->search(self::INDEX, 'connected', ['fuzzy' => false]);
+        $second = $search->search(self::INDEX, 'connected', ['fuzzy' => false, 'stem_weight' => 2.0]);
+
+        $this->assertNotEquals(
+            array_column($first['results'], 'score', 'id'),
+            array_column($second['results'], 'score', 'id')
+        );
+    }
+
+    /** @dataProvider schemaModes */
+    public function test_a_held_result_is_not_returned_for_other_runtime_options(string $mode): void
+    {
+        $search = $this->indexSamples($mode);
+
+        $all = $search->search(self::INDEX, 'connect', ['fuzzy' => false, 'min_score' => 0.0]);
+        $none = $search->search(self::INDEX, 'connect', ['fuzzy' => false, 'min_score' => 1.0e9]);
+        $again = $search->search(self::INDEX, 'connect', ['min_score' => 0.0, 'fuzzy' => false]);
+
+        $this->assertCount(3, $all['results']);
+        $this->assertSame([], $none['results'], 'A search with another min_score is its own search');
+        $this->assertSame($this->ids($all), $this->ids($again), 'The same options in another order are the same search');
+    }
+
     /**
      * What the FTS and content tables hold as stems for the given documents.
      *

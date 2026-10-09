@@ -2981,7 +2981,34 @@ class SearchEngine implements SearchEngineInterface
         if (isset($options['semantic_weight'])) {
             $keyData['_semantic_weight'] = (float)$options['semantic_weight'];
         }
+        // search() merges the runtime options into the config, so they decide what is
+        // returned as much as the query does (min_score, boosts, fuzzy settings, ...).
+        // Sorted by name, so the same options in another order are the same search.
+        if (!empty($options)) {
+            $keyData['_options'] = $this->sortedByKey($options);
+        }
+        // The weight of a stem match is in the key as it applies, whether it comes from
+        // the options or from the config
+        $keyData['_stem_weight'] = (float)($this->config['stem_weight'] ?? 0.5);
+
         return md5(json_encode($keyData));
+    }
+
+    /**
+     * An array with its string keys in order, at every depth. Lists keep the order they have.
+     */
+    private function sortedByKey(array $values): array
+    {
+        foreach ($values as $key => $value) {
+            if (is_array($value)) {
+                $values[$key] = $this->sortedByKey($value);
+            }
+        }
+        if (array_keys($values) !== range(0, count($values) - 1)) {
+            ksort($values);
+        }
+
+        return $values;
     }
 
     /**
