@@ -136,6 +136,47 @@ class QueryCacheIntegrationTest extends TestCase
         $this->assertSame(1, (int)$pdo->query('SELECT SUM(hit_count) FROM _query_cache')->fetchColumn(), 'An ordinary search still uses it');
     }
 
+    public function test_the_stem_query_and_its_weight_are_part_of_the_key(): void
+    {
+        $dbPath = getTestDbPath(uniqid('cache_stems_'));
+        $search = $this->createSearchInstance([
+            'storage' => ['path' => $dbPath, 'external_content' => true],
+            'search' => ['cache_ttl' => 0, 'min_score' => 0.0, 'enable_fuzzy' => false],
+            'cache' => ['enabled' => true, 'ttl' => 3600, 'max_size' => 100, 'table_name' => '_query_cache'],
+        ]);
+        $search->createIndex('cache_stem_idx', ['stemming' => true]);
+        $search->indexBatch('cache_stem_idx', [
+            ['id' => 'c', 'content' => ['title' => 'Connect the dots']],
+            ['id' => 'a', 'content' => ['title' => 'Connected quickly']],
+        ]);
+        $search->getIndexer('cache_stem_idx')->flush();
+        $getStorage = new \ReflectionMethod($search, 'getStorage');
+        if (PHP_VERSION_ID < 80100) {
+            $getStorage->setAccessible(true);
+        }
+        $storage = $getStorage->invoke($search);
+        $run = function (array $extra) use ($storage): array {
+            $scores = [];
+            foreach ($storage->search('cache_stem_idx', array_merge(['query' => 'connecting', 'limit' => 10], $extra)) as $row) {
+                $scores[$row['id']] = $row['score'];
+            }
+            ksort($scores);
+
+            return $scores;
+        };
+
+        // The same raw query, first as typed (no document has the word), then also by its
+        // stem: the second must not get the first's rows
+        $this->assertSame([], array_keys($run([])));
+        $stemQuery = '(connecting) OR _stems : connect';
+        $this->assertSame(['a', 'c'], array_keys($run(['stem_query' => $stemQuery, 'stem_weight' => 0.5])));
+
+        // Another stem weight scores the stem-only match differently, so it is another entry
+        $light = $run(['stem_query' => $stemQuery, 'stem_weight' => 0.5]);
+        $heavy = $run(['stem_query' => $stemQuery, 'stem_weight' => 5.0]);
+        $this->assertNotEquals($light['a'], $heavy['a']);
+    }
+
     public function test_searches_with_weights_that_cannot_be_encoded_each_get_their_own_rows(): void
     {
         $dbPath = getTestDbPath(uniqid('cache_nan_weights_'));

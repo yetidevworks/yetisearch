@@ -303,7 +303,9 @@ class QueryCache
         $relevant = [
             'query', 'filters', 'limit', 'offset', 'sort',
             'language', 'geoFilters', 'field_weights', 'fields',
-            'fuzzy', 'fuzziness', 'boost', 'unique_by_route'
+            'fuzzy', 'fuzziness', 'boost', 'unique_by_route',
+            // On an index that stems, the stem query decides what matches and its weight the scores
+            'stem_query', 'stem_weight'
         ];
 
         $normalized = [];
