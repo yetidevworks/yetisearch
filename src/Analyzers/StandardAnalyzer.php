@@ -10,7 +10,6 @@ class StandardAnalyzer implements AnalyzerInterface
 {
     private array $stopWords = [];
     private array $customStopWords = [];
-    private array $stemmers = [];
     private array $config;
 
     public function __construct(array $config = [])
@@ -24,6 +23,9 @@ class StandardAnalyzer implements AnalyzerInterface
             'strip_punctuation' => true,
             'expand_contractions' => true,
             'custom_stop_words' => [],
+            // Stop words per language, replacing the built-in list of that language
+            // or providing one for a language that has none: ['it' => ['il', 'la']]
+            'stop_words' => [],
             'disable_stop_words' => false
         ], $config);
 
@@ -86,17 +88,16 @@ class StandardAnalyzer implements AnalyzerInterface
 
     public function stem(string $word, ?string $language = null): string
     {
-        $language = $language ?? 'english';
+        $language = $this->languageOrDefault($language);
 
-        if (!isset($this->stemmers[$language])) {
-            try {
-                $this->stemmers[$language] = StemmerFactory::create($language);
-            } catch (\Exception $e) {
-                $this->stemmers[$language] = StemmerFactory::create('english');
-            }
+        // A language without a stemmer keeps its words as they are; English
+        // suffix stripping would only damage them. The factory holds the stemmer
+        // instances, so a stemmer registered later is the one used.
+        if (!StemmerFactory::isSupported($language)) {
+            return $word;
         }
 
-        return $this->stemmers[$language]->stem($word);
+        return StemmerFactory::create($language)->stem($word);
     }
 
     public function removeStopWords(array $tokens, ?string $language = null): array
@@ -105,8 +106,7 @@ class StandardAnalyzer implements AnalyzerInterface
             return $tokens;
         }
 
-        $language = $language ?? 'english';
-        $stopWords = $this->getStopWords($language);
+        $stopWords = $this->getStopWords($this->languageOrDefault($language));
 
         return array_values(array_filter($tokens, function ($token) use ($stopWords) {
             return !in_array(UTF8::strtolower($token), $stopWords);
@@ -252,16 +252,59 @@ class StandardAnalyzer implements AnalyzerInterface
         ];
     }
 
+    /**
+     * The stop words of a language, by name, code or locale ('french', 'fr',
+     * 'fr_FR'). A language with no list has none; an empty language means English.
+     */
     public function getStopWords(string $language): array
     {
-        $defaultStopWords = $this->stopWords[$language] ?? $this->stopWords['english'];
+        $language = $this->resolveLanguage($this->languageOrDefault($language));
+
+        $stopWords = $this->configuredStopWords($language) ?? $this->stopWords[$language] ?? [];
 
         // Merge default stop words with custom stop words
         if (!empty($this->customStopWords)) {
-            return array_unique(array_merge($defaultStopWords, $this->customStopWords));
+            return array_values(array_unique(array_merge($stopWords, $this->customStopWords)));
         }
 
-        return $defaultStopWords;
+        return $stopWords;
+    }
+
+    private function languageOrDefault(?string $language): string
+    {
+        return $language === null || trim($language) === '' ? 'english' : $language;
+    }
+
+    /**
+     * The name a language's stop words are kept under: its canonical name
+     * where a stemmer is registered for it, else the name lowercased.
+     */
+    private function resolveLanguage(string $language): string
+    {
+        return StemmerFactory::canonical($language) ?? strtolower(trim($language));
+    }
+
+    /**
+     * The list the stop_words option gives a language, or null when it gives none.
+     * Its keys are resolved here, not when the analyzer is made, so a stemmer
+     * registered after that still makes 'it' and 'italian' the same language.
+     */
+    private function configuredStopWords(string $language): ?array
+    {
+        $configured = $this->config['stop_words'] ?? [];
+        if (!is_array($configured)) {
+            return null;
+        }
+
+        foreach ($configured as $key => $words) {
+            if (is_string($key) && is_array($words) && $this->resolveLanguage($key) === $language) {
+                return array_values(array_unique(array_map(function ($word) {
+                    return UTF8::strtolower(trim((string)$word));
+                }, $words)));
+            }
+        }
+
+        return null;
     }
 
     private function expandContractions(string $text): string

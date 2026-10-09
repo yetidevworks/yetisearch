@@ -4,6 +4,8 @@ namespace YetiSearch\Tests\Unit\Analyzers;
 
 use YetiSearch\Tests\TestCase;
 use YetiSearch\Analyzers\StandardAnalyzer;
+use YetiSearch\Stemmer\StemmerFactory;
+use YetiSearch\Stemmer\StemmerInterface;
 
 class StandardAnalyzerTest extends TestCase
 {
@@ -13,6 +15,12 @@ class StandardAnalyzerTest extends TestCase
     {
         parent::setUp();
         $this->analyzer = new StandardAnalyzer();
+    }
+
+    protected function tearDown(): void
+    {
+        StemmerFactory::reset();
+        parent::tearDown();
     }
     
     public function testAnalyzeBasicText(): void
@@ -439,5 +447,142 @@ class StandardAnalyzerTest extends TestCase
         $this->assertNotContains('trimmed', $result['tokens']);
         $this->assertNotContains('tabbed', $result['tokens']);
         $this->assertNotContains('newline', $result['tokens']);
+    }
+
+    public function testStopWordsByCodeNameAndLocale(): void
+    {
+        $french = $this->analyzer->getStopWords('french');
+
+        $this->assertContains('les', $french);
+        $this->assertNotContains('the', $french);
+        $this->assertSame($french, $this->analyzer->getStopWords('fr'));
+        $this->assertSame($french, $this->analyzer->getStopWords('FR'));
+        $this->assertSame($french, $this->analyzer->getStopWords('fr_FR'));
+        $this->assertSame($french, $this->analyzer->getStopWords('fr-CA'));
+        $this->assertSame($french, $this->analyzer->getStopWords('francais'));
+
+        $this->assertContains('der', $this->analyzer->getStopWords('de'));
+        $this->assertContains('el', $this->analyzer->getStopWords('es'));
+        $this->assertSame($this->analyzer->getStopWords('english'), $this->analyzer->getStopWords('en_US'));
+    }
+
+    public function testStopWordsOfAnEmptyLanguageAreEnglish(): void
+    {
+        $english = $this->analyzer->getStopWords('english');
+
+        $this->assertSame($english, $this->analyzer->getStopWords(''));
+        $this->assertSame(['quick', 'fox'], $this->analyzer->removeStopWords(['the', 'quick', 'fox'], null));
+        $this->assertSame(['quick', 'fox'], $this->analyzer->removeStopWords(['the', 'quick', 'fox'], ''));
+    }
+
+    public function testLanguageCodeRemovesThatLanguagesStopWordsOnly(): void
+    {
+        // 'a' and 'the' are English stop words; 'les' is French
+        $this->assertSame(['a', 'the', 'chanson'], $this->analyzer->removeStopWords(['les', 'a', 'the', 'chanson'], 'fr'));
+        $this->assertSame(['les', 'chanson'], $this->analyzer->removeStopWords(['les', 'a', 'the', 'chanson'], 'en'));
+    }
+
+    public function testUnknownLanguageHasNoStopWords(): void
+    {
+        $this->assertSame([], $this->analyzer->getStopWords('it'));
+        $this->assertSame([], $this->analyzer->getStopWords('klingon'));
+        $this->assertSame(['il', 'the', 'gatto'], $this->analyzer->removeStopWords(['il', 'the', 'gatto'], 'it'));
+    }
+
+    public function testCustomStopWordsMergeIntoWhateverListApplies(): void
+    {
+        $analyzer = new StandardAnalyzer(['custom_stop_words' => ['Foo', 'bar']]);
+
+        $french = $analyzer->getStopWords('fr');
+        $this->assertContains('les', $french);
+        $this->assertContains('foo', $french);
+        $this->assertContains('bar', $french);
+        $this->assertSame(['foo', 'bar'], $analyzer->getStopWords('it'));
+        $this->assertSame(['gatto'], $analyzer->removeStopWords(['foo', 'gatto', 'bar'], 'it'));
+    }
+
+    public function testStopWordsOptionReplacesAndProvidesLists(): void
+    {
+        $analyzer = new StandardAnalyzer([
+            'stop_words' => [
+                'fr' => ['Alors', 'donc'],
+                'Italiano' => ['il', 'la'],
+            ],
+            'custom_stop_words' => ['extra'],
+        ]);
+
+        // Replaces the built-in French list, found by any name of the language
+        $this->assertSame(['alors', 'donc', 'extra'], $analyzer->getStopWords('french'));
+        $this->assertSame(['alors', 'donc', 'extra'], $analyzer->getStopWords('fr_CA'));
+        $this->assertNotContains('les', $analyzer->getStopWords('fr'));
+        // Provides a list for a language that has none, keyed by a lowercased name
+        $this->assertSame(['il', 'la', 'extra'], $analyzer->getStopWords('italiano'));
+        // Leaves the other built-in lists alone
+        $this->assertContains('the', $analyzer->getStopWords('en'));
+    }
+
+    public function testStopWordsOptionFollowsALanguageRegisteredLater(): void
+    {
+        $analyzer = new StandardAnalyzer(['stop_words' => ['it' => ['il', 'la']]]);
+        StemmerFactory::register('italian', ItalianTestStemmer::class, ['it', 'ita']);
+
+        $this->assertSame(['il', 'la'], $analyzer->getStopWords('italian'));
+        $this->assertSame(['il', 'la'], $analyzer->getStopWords('ita'));
+        $this->assertSame(['il', 'la'], $analyzer->getStopWords('it_IT'));
+    }
+
+    public function testStopWordsOptionCanBeDisabledAsAWhole(): void
+    {
+        $analyzer = new StandardAnalyzer(['stop_words' => ['it' => ['il']], 'disable_stop_words' => true]);
+
+        $this->assertSame(['il', 'gatto'], $analyzer->removeStopWords(['il', 'gatto'], 'it'));
+    }
+
+    public function testStemLeavesALanguageWithoutAStemmerAlone(): void
+    {
+        $this->assertSame('gatti', $this->analyzer->stem('gatti', 'it'));
+        $this->assertSame('running', $this->analyzer->stem('running', 'klingon'));
+        // null and empty still mean English, a locale uses its language
+        $this->assertSame('run', $this->analyzer->stem('running'));
+        $this->assertSame('run', $this->analyzer->stem('running', null));
+        $this->assertSame('run', $this->analyzer->stem('running', ''));
+        $this->assertSame('run', $this->analyzer->stem('running', 'en_US'));
+        $this->assertSame('chanson', $this->analyzer->stem('chansons', 'fr_FR'));
+    }
+
+    public function testAnalyzeDoesNotStemAnUnsupportedLanguage(): void
+    {
+        $result = $this->analyzer->analyze('running cats', 'it');
+
+        $this->assertSame(['running', 'cats'], $result['tokens']);
+        $this->assertSame('it', $result['language']);
+        $this->assertSame(['run', 'cat'], $this->analyzer->analyze('running cats')['tokens']);
+    }
+
+    public function testStemUsesAStemmerRegisteredAfterTheAnalyzerWasUsed(): void
+    {
+        $this->assertSame('gatti', $this->analyzer->stem('gatti', 'it'));
+
+        StemmerFactory::register('italian', ItalianTestStemmer::class, ['it']);
+        $this->assertSame('gatt', $this->analyzer->stem('gatti', 'it'));
+
+        StemmerFactory::register('english', ItalianTestStemmer::class);
+        $this->assertSame('runn', $this->analyzer->stem('running'));
+
+        StemmerFactory::reset();
+        $this->assertSame('run', $this->analyzer->stem('running'));
+    }
+}
+
+class ItalianTestStemmer implements StemmerInterface
+{
+    public function stem(string $word): string
+    {
+        return preg_replace('/(i|e|o|a|ing)$/', '', $word);
+    }
+
+    public function getLanguage(): string
+    {
+        return 'it';
     }
 }
