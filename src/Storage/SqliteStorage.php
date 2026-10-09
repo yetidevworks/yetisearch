@@ -227,11 +227,13 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
 
             // Ensure per-index meta table exists
             $this->connection->exec("CREATE TABLE IF NOT EXISTS {$name}_meta (key TEXT PRIMARY KEY, value TEXT)");
-            // Persist schema mode and FTS configuration
-            $this->setIndexMeta($name, 'schema_mode', $useExternal ? 'external' : 'legacy');
-            $this->setIndexMeta($name, 'multi_column_fts', $useMultiColumnFts ? '1' : '0');
-            $this->setIndexMeta($name, 'fts_columns', json_encode($ftsColumns));
+            // Persist schema mode and FTS configuration. An index whose FTS table exists keeps
+            // what it was created with: the table is not made again, so options given now
+            // (or none) would only make the meta disagree with the table.
             if (!$ftsExisted) {
+                $this->setIndexMeta($name, 'schema_mode', $useExternal ? 'external' : 'legacy');
+                $this->setIndexMeta($name, 'multi_column_fts', $useMultiColumnFts ? '1' : '0');
+                $this->setIndexMeta($name, 'fts_columns', json_encode($ftsColumns));
                 $this->setIndexMeta($name, 'stemming', $stemming ? '1' : '0');
                 $this->setIndexMeta($name, 'stemming_language', $stemmingLanguage ?? '');
             }
@@ -291,9 +293,11 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 $detailSql = ", detail='" . strtolower($detail) . "'";
             }
             // Store FTS columns in meta
-            $this->setIndexMeta($name, 'fts_columns', json_encode($ftsColumns));
-            if ($detail) {
-                $this->setIndexMeta($name, 'fts_detail', strtolower($detail));
+            if (!$ftsExisted) {
+                $this->setIndexMeta($name, 'fts_columns', json_encode($ftsColumns));
+                if ($detail) {
+                    $this->setIndexMeta($name, 'fts_detail', strtolower($detail));
+                }
             }
 
             // Create FTS5 table with configured columns
