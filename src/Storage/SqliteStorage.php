@@ -33,6 +33,8 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     private array $stemmingCache = [];
     private ?AnalyzerInterface $analyzer = null;
     private array $spatialEnabledCache = [];
+    /** @var ?int The database's `data_version` when the per-index caches were last known to be current */
+    private ?int $cacheDataVersion = null;
     private bool $externalContentDefault = false;
     private ?QueryCache $queryCache = null;
     /** @var array<string, bool> Indexes whose spatial table is known to hold rows */
@@ -434,6 +436,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     {
         $this->validateIndexName($index);
         $this->ensureConnected();
+        $this->syncIndexCaches();
 
         $this->indexChanged($index);
 
@@ -606,6 +609,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     {
         $this->validateIndexName($index);
         $this->ensureConnected();
+        $this->syncIndexCaches();
 
         $this->indexChanged($index);
 
@@ -913,6 +917,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     {
         $this->validateIndexName($index);
         $this->ensureConnected();
+        $this->syncIndexCaches();
 
         $this->indexChanged($index);
 
@@ -982,6 +987,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     {
         $this->validateIndexName($index);
         $this->ensureConnected();
+        $this->syncIndexCaches();
 
         $this->indexChanged($index);
 
@@ -1071,6 +1077,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     {
         $this->validateIndexName($index);
         $this->ensureConnected();
+        $this->syncIndexCaches();
 
         // Check cache first if enabled
         if ($this->queryCache && !($query['bypass_cache'] ?? false)) {
@@ -1531,6 +1538,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     {
         $this->validateIndexName($index);
         $this->ensureConnected();
+        $this->syncIndexCaches();
 
         $searchQuery = $query['query'] ?? '';
         $filters = $query['filters'] ?? [];
@@ -1619,6 +1627,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     {
         $this->validateIndexName($index);
         $this->ensureConnected();
+        $this->syncIndexCaches();
 
         $stmt = $this->connection->prepare("SELECT * FROM {$index} WHERE id = ?");
         $stmt->execute([$id]);
@@ -1747,6 +1756,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     {
         $this->validateIndexName($index);
         $this->ensureConnected();
+        $this->syncIndexCaches();
         try {
             $this->connection->beginTransaction();
 
@@ -1845,6 +1855,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     {
         $this->validateIndexName($index);
         $this->ensureConnected();
+        $this->syncIndexCaches();
 
         try {
             $this->connection->beginTransaction();
@@ -1882,6 +1893,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     public function searchMultiple(array $indices, array $query): array
     {
         $this->ensureConnected();
+        $this->syncIndexCaches();
 
         $allResults = [];
         $totalCount = 0;
@@ -2477,6 +2489,24 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         }
     }
 
+    /**
+     * Drop what is cached about an index (its FTS columns, whether it stems, whether it is
+     * spatial) when another connection has committed to the database since it was read: it may
+     * have rebuilt the index with other settings, and writing with the old ones would leave the
+     * FTS table out of step with the documents. One cheap pragma, called at the start of the
+     * public methods that read or write an index and not in the helpers they call per row.
+     */
+    private function syncIndexCaches(): void
+    {
+        $version = (int)$this->connection->query('PRAGMA data_version')->fetchColumn();
+        if ($version !== $this->cacheDataVersion) {
+            $this->cacheDataVersion = $version;
+            $this->ftsColumnsCache = [];
+            $this->stemmingCache = [];
+            $this->spatialEnabledCache = [];
+        }
+    }
+
     private function hasSpatialIndex(string $index): bool
     {
         if (!$this->connection) {
@@ -2570,6 +2600,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     {
         $this->validateIndexName($index);
         $this->ensureConnected();
+        $this->syncIndexCaches();
 
         $settings = $this->stemmingSettings($index);
         if (!$settings['enabled']) {
@@ -2830,6 +2861,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     {
         $this->validateIndexName($index);
         $this->ensureConnected();
+        $this->syncIndexCaches();
         $schema = $this->getSchemaMode($index);
         $ftsColumns = $this->getFtsColumns($index);
 
@@ -3551,6 +3583,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     public function getIndexedTerms(?string $indexName = null, int $minFrequency = 1, int $limit = 10000): array
     {
         $this->ensureConnected();
+        $this->syncIndexCaches();
 
         try {
             if ($indexName && !$this->indexExists($indexName)) {
