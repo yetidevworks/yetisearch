@@ -906,9 +906,12 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 }
             }
 
-            // Batch insert spatial data
+            // The transaction keeps the spatial tables in place for this whole batch.
+            if ($this->isSpatialEnabled($index)) {
+                $this->ensureSpatialTableExists($index);
+            }
             foreach ($spatialDocs as [$docId, $doc]) {
-                $this->indexSpatialData($index, $docId, $doc);
+                $this->indexSpatialData($index, $docId, $doc, false);
             }
 
             $this->connection->commit();
@@ -3463,14 +3466,16 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         return $found;
     }
 
-    private function indexSpatialData(string $index, string $id, array $document): void
+    private function indexSpatialData(string $index, string $id, array $document, bool $ensureTable = true): void
     {
         // Skip if spatial disabled via config
         if (!$this->isSpatialEnabled($index)) {
             return;
         }
         // Ensure spatial table exists (handles both R-tree and fallback)
-        $this->ensureSpatialTableExists($index);
+        if ($ensureTable) {
+            $this->ensureSpatialTableExists($index);
+        }
 
         $hasGeo = isset($document['geo']) || isset($document['geo_bounds']);
         // An index with no locations at all skips the lookup and delete below
