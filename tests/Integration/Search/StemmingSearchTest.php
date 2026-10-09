@@ -164,6 +164,25 @@ class StemmingSearchTest extends StemmingTestCase
     }
 
     /** @dataProvider schemaModes */
+    public function test_a_corrected_word_also_finds_what_the_word_as_typed_finds(string $mode): void
+    {
+        $search = $this->openSearch($mode, ['search' => ['enable_fuzzy' => true, 'fuzzy_correction_mode' => true]]);
+        $this->createIndex($search, $mode);
+        $search->indexBatch(self::INDEX, [
+            ['id' => 'running', 'content' => ['title' => 'Marathon', 'content' => 'He loves running']],
+            ['id' => 'rugs', 'content' => ['title' => 'Carpets', 'content' => 'Persian rugs']],
+        ]);
+        $this->addFillers($search);
+
+        // 'runs' is not in the index, and 'rugs' is one letter from it
+        $plain = $this->ids($search->search(self::INDEX, 'runs', ['fuzzy' => false]));
+        $fuzzy = $this->ids($search->search(self::INDEX, 'runs', ['fuzzy' => true]));
+
+        $this->assertSame(['running'], $plain);
+        $this->assertSame(['rugs', 'running'], $fuzzy, 'Fuzzy finds what the word typed finds, and the correction too');
+    }
+
+    /** @dataProvider schemaModes */
     public function test_a_prefix_on_the_last_word_reaches_stems_that_begin_with_it(string $mode): void
     {
         $config = ['search' => ['prefix_last_token' => true]];

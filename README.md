@@ -752,7 +752,7 @@ What changes on an index that stems:
 - Totals, paging, facet counts and `multiSearch()` count the documents found by their stems too. An index that stems and one that does not can be searched together.
 - A result found through "connected" for `connect` has "connected" highlighted.
 - Typo correction suggests the words people wrote, not their stems.
-- In a fuzzy search with typo correction (the default when fuzzy is on) every word must be in a document, either as typed or by its stem.
+- In a fuzzy search with typo correction (the default when fuzzy is on) every word must be in a document, either as typed or by its stem. A word that was corrected also matches the stem of the word as typed: `runs`, corrected to `rugs`, finds "rugs" and everything `runs` finds with fuzzy off, such as "running".
 - A word added by a synonym or a fuzzy variation is matched as typed, not by its stem.
 - The query's stop words are those of its language. A query with no language on an index that stems uses the stop words of the index's language.
 

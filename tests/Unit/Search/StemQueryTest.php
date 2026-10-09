@@ -86,6 +86,53 @@ class StemQueryTest extends TestCase
         $this->assertSame('(connected OR _stems : connect) AND (users OR _stems : user)', $query['stem_query']);
     }
 
+    public function test_a_corrected_term_also_matches_the_stem_of_the_word_as_typed(): void
+    {
+        $storage = $this->storage('english');
+        $storage->terms = ['rugs' => 2, 'running' => 1];
+        $this->engine($storage, ['enable_fuzzy' => true])->search((new SearchQuery('runs'))->fuzzy(true));
+
+        $query = $this->lastQuery($storage);
+        $this->assertSame('rugs', $query['query']);
+        $this->assertSame('(rugs OR _stems : rug OR _stems : run)', $query['stem_query']);
+    }
+
+    public function test_a_term_that_needed_no_correction_is_grouped_as_before(): void
+    {
+        $storage = $this->storage('english');
+        $storage->terms = ['rugs' => 2, 'running' => 1];
+        $this->engine($storage, ['enable_fuzzy' => true])->search((new SearchQuery('running rugs'))->fuzzy(true));
+
+        $this->assertSame(
+            '(running OR _stems : run) AND (rugs OR _stems : rug)',
+            $this->lastQuery($storage)['stem_query']
+        );
+    }
+
+    public function test_each_corrected_term_keeps_the_stem_of_its_own_typed_word(): void
+    {
+        $storage = $this->storage('english');
+        $storage->terms = ['rugs' => 2, 'running' => 1, 'cats' => 1];
+        $this->engine($storage, ['enable_fuzzy' => true])->search((new SearchQuery('cats runs'))->fuzzy(true));
+
+        $this->assertSame(
+            '(cats OR _stems : cat) AND (rugs OR _stems : rug OR _stems : run)',
+            $this->lastQuery($storage)['stem_query']
+        );
+    }
+
+    public function test_two_tokens_merged_before_correction_are_stemmed_as_the_merged_word(): void
+    {
+        $storage = $this->storage('english');
+        $storage->terms = ['robocop' => 3];
+        $this->engine($storage, ['enable_fuzzy' => true, 'enable_word_merge' => true])
+            ->search((new SearchQuery('robo cop'))->fuzzy(true));
+
+        $query = $this->lastQuery($storage);
+        $this->assertSame('robocop', $query['query']);
+        $this->assertSame('(robocop OR _stems : robocop)', $query['stem_query']);
+    }
+
     public function test_a_term_without_a_stem_stays_as_it_is_in_a_group(): void
     {
         $storage = $this->storage('english');
@@ -220,6 +267,8 @@ class StemQueryTest extends TestCase
 class RecordingStorage implements StorageInterface
 {
     public $stemsIn = null;
+    /** @var array<string, int> The indexed terms typo correction chooses from */
+    public $terms = [];
     public $searches = [];
     public $counts = [];
 
@@ -304,7 +353,7 @@ class RecordingStorage implements StorageInterface
 
     public function getIndexedTerms(?string $indexName = null, int $minFrequency = 1, int $limit = 10000): array
     {
-        return [];
+        return $this->terms;
     }
 }
 

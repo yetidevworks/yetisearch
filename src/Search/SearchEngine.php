@@ -847,7 +847,10 @@ class SearchEngine implements SearchEngineInterface
 
             // Each term may match as typed or by its stem
             if ($stemLanguage !== null) {
-                $grouped = StemQuery::termGroups($this->analyzer, $exactTokens, $stemLanguage);
+                // A term that was corrected also matches the stem of the word as typed.
+                // The corrections are one per token, so $tokens line up with $exactTokens
+                // (a merge of two tokens is one token before it is corrected).
+                $grouped = StemQuery::termGroups($this->analyzer, $exactTokens, $stemLanguage, $tokens);
                 $this->stemQuery = $grouped['query'];
                 $this->queryStems = $grouped['stems'];
             }

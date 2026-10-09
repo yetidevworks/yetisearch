@@ -16,29 +16,40 @@ class StemQuery
      * needs every word but may have it in either form. A term with no stem
      * stays as it is.
      *
-     * The terms are those of the raw query, before escaping. Where no term has a
-     * stem, there is no stem query: it would only repeat the raw one.
+     * The terms are those of the raw query, before escaping. Where a term is a
+     * correction of what the user typed, `$typed` holds the words as typed, at
+     * the same positions, and a group also matches the stem of the word typed:
+     * `runs` corrected to `rugs` finds `rugs` and also what `run` finds. Where
+     * no term has a stem, there is no stem query: it would only repeat the raw one.
      *
      * @param string[] $terms
+     * @param string[] $typed What each term was before it was corrected, by position
      * @return array{query: ?string, stems: string[]} The stem query, and the stems of the terms
      */
-    public static function termGroups(AnalyzerInterface $analyzer, array $terms, string $language): array
+    public static function termGroups(AnalyzerInterface $analyzer, array $terms, string $language, array $typed = []): array
     {
         $groups = [];
         $allStems = [];
+        $typed = array_values($typed);
 
-        foreach ($terms as $term) {
+        foreach (array_values($terms) as $i => $term) {
             $escaped = Fts5Escaper::escapeToken($term);
             if ($escaped === '') {
                 continue;
             }
 
             $alternatives = [$escaped];
-            foreach (self::stemsOfTerm($analyzer, $term, $language) as $stem) {
-                $escapedStem = Fts5Escaper::escapeToken($stem);
-                if ($escapedStem !== '') {
-                    $alternatives[] = '_stems : ' . $escapedStem;
-                    $allStems[] = $stem;
+            $words = [$term];
+            if (isset($typed[$i]) && strcasecmp($typed[$i], $term) !== 0) {
+                $words[] = $typed[$i];
+            }
+            foreach ($words as $word) {
+                foreach (self::stemsOfTerm($analyzer, $word, $language) as $stem) {
+                    $escapedStem = Fts5Escaper::escapeToken($stem);
+                    if ($escapedStem !== '') {
+                        $alternatives[] = '_stems : ' . $escapedStem;
+                        $allStems[] = $stem;
+                    }
                 }
             }
             $groups[] = '(' . implode(' OR ', array_unique($alternatives)) . ')';
