@@ -2,6 +2,9 @@
 
 namespace YetiSearch\Storage;
 
+use YetiSearch\Analyzers\StandardAnalyzer;
+use YetiSearch\Contracts\AnalyzerInterface;
+use YetiSearch\Contracts\ProvidesStemming;
 use YetiSearch\Contracts\StorageInterface;
 use YetiSearch\Contracts\TracksIndexChanges;
 use YetiSearch\Exceptions\StorageException;
@@ -11,10 +14,11 @@ use YetiSearch\Cache\QueryCache;
 use YetiSearch\Storage\PreparedStatementCache;
 use YetiSearch\Helpers\UTF8Helper as UTF8;
 use YetiSearch\Semantic\CalibrationStore;
+use YetiSearch\Stemmer\StemmerFactory;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
-class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexChanges
+class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexChanges, ProvidesStemming
 {
     private ?\PDO $connection = null;
     private array $config = [];
@@ -25,6 +29,9 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     private ?bool $hasMathFunctions = null;
     private bool $hasReturningSupport = false;
     private array $ftsColumnsCache = [];
+    /** @var array<string, array{enabled: bool, language: ?string}> Stemming settings per index */
+    private array $stemmingCache = [];
+    private ?AnalyzerInterface $analyzer = null;
     private array $spatialEnabledCache = [];
     private bool $externalContentDefault = false;
     private ?QueryCache $queryCache = null;
@@ -181,6 +188,8 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         $this->validateIndexName($name);
         $this->ensureConnected();
 
+        unset($this->ftsColumnsCache[$name], $this->stemmingCache[$name]);
+
         try {
             $useExternal = (bool)($options['external_content'] ?? $this->externalContentDefault);
 
@@ -205,13 +214,29 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             }
             // Otherwise keep the provided fields for multi-column mode
 
+            // Stemming is fixed when the FTS table is created: an index that already
+            // has one keeps the settings it was created with.
+            $ftsExisted = $this->tableExists($name . '_fts');
+            $stemming = !$ftsExisted && !empty($options['stemming']);
+            $stemmingLanguage = $this->normalizeStemmingLanguage($options['language'] ?? null);
+            if ($stemming) {
+                $this->assertCanStem($ftsColumns, $options['fts']['detail'] ?? null);
+            }
+
             // Ensure per-index meta table exists
             $this->connection->exec("CREATE TABLE IF NOT EXISTS {$name}_meta (key TEXT PRIMARY KEY, value TEXT)");
             // Persist schema mode and FTS configuration
             $this->setIndexMeta($name, 'schema_mode', $useExternal ? 'external' : 'legacy');
             $this->setIndexMeta($name, 'multi_column_fts', $useMultiColumnFts ? '1' : '0');
             $this->setIndexMeta($name, 'fts_columns', json_encode($ftsColumns));
+            if (!$ftsExisted) {
+                $this->setIndexMeta($name, 'stemming', $stemming ? '1' : '0');
+                $this->setIndexMeta($name, 'stemming_language', $stemmingLanguage ?? '');
+            }
             if ($useExternal) {
+                // The stems the FTS row was given are kept here, because FTS5 needs
+                // them back to delete the row and the stemmer can change in between.
+                $stemsColumnSql = $stemming ? ",\n                        _stems TEXT" : '';
                 $sql = "
                     CREATE TABLE IF NOT EXISTS {$name} (
                         doc_id INTEGER PRIMARY KEY,
@@ -220,10 +245,13 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                         metadata TEXT,
                         language TEXT,
                         type TEXT DEFAULT 'default',
-                        timestamp INTEGER DEFAULT (strftime('%s', 'now'))
+                        timestamp INTEGER DEFAULT (strftime('%s', 'now')){$stemsColumnSql}
                     )
                 ";
                 $this->connection->exec($sql);
+                if ($stemming) {
+                    $this->ensureStemsColumn($name);
+                }
             } else {
                 $sql = "
                     CREATE TABLE IF NOT EXISTS {$name} (
@@ -270,6 +298,9 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             $cols = array_map(function ($c) {
                 return $c;
             }, $ftsColumns);
+            if ($stemming) {
+                $cols[] = '_stems';
+            }
             if ($useExternal) {
                 $ftsColsSql = implode(', ', $cols);
                 $sql = "CREATE VIRTUAL TABLE IF NOT EXISTS {$name}_fts USING fts5({$ftsColsSql}, content='{$name}', content_rowid='doc_id', tokenize='unicode61'{$prefixSql}{$detailSql})";
@@ -348,6 +379,8 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         try {
             $this->connection->exec("DROP TABLE IF EXISTS {$name}");
             $this->connection->exec("DROP TABLE IF EXISTS {$name}_fts");
+            $this->connection->exec("DROP TABLE IF EXISTS {$name}_fts_vocab");
+            $this->connection->exec("DROP TABLE IF EXISTS {$name}_fts_colvocab");
             $this->connection->exec("DROP TABLE IF EXISTS {$name}_terms");
             $this->connection->exec("DROP TABLE IF EXISTS {$name}_spatial");
             $this->connection->exec("DROP TABLE IF EXISTS {$name}_id_map");
@@ -357,7 +390,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             throw new StorageException("Failed to drop index '{$name}': " . $e->getMessage());
         }
         $this->deleteCalibration($name);
-        unset($this->spatialRowsKnown[$name]);
+        unset($this->spatialRowsKnown[$name], $this->ftsColumnsCache[$name], $this->stemmingCache[$name]);
         $this->indexChanged($name);
     }
 
@@ -443,38 +476,62 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             $timestamp = $document['timestamp'] ?? time();
 
             $schema = $this->getSchemaMode($index);
+            $stemming = $this->indexStems($index);
+            $ftsColumns = $this->getFtsColumns($index);
             $docId = null;
             $previousFtsRow = null;
+            $existed = false;
+            $stems = null;
             if ($schema === 'external') {
+                $contentText = $this->getFieldText($document['content'], 'content', $index);
+                // A meaning-only document has no FTS row, so no stems either
+                if ($stemming && !$meaningOnly) {
+                    $stems = $this->buildStems([$contentText], $language, $this->stemmingSettings($index)['language']);
+                }
+
                 // Read what this document is currently indexed as before the
                 // upsert overwrites it; FTS5 needs that text to drop its terms.
                 $previousFtsRow = $this->getIndexedFtsRow($index, $id);
 
+                $stemsColumnSql = $stemming ? ', _stems' : '';
+                $stemsValueSql = $stemming ? ', ?' : '';
+                $stemsUpdateSql = $stemming ? ', _stems=excluded._stems' : '';
                 $upsertSql = "
-                    INSERT INTO {$index} (id, content, metadata, language, type, timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO {$index} (id, content, metadata, language, type, timestamp{$stemsColumnSql})
+                    VALUES (?, ?, ?, ?, ?, ?{$stemsValueSql})
                     ON CONFLICT(id) DO UPDATE SET
                         content=excluded.content,
                         metadata=excluded.metadata,
                         language=excluded.language,
                         type=excluded.type,
-                        timestamp=excluded.timestamp
+                        timestamp=excluded.timestamp{$stemsUpdateSql}
                 ";
+                $upsertParams = [$id, $content, $metadata, $language, $type, $timestamp];
+                if ($stemming) {
+                    $upsertParams[] = $stems;
+                }
                 if ($this->hasReturningSupport) {
                     // Use RETURNING to get doc_id directly without extra SELECT query (SQLite 3.35+)
                     $stmt = $this->connection->prepare($upsertSql . " RETURNING doc_id");
-                    $stmt->execute([$id, $content, $metadata, $language, $type, $timestamp]);
+                    $stmt->execute($upsertParams);
                     $docId = $stmt->fetchColumn();
                     $stmt->closeCursor();
                 } else {
                     // Fallback for older SQLite: upsert then SELECT doc_id
                     $stmt = $this->connection->prepare($upsertSql);
-                    $stmt->execute([$id, $content, $metadata, $language, $type, $timestamp]);
+                    $stmt->execute($upsertParams);
                     $docId = $this->connection->prepare("SELECT doc_id FROM {$index} WHERE id = ?");
                     $docId->execute([$id]);
                     $docId = $docId->fetchColumn();
                 }
             } else {
+                // The FTS table keeps its own copy in this mode, and an insert does not
+                // replace a row of the same id, so a document written again has to
+                // lose its old row first
+                $existedStmt = $this->connection->prepare("SELECT 1 FROM {$index} WHERE id = ?");
+                $existedStmt->execute([$id]);
+                $existed = $existedStmt->fetchColumn() !== false;
+
                 $sql = "
                     INSERT OR REPLACE INTO {$index}
                     (id, content, metadata, language, type, timestamp)
@@ -485,38 +542,48 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             }
 
             // Insert into FTS with dynamic columns
-            $ftsColumns = $this->getFtsColumns($index);
             if ($schema === 'external') {
-                $contentText = $this->getFieldText($document['content'], 'content', $index);
-
                 // For external content FTS5, we must explicitly delete the old entry
                 // before inserting the new one, otherwise old terms remain in the
                 // vocabulary. The 'delete' command only removes the terms it is
                 // given, so it gets the text the row was actually indexed with.
                 if ($previousFtsRow !== null) {
-                    $this->deleteFtsRow($index, $previousFtsRow[0], $previousFtsRow[1]);
+                    $this->deleteFtsRow($index, $previousFtsRow[0], $previousFtsRow[1], $previousFtsRow[2]);
                 }
 
                 // Now insert the new FTS entry. A meaning-only document gets
                 // none: it is ranked by its vector and never by keywords.
                 if (!$meaningOnly) {
-                    $ftsSql = "INSERT INTO {$index}_fts (rowid, content) VALUES (?, ?)";
-                    $ftsStmt = $this->connection->prepare($ftsSql);
-                    $ftsStmt->execute([$docId, $contentText]);
+                    if ($stemming) {
+                        $ftsSql = "INSERT INTO {$index}_fts (rowid, content, _stems) VALUES (?, ?, ?)";
+                        $ftsValues = [$docId, $contentText, $stems];
+                    } else {
+                        $ftsSql = "INSERT INTO {$index}_fts (rowid, content) VALUES (?, ?)";
+                        $ftsValues = [$docId, $contentText];
+                    }
+                    $this->connection->prepare($ftsSql)->execute($ftsValues);
                 }
-            } elseif ($meaningOnly) {
-                // Drop whatever this id was indexed as before it became meaning-only.
-                $this->connection->prepare("DELETE FROM {$index}_fts WHERE id = ?")->execute([$id]);
             } else {
-                $placeholders = implode(', ', array_fill(0, count($ftsColumns) + 1, '?'));
-                $columnsSql = 'id, ' . implode(', ', $ftsColumns);
-                $ftsSql = "INSERT OR REPLACE INTO {$index}_fts ({$columnsSql}) VALUES ({$placeholders})";
-                $ftsStmt = $this->connection->prepare($ftsSql);
-                $values = [$id];
-                foreach ($ftsColumns as $col) {
-                    $values[] = $this->getFieldText($document['content'], $col, $index);
+                if ($existed) {
+                    $this->connection->prepare("DELETE FROM {$index}_fts WHERE id = ?")->execute([$id]);
                 }
-                $ftsStmt->execute($values);
+                // A meaning-only document gets no FTS row; it lost its old one above.
+                if (!$meaningOnly) {
+                    $values = [$id];
+                    $columnTexts = [];
+                    foreach ($ftsColumns as $col) {
+                        $columnTexts[] = $this->getFieldText($document['content'], $col, $index);
+                    }
+                    $values = array_merge($values, $columnTexts);
+                    $columnsSql = 'id, ' . implode(', ', $ftsColumns);
+                    if ($stemming) {
+                        $values[] = $this->buildStems($columnTexts, $language, $this->stemmingSettings($index)['language']);
+                        $columnsSql .= ', _stems';
+                    }
+                    $placeholders = implode(', ', array_fill(0, count($values), '?'));
+                    $ftsSql = "INSERT INTO {$index}_fts ({$columnsSql}) VALUES ({$placeholders})";
+                    $this->connection->prepare($ftsSql)->execute($values);
+                }
             }
 
             // Only index terms if Levenshtein fuzzy search is enabled
@@ -550,19 +617,25 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
 
             // Prepare statements once
             $schema = $this->getSchemaMode($index);
+            $stemming = $this->indexStems($index);
+            $stemLanguage = $this->stemmingSettings($index)['language'];
             $docIdFallbackStmt = null;
+            $existsStmt = null;
             if ($schema === 'external') {
                 // Use ON CONFLICT DO UPDATE to preserve doc_id on updates.
                 // INSERT OR REPLACE would delete and re-insert, generating new doc_id.
+                $stemsColumnSql = $stemming ? ', _stems' : '';
+                $stemsValueSql = $stemming ? ', ?' : '';
+                $stemsUpdateSql = $stemming ? ', _stems=excluded._stems' : '';
                 $upsertSql = "
-                    INSERT INTO {$index} (id, content, metadata, language, type, timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO {$index} (id, content, metadata, language, type, timestamp{$stemsColumnSql})
+                    VALUES (?, ?, ?, ?, ?, ?{$stemsValueSql})
                     ON CONFLICT(id) DO UPDATE SET
                         content=excluded.content,
                         metadata=excluded.metadata,
                         language=excluded.language,
                         type=excluded.type,
-                        timestamp=excluded.timestamp
+                        timestamp=excluded.timestamp{$stemsUpdateSql}
                 ";
                 if ($this->hasReturningSupport) {
                     $upsertSql .= " RETURNING doc_id";
@@ -587,7 +660,11 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 // rowid held before: INSERT OR REPLACE cannot remove the old terms,
                 // because by the time it looks them up the content table already
                 // holds the replacement text.
-                $ftsStmt = $this->connection->prepare("INSERT INTO {$index}_fts (rowid, content) VALUES (?, ?)");
+                $ftsStmt = $this->connection->prepare(
+                    $stemming
+                        ? "INSERT INTO {$index}_fts (rowid, content, _stems) VALUES (?, ?, ?)"
+                        : "INSERT INTO {$index}_fts (rowid, content) VALUES (?, ?)"
+                );
             } else {
                 // Sanitize column names to ensure they're valid SQL identifiers
                 $validColumns = [];
@@ -603,12 +680,17 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                     $validColumns = ['content'];
                 }
 
-                $columnsSql = 'id, ' . implode(', ', $validColumns);
-                $placeholders = implode(', ', array_fill(0, count($validColumns) + 1, '?'));
-                $ftsStmt = $this->connection->prepare("INSERT OR REPLACE INTO {$index}_fts ({$columnsSql}) VALUES ({$placeholders})");
+                $columnsSql = 'id, ' . implode(', ', $validColumns) . ($stemming ? ', _stems' : '');
+                $placeholders = implode(', ', array_fill(0, count($validColumns) + ($stemming ? 2 : 1), '?'));
+                $ftsStmt = $this->connection->prepare("INSERT INTO {$index}_fts ({$columnsSql}) VALUES ({$placeholders})");
 
                 // Update ftsColumns to use validated columns
                 $ftsColumns = $validColumns;
+
+                // The FTS table keeps its own copy in this mode, and an insert does not
+                // replace a row of the same id, so a document written again has to
+                // lose its old row first
+                $existsStmt = $this->connection->prepare("SELECT 1 FROM {$index} WHERE id = ?");
             }
 
             $termsStmt = null;
@@ -623,6 +705,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             // Collect FTS data for batch insert
             $ftsData = [];
             $meaningOnlyIds = [];
+            $replacedIds = [];
             $staleFtsRows = [];
             $termsData = [];
             $spatialDocs = [];
@@ -673,10 +756,34 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                     if ($previousFtsRow !== null && !isset($staleFtsRows[$previousFtsRow[0]])) {
                         $staleFtsRows[$previousFtsRow[0]] = $previousFtsRow;
                     }
+                } elseif (!isset($replacedIds[$id])) {
+                    $existsStmt->execute([$id]);
+                    if ($existsStmt->fetchColumn() !== false) {
+                        $replacedIds[$id] = true;
+                    }
+                }
+
+                // The text each raw FTS column is given, and the stems of all of it. A
+                // meaning-only document has no FTS row, so no stems either.
+                $columnTexts = [];
+                $stems = null;
+                if ($schema === 'external') {
+                    $columnTexts[] = $this->getFieldText($document['content'], 'content', $index);
+                } elseif (!$meaningOnly) {
+                    foreach ($ftsColumns as $col) {
+                        $columnTexts[] = $this->getFieldText($document['content'], $col, $index);
+                    }
+                }
+                if ($stemming && !$meaningOnly) {
+                    $stems = $this->buildStems($columnTexts, $language, $stemLanguage);
                 }
 
                 // Insert main document
-                $docStmt->execute([$id, $content, $metadata, $language, $type, $timestamp]);
+                $docParams = [$id, $content, $metadata, $language, $type, $timestamp];
+                if ($schema === 'external' && $stemming) {
+                    $docParams[] = $stems;
+                }
+                $docStmt->execute($docParams);
 
                 // Collect FTS data for batch insert
                 if ($schema === 'external') {
@@ -694,16 +801,21 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                     if ($meaningOnly) {
                         unset($ftsData[(int)$docId]);
                     } else {
-                        $ftsData[(int)$docId] = [$docId, $this->getFieldText($document['content'], 'content', $index)];
+                        $ftsData[(int)$docId] = $stemming
+                            ? [$docId, $columnTexts[0], $stems]
+                            : [$docId, $columnTexts[0]];
                     }
                 } elseif ($meaningOnly) {
+                    unset($ftsData[$id]);
                     $meaningOnlyIds[] = $id;
                 } else {
-                    $values = [$id];
-                    foreach ($ftsColumns as $col) {
-                        $values[] = $this->getFieldText($document['content'], $col, $index);
+                    $values = array_merge([$id], $columnTexts);
+                    if ($stemming) {
+                        $values[] = $stems;
                     }
-                    $ftsData[] = $values;
+                    // Keyed by id so an id repeated inside the batch is indexed once, as its last version
+                    unset($ftsData[$id]);
+                    $ftsData[$id] = $values;
                 }
 
                 // Collect terms data if enabled
@@ -716,8 +828,16 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             }
 
             // Drop the terms of every row being replaced before re-inserting it
-            foreach ($staleFtsRows as [$staleDocId, $staleText]) {
-                $this->deleteFtsRow($index, $staleDocId, $staleText);
+            foreach ($staleFtsRows as [$staleDocId, $staleText, $staleStems]) {
+                $this->deleteFtsRow($index, $staleDocId, $staleText, $staleStems);
+            }
+
+            // Documents written again lose the FTS rows of their earlier versions
+            if (!empty($replacedIds)) {
+                foreach (array_chunk(array_map('strval', array_keys($replacedIds)), 500) as $chunk) {
+                    $in = implode(',', array_fill(0, count($chunk), '?'));
+                    $this->connection->prepare("DELETE FROM {$index}_fts WHERE id IN ({$in})")->execute($chunk);
+                }
             }
 
             // Meaning-only documents lose whatever FTS rows their ids had
@@ -811,7 +931,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 // cannot be reconstructed, and the terms stay in the vocabulary
                 // pointing at a doc_id SQLite will reuse.
                 if ($indexedFtsRow !== null) {
-                    $this->deleteFtsRow($index, $indexedFtsRow[0], $indexedFtsRow[1]);
+                    $this->deleteFtsRow($index, $indexedFtsRow[0], $indexedFtsRow[1], $indexedFtsRow[2]);
                 }
             }
 
@@ -908,8 +1028,8 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 } else {
                     // Otherwise drop each row's terms individually, using the text
                     // read before the content rows were deleted
-                    foreach ($indexedFtsRows as [$docId, $indexedText]) {
-                        $this->deleteFtsRow($index, $docId, $indexedText);
+                    foreach ($indexedFtsRows as [$docId, $indexedText, $indexedStems]) {
+                        $this->deleteFtsRow($index, $docId, $indexedText, $indexedStems);
                     }
                 }
             } else {
@@ -1124,15 +1244,31 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 }
             }
 
+            $schema = $this->getSchemaMode($index);
+
+            // The stems column is weighed below the raw columns, so a document that has
+            // the words as typed ranks above one that only has their stems. bm25() has one
+            // weight per column of the table, and an own-content table has the id first.
+            $matchQuery = $searchQuery;
+            if ($this->indexStems($index)) {
+                if ($schema !== 'external') {
+                    array_unshift($weights, 1.0);
+                }
+                $stemWeight = max(0.0, (float)($query['stem_weight'] ?? $this->searchConfig['stem_weight'] ?? 0.5));
+                $weights[] = sprintf('%.4F', $stemWeight);
+                if (!empty($query['stem_query']) && is_string($query['stem_query'])) {
+                    $matchQuery = $query['stem_query'];
+                }
+            }
+
             // Use table name for bm25() (SQLite expects the FTS table name)
             $bm25 = 'bm25(' . $index . '_fts' . (count($weights) ? ', ' . implode(', ', $weights) : '') . ') as rank';
-            $schema = $this->getSchemaMode($index);
             if ($schema === 'external') {
                 $inner = "SELECT d.*, {$bm25}" . $spatial['select'] . " FROM {$index} d INNER JOIN {$index}_fts f ON f.rowid = d.doc_id" . $spatial['join'] . " WHERE {$index}_fts MATCH ?" . $spatial['where'];
             } else {
                 $inner = "SELECT d.*, {$bm25}" . $spatial['select'] . " FROM {$index} d INNER JOIN {$index}_fts f ON d.id = f.id" . $spatial['join'] . " WHERE {$index}_fts MATCH ?" . $spatial['where'];
             }
-            $params = array_merge([$searchQuery], $spatial['params']);
+            $params = array_merge([$matchQuery], $spatial['params']);
 
             // Apply language filter to inner query (while d is in scope)
             if ($language) {
@@ -1408,12 +1544,15 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
 
         if ($hasSearchQuery) {
             $schema = $this->getSchemaMode($index);
+            $matchQuery = !empty($query['stem_query']) && is_string($query['stem_query']) && $this->indexStems($index)
+                ? $query['stem_query']
+                : $searchQuery;
             if ($schema === 'external') {
                 $inner = "SELECT d.id" . $spatial['select'] . " FROM {$index} d INNER JOIN {$index}_fts f ON f.rowid = d.doc_id" . $spatial['join'] . " WHERE {$index}_fts MATCH ?" . $spatial['where'];
             } else {
                 $inner = "SELECT d.id" . $spatial['select'] . " FROM {$index} d INNER JOIN {$index}_fts f ON d.id = f.id" . $spatial['join'] . " WHERE {$index}_fts MATCH ?" . $spatial['where'];
             }
-            $params = array_merge([$searchQuery], $spatial['params']);
+            $params = array_merge([$matchQuery], $spatial['params']);
 
             // Apply language and filters inside the inner query (so columns/JSON are available)
             if ($language) {
@@ -1712,8 +1851,13 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             // Delete all documents from the index
             $this->connection->exec("DELETE FROM {$index}");
 
-            // Delete from FTS table
-            $this->connection->exec("DELETE FROM {$index}_fts");
+            // Delete from FTS table. An external-content table cannot be emptied row by
+            // row once the content rows are gone, so it is told to drop everything.
+            if ($this->getSchemaMode($index) === 'external') {
+                $this->connection->exec("INSERT INTO {$index}_fts({$index}_fts) VALUES('delete-all')");
+            } else {
+                $this->connection->exec("DELETE FROM {$index}_fts");
+            }
 
             // Delete from spatial table if exists
             if ($this->hasSpatialIndex($index)) {
@@ -2402,6 +2546,146 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         }
     }
 
+    /**
+     * Give the storage the analyzer that stems an index's text, so its stop
+     * words and word lengths are the ones the search side uses. Without one a
+     * default StandardAnalyzer is used.
+     */
+    public function setAnalyzer(AnalyzerInterface $analyzer): void
+    {
+        $this->analyzer = $analyzer;
+    }
+
+    private function getAnalyzer(): AnalyzerInterface
+    {
+        if ($this->analyzer === null) {
+            $this->analyzer = new StandardAnalyzer();
+        }
+
+        return $this->analyzer;
+    }
+
+    public function stemmingFor(string $index): ?string
+    {
+        $this->validateIndexName($index);
+        $this->ensureConnected();
+
+        $settings = $this->stemmingSettings($index);
+        if (!$settings['enabled']) {
+            return null;
+        }
+
+        $language = $settings['language'] ?? 'english';
+
+        return StemmerFactory::canonical($language) ?? strtolower($language);
+    }
+
+    /**
+     * Whether an index keeps stems, and the language it stems in when a
+     * document or query names none (null: English). Fixed when the index is
+     * created, or changed by rebuildFts().
+     *
+     * @return array{enabled: bool, language: ?string}
+     */
+    private function stemmingSettings(string $index): array
+    {
+        if (isset($this->stemmingCache[$index])) {
+            return $this->stemmingCache[$index];
+        }
+
+        return $this->stemmingCache[$index] = [
+            'enabled' => $this->getIndexMeta($index, 'stemming') === '1',
+            'language' => $this->normalizeStemmingLanguage($this->getIndexMeta($index, 'stemming_language')),
+        ];
+    }
+
+    private function indexStems(string $index): bool
+    {
+        return $this->stemmingSettings($index)['enabled'];
+    }
+
+    private function normalizeStemmingLanguage($language): ?string
+    {
+        if (!is_string($language) || trim($language) === '') {
+            return null;
+        }
+
+        return trim($language);
+    }
+
+    /**
+     * @param string[] $ftsColumns The index's own FTS columns
+     * @param mixed $detail The FTS5 detail option the index is created with
+     * @throws \InvalidArgumentException If the index cannot hold a stems column
+     */
+    private function assertCanStem(array $ftsColumns, $detail): void
+    {
+        foreach ($ftsColumns as $column) {
+            if (strtolower((string)$column) === '_stems') {
+                throw new \InvalidArgumentException(
+                    "A stemming index cannot have a field named '_stems': the name is where the stems are kept"
+                );
+            }
+        }
+        if (is_string($detail) && strtolower($detail) === 'none') {
+            throw new \InvalidArgumentException(
+                "A stemming index cannot use the FTS5 detail option 'none': it needs column filters"
+            );
+        }
+    }
+
+    private function tableExists(string $table): bool
+    {
+        $stmt = $this->connection->prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?");
+        $stmt->execute([$table]);
+
+        return $stmt->fetchColumn() !== false;
+    }
+
+    /**
+     * Add the column an external-content index keeps its stems in, if it has none.
+     */
+    private function ensureStemsColumn(string $index): void
+    {
+        if (!$this->hasStemsColumn($index)) {
+            $this->connection->exec("ALTER TABLE {$index} ADD COLUMN _stems TEXT");
+        }
+    }
+
+    private function hasStemsColumn(string $index): bool
+    {
+        foreach ($this->connection->query("PRAGMA table_info({$index})")->fetchAll(\PDO::FETCH_ASSOC) as $column) {
+            if (strtolower((string)$column['name']) === '_stems') {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * The stems of what a document gives the raw FTS columns, as the text for
+     * the `_stems` column: the analyzer's tokens joined with spaces. They are
+     * made in the document's language, else the index's, else English. A
+     * language with no stemmer gets none, as stems equal to the words would
+     * only repeat the raw text.
+     *
+     * @param string[] $columnTexts The text of each raw FTS column of the document
+     * @param ?string $indexLanguage The language of the index (null: English)
+     */
+    private function buildStems(array $columnTexts, ?string $documentLanguage, ?string $indexLanguage): string
+    {
+        $language = $this->normalizeStemmingLanguage($documentLanguage) ?? $indexLanguage ?? 'english';
+        if (!StemmerFactory::isSupported($language)) {
+            return '';
+        }
+
+        $analyzed = $this->getAnalyzer()->analyze(implode(' ', $columnTexts), $language);
+        $tokens = is_array($analyzed) && isset($analyzed['tokens']) ? $analyzed['tokens'] : $analyzed;
+
+        return is_array($tokens) ? implode(' ', array_map('strval', $tokens)) : '';
+    }
+
     private function getSchemaMode(string $index): string
     {
         $mode = $this->getIndexMeta($index, 'schema_mode');
@@ -2434,15 +2718,22 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
      * the only place they are kept, which is why this has to be read before the
      * row is deleted or overwritten.
      *
-     * @return array{0: int, 1: ?string}|null doc_id and indexed text (null for a
-     *                                        meaning-only row, which has no FTS
-     *                                        entry), or null when the document
+     * On an index that stems, the stems are read back from the content table too,
+     * as they were stored, and never made again: the stemmer may have changed
+     * since, and FTS5 can only delete the terms it was given.
+     *
+     * @return array{0: int, 1: ?string, 2: ?string}|null doc_id, indexed text and
+     *                                        stored stems (null for a meaning-only
+     *                                        row, which has no FTS entry; the
+     *                                        stems are null on an index that does
+     *                                        not stem), or null when the document
      *                                        is not in the index
      */
     private function getIndexedFtsRow(string $index, string $id): ?array
     {
+        $stemsSql = $this->indexStems($index) ? ', _stems' : '';
         try {
-            $stmt = $this->connection->prepare("SELECT doc_id, content, metadata FROM {$index} WHERE id = ?");
+            $stmt = $this->connection->prepare("SELECT doc_id, content, metadata{$stemsSql} FROM {$index} WHERE id = ?");
             $stmt->execute([$id]);
             $row = $stmt->fetch(\PDO::FETCH_ASSOC);
         } catch (\PDOException $e) {
@@ -2457,7 +2748,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         // drop, and a 'delete' for it would corrupt FTS5's row statistics.
         $metadata = json_decode((string)($row['metadata'] ?? ''), true);
         if (is_array($metadata) && !empty($metadata['_meaning_only'])) {
-            return [(int)$row['doc_id'], null];
+            return [(int)$row['doc_id'], null, null];
         }
 
         $content = json_decode((string)($row['content'] ?? ''), true);
@@ -2465,6 +2756,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         return [
             (int)$row['doc_id'],
             $this->getFieldText(is_array($content) ? $content : [], 'content', $index),
+            isset($row['_stems']) ? (string)$row['_stems'] : null,
         ];
     }
 
@@ -2485,11 +2777,12 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
      */
     private function dropMeaningOnlyFromRebuiltFts(string $index): void
     {
+        $stemsSql = $this->indexStems($index) ? ', _stems' : ', NULL';
         $stmt = $this->connection->query(
-            "SELECT doc_id, content FROM {$index} WHERE json_extract(metadata, '$._meaning_only') IS NOT NULL"
+            "SELECT doc_id, content{$stemsSql} FROM {$index} WHERE json_extract(metadata, '$._meaning_only') IS NOT NULL"
         );
         foreach ($stmt->fetchAll(\PDO::FETCH_NUM) as $row) {
-            $this->deleteFtsRow($index, (int)$row[0], (string)$row[1]);
+            $this->deleteFtsRow($index, (int)$row[0], (string)$row[1], $row[2] === null ? null : (string)$row[2]);
         }
     }
 
@@ -2499,68 +2792,150 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
      * The text must be what the row was indexed with. Passing anything else — an
      * empty string, or the replacement text of a document being updated — deletes
      * nothing, and the old terms stay in the index pointing at a doc_id SQLite is
-     * free to hand to the next document.
+     * free to hand to the next document. On an index that stems, the same goes
+     * for the stems.
      */
-    private function deleteFtsRow(string $index, int $docId, ?string $indexedText): void
+    private function deleteFtsRow(string $index, int $docId, ?string $indexedText, ?string $indexedStems = null): void
     {
         if ($indexedText === null) {
             // Never indexed (a meaning-only row): nothing to remove.
             return;
         }
         try {
-            $sql = "INSERT INTO {$index}_fts({$index}_fts, rowid, content) VALUES('delete', ?, ?)";
-            $this->connection->prepare($sql)->execute([$docId, $indexedText]);
+            if ($this->indexStems($index)) {
+                $sql = "INSERT INTO {$index}_fts({$index}_fts, rowid, content, _stems) VALUES('delete', ?, ?, ?)";
+                $this->connection->prepare($sql)->execute([$docId, $indexedText, $indexedStems]);
+            } else {
+                $sql = "INSERT INTO {$index}_fts({$index}_fts, rowid, content) VALUES('delete', ?, ?)";
+                $this->connection->prepare($sql)->execute([$docId, $indexedText]);
+            }
         } catch (\PDOException $e) {
             // The row was never in the FTS index, so there is nothing to remove.
         }
     }
 
-    public function rebuildFts(string $index): void
+    /**
+     * Rebuild an index's FTS table from the documents it stores.
+     *
+     * Rebuilding also makes the stems again with the stemmer in use now. To
+     * switch an existing index to stemming or off it, or to change the
+     * language it stems in, give the new settings; without them the index
+     * keeps the ones it has.
+     *
+     * @param array{stemming?: bool, language?: ?string} $options
+     * @throws \InvalidArgumentException If the index cannot hold stems
+     */
+    public function rebuildFts(string $index, array $options = []): void
     {
         $this->validateIndexName($index);
         $this->ensureConnected();
         $schema = $this->getSchemaMode($index);
         $ftsColumns = $this->getFtsColumns($index);
+
+        $current = $this->stemmingSettings($index);
+        $changed = isset($options['stemming']) || array_key_exists('language', $options);
+        $stemming = isset($options['stemming']) ? (bool)$options['stemming'] : $current['enabled'];
+        $stemLanguage = array_key_exists('language', $options)
+            ? $this->normalizeStemmingLanguage($options['language'])
+            : $current['language'];
+        if ($stemming) {
+            $this->assertCanStem($ftsColumns, $this->getIndexMeta($index, 'fts_detail'));
+        }
+
         $prefix = $this->searchConfig['fts_prefix'] ?? null;
         $prefixSql = '';
         if (is_array($prefix) && !empty($prefix)) {
             $prefixSql = ", prefix='" . implode(' ', array_map('intval', $prefix)) . "'";
         }
-        $cols = implode(', ', array_map(fn($c) => $c, $ftsColumns));
-        $this->connection->exec("DROP TABLE IF EXISTS {$index}_fts");
-        if ($schema === 'external') {
-            $sql = "CREATE VIRTUAL TABLE {$index}_fts USING fts5({$cols}, content='{$index}', content_rowid='doc_id', tokenize='unicode61'{$prefixSql})";
-        } else {
-            $sql = "CREATE VIRTUAL TABLE {$index}_fts USING fts5(id UNINDEXED, {$cols}, tokenize='unicode61'{$prefixSql})";
-        }
-        $this->connection->exec($sql);
+        $ftsAllColumns = $stemming ? array_merge($ftsColumns, ['_stems']) : $ftsColumns;
+        $cols = implode(', ', $ftsAllColumns);
 
-        // Repopulate from stored docs, leaving out meaning-only ones
-        $stmt = $this->connection->query("SELECT id, content, metadata FROM {$index}");
-        $insCols = ($schema === 'external' ? 'rowid, ' : 'id, ') . implode(', ', $ftsColumns);
-        $placeholders = implode(', ', array_fill(0, count($ftsColumns) + 1, '?'));
-        $ins = $this->connection->prepare("INSERT INTO {$index}_fts ({$insCols}) VALUES ({$placeholders})");
-        while ($row = $stmt->fetch(\PDO::FETCH_ASSOC)) {
-            $id = $row['id'];
-            $meta = json_decode((string)($row['metadata'] ?? ''), true);
-            if (is_array($meta) && !empty($meta['_meaning_only'])) {
-                continue;
+        $ownTransaction = !$this->connection->inTransaction();
+        try {
+            if ($ownTransaction) {
+                $this->connection->beginTransaction();
             }
-            $doc = json_decode($row['content'], true) ?: [];
-            $vals = [];
+
             if ($schema === 'external') {
-                $docId = $this->getDocId($index, $id);
-                if ($docId === null) {
-                    continue;
+                if ($stemming) {
+                    $this->ensureStemsColumn($index);
+                } elseif ($this->hasStemsColumn($index)) {
+                    // Switched off: the column may stay, but holds no stale text
+                    $this->connection->exec("UPDATE {$index} SET _stems = NULL");
                 }
-                $vals[] = $docId;
+            }
+
+            $this->connection->exec("DROP TABLE IF EXISTS {$index}_fts_vocab");
+            $this->connection->exec("DROP TABLE IF EXISTS {$index}_fts_colvocab");
+            $this->connection->exec("DROP TABLE IF EXISTS {$index}_fts");
+            if ($schema === 'external') {
+                $sql = "CREATE VIRTUAL TABLE {$index}_fts USING fts5({$cols}, content='{$index}', content_rowid='doc_id', tokenize='unicode61'{$prefixSql})";
             } else {
-                $vals[] = $id;
+                $sql = "CREATE VIRTUAL TABLE {$index}_fts USING fts5(id UNINDEXED, {$cols}, tokenize='unicode61'{$prefixSql})";
             }
-            foreach ($ftsColumns as $col) {
-                $vals[] = $this->getFieldText($doc, $col, $index);
+            $this->connection->exec($sql);
+
+            // Repopulate from stored docs, leaving out meaning-only ones. Read in pages by
+            // rowid, as an external-content index has its stems written back to the rows.
+            $select = $this->connection->prepare(
+                "SELECT rowid AS _rid, id, content, metadata, language FROM {$index} WHERE rowid > ? ORDER BY rowid LIMIT 500"
+            );
+            $insCols = ($schema === 'external' ? 'rowid, ' : 'id, ') . implode(', ', $ftsAllColumns);
+            $placeholders = implode(', ', array_fill(0, count($ftsAllColumns) + 1, '?'));
+            $ins = $this->connection->prepare("INSERT INTO {$index}_fts ({$insCols}) VALUES ({$placeholders})");
+            $setStems = $schema === 'external' && $stemming
+                ? $this->connection->prepare("UPDATE {$index} SET _stems = ? WHERE rowid = ?")
+                : null;
+
+            $lastRowId = 0;
+            do {
+                $select->execute([$lastRowId]);
+                $rows = $select->fetchAll(\PDO::FETCH_ASSOC);
+                $select->closeCursor();
+
+                foreach ($rows as $row) {
+                    $lastRowId = (int)$row['_rid'];
+                    $meta = json_decode((string)($row['metadata'] ?? ''), true);
+                    if (is_array($meta) && !empty($meta['_meaning_only'])) {
+                        if ($setStems !== null) {
+                            $setStems->execute([null, $lastRowId]);
+                        }
+                        continue;
+                    }
+                    $doc = json_decode($row['content'], true) ?: [];
+                    $vals = [$schema === 'external' ? $lastRowId : $row['id']];
+                    $columnTexts = [];
+                    foreach ($ftsColumns as $col) {
+                        $columnTexts[] = $this->getFieldText($doc, $col, $index);
+                    }
+                    $vals = array_merge($vals, $columnTexts);
+                    if ($stemming) {
+                        $stems = $this->buildStems($columnTexts, $row['language'], $stemLanguage);
+                        $vals[] = $stems;
+                        if ($setStems !== null) {
+                            $setStems->execute([$stems, $lastRowId]);
+                        }
+                    }
+                    $ins->execute($vals);
+                }
+            } while (count($rows) === 500);
+
+            if ($changed) {
+                $this->connection->exec("CREATE TABLE IF NOT EXISTS {$index}_meta (key TEXT PRIMARY KEY, value TEXT)");
+                $this->setIndexMeta($index, 'stemming', $stemming ? '1' : '0');
+                $this->setIndexMeta($index, 'stemming_language', $stemLanguage ?? '');
             }
-            $ins->execute($vals);
+
+            if ($ownTransaction) {
+                $this->connection->commit();
+            }
+        } catch (\Throwable $e) {
+            if ($ownTransaction && $this->connection->inTransaction()) {
+                $this->connection->rollBack();
+            }
+            throw $e;
+        } finally {
+            unset($this->ftsColumnsCache[$index], $this->stemmingCache[$index]);
         }
         $this->indexChanged($index);
     }
@@ -3215,8 +3590,11 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                         $allTerms[$row['term']] = ($allTerms[$row['term']] ?? 0) + $row['frequency'];
                     }
                 } else {
-                    // No terms table - try FTS5 vocabulary for other fuzzy algorithms
-                    $vocabTable = "{$table}_fts_vocab";
+                    // No terms table - try FTS5 vocabulary for other fuzzy algorithms.
+                    // An index that stems also holds the stems as terms, which are not
+                    // words to correct to, so it is read by column and leaves them out.
+                    $stems = $this->indexStems($table);
+                    $vocabTable = $stems ? "{$table}_fts_colvocab" : "{$table}_fts_vocab";
 
                     // Check if vocab table exists
                     $stmt = $this->connection->prepare("
@@ -3228,7 +3606,9 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                     if (!$stmt->fetch()) {
                         // Create vocab table if it doesn't exist
                         try {
-                            $this->connection->exec("CREATE VIRTUAL TABLE {$vocabTable} USING fts5vocab('{$table}_fts', 'row')");
+                            $this->connection->exec(
+                                "CREATE VIRTUAL TABLE {$vocabTable} USING fts5vocab('{$table}_fts', '" . ($stems ? 'col' : 'row') . "')"
+                            );
                         } catch (\PDOException $e) {
                             // Skip if can't create vocab table
                             continue;
@@ -3236,13 +3616,25 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                     }
 
                     // Query vocab table
-                    $sql = "
-                        SELECT term, doc as frequency
-                        FROM {$vocabTable}
-                        WHERE doc >= ?
-                        ORDER BY doc DESC
-                        LIMIT ?
-                    ";
+                    if ($stems) {
+                        $sql = "
+                            SELECT term, SUM(doc) as frequency
+                            FROM {$vocabTable}
+                            WHERE col != '_stems'
+                            GROUP BY term
+                            HAVING frequency >= ?
+                            ORDER BY frequency DESC
+                            LIMIT ?
+                        ";
+                    } else {
+                        $sql = "
+                            SELECT term, doc as frequency
+                            FROM {$vocabTable}
+                            WHERE doc >= ?
+                            ORDER BY doc DESC
+                            LIMIT ?
+                        ";
+                    }
 
                     $stmt = $this->connection->prepare($sql);
                     $stmt->bindValue(1, $minFrequency, \PDO::PARAM_INT);
