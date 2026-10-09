@@ -32,6 +32,7 @@ class StandardAnalyzer implements AnalyzerInterface
     private array $stemMemo = [];
     private int $stemMemoSize = 0;
     private int $stemMemoGeneration = -1;
+    private bool $useOverriddenStem;
 
     /** The most languages whose stop word lists are kept ready; a language can come from a search request */
     private const STOP_WORD_SETS_LIMIT = 32;
@@ -51,6 +52,7 @@ class StandardAnalyzer implements AnalyzerInterface
     {
         // All other list providers are private; an overridden public provider may change on every call.
         $this->keepStopWordSets = (new \ReflectionMethod($this, 'getStopWords'))->getDeclaringClass()->getName() === self::class;
+        $this->useOverriddenStem = (new \ReflectionMethod($this, 'stem'))->getDeclaringClass()->getName() !== self::class;
         $this->config = array_merge([
             'min_word_length' => 2,
             'max_word_length' => 50,
@@ -81,12 +83,14 @@ class StandardAnalyzer implements AnalyzerInterface
 
         // The language is the same for every token, so its stemmer is looked up once
         $stemLanguage = $this->languageOrDefault($language);
-        $canonical = StemmerFactory::canonical($stemLanguage);
+        $canonical = $this->useOverriddenStem ? null : StemmerFactory::canonical($stemLanguage);
         $this->syncStemMemo();
 
         $analyzed = [];
         foreach ($tokens as $token) {
-            $stemmed = $canonical === null ? $token : $this->stemRemembered($canonical, $stemLanguage, $token);
+            $stemmed = $this->useOverriddenStem
+                ? $this->stem($token, $language)
+                : ($canonical === null ? $token : $this->stemRemembered($canonical, $stemLanguage, $token));
             if ($this->isValidToken($stemmed)) {
                 $analyzed[] = $stemmed;
             }

@@ -554,6 +554,16 @@ class StandardAnalyzerTest extends TestCase
         $this->assertSame('chanson', $this->analyzer->stem('chansons', 'fr_FR'));
     }
 
+    public function testAnalyzeCallsAnOverriddenStemForEveryToken(): void
+    {
+        $analyzer = new class extends OverriddenStemTestAnalyzer {};
+        foreach (['en', 'unknown', ''] as $language) {
+            $analyzer->calls = [];
+            $this->assertSame(['custom', 'custom', 'custom'], $analyzer->analyze('cats dogs cats', $language)['tokens']);
+            $this->assertSame([['cats', $language], ['dogs', $language], ['cats', $language]], $analyzer->calls);
+        }
+    }
+
     public function testAnalyzeDoesNotStemAnUnsupportedLanguage(): void
     {
         $result = $this->analyzer->analyze('running cats', 'it');
@@ -831,6 +841,16 @@ class StandardAnalyzerTest extends TestCase
         }
 
         return $property->getValue($analyzer);
+    }
+}
+
+class OverriddenStemTestAnalyzer extends StandardAnalyzer
+{
+    public array $calls = [];
+    public function stem(string $word, ?string $language = null): string
+    {
+        $this->calls[] = [$word, $language];
+        return 'custom';
     }
 }
 
