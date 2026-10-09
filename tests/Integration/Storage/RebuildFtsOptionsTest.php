@@ -180,4 +180,108 @@ class RebuildFtsOptionsTest extends TestCase
         $this->assertStringContainsString("content='docs'", $this->createStatement());
         $this->assertSame(['a'], $this->ids($storage->search('docs', ['query' => 'running'])));
     }
+
+    /**
+     * Replace the index's FTS table with one written by hand, as another tool might have, and
+     * give it the documents again.
+     */
+    private function handWrittenTable(SqliteStorage $storage, string $arguments): void
+    {
+        $storage->insert('docs', $this->doc('a', 'the dogs were running'));
+        $pdo = new \PDO('sqlite:' . $this->path);
+        $pdo->exec('DROP TABLE docs_fts');
+        $pdo->exec("CREATE VIRTUAL TABLE docs_fts USING fts5(content, content='docs', content_rowid='doc_id', {$arguments})");
+        $storage->rebuildFts('docs');
+    }
+
+    public function writtenOptions(): array
+    {
+        $tokenizerText = '"unicode61 tokenchars \' prefix=9 detail=column \'"';
+
+        return [
+            'text that looks like options in the tokenizer' => ["tokenize={$tokenizerText}, prefix='2 4', detail=full"],
+            'the same text after the real options' => ["prefix='2 4', detail=full, tokenize={$tokenizerText}"],
+            'the same text in single quotes with escapes' => ["prefix='2 4', detail=full, tokenize='unicode61 tokenchars '' prefix=9 detail=column '''"],
+            'brackets' => ['prefix=[2 4], detail=[full]'],
+            'backticks' => ['prefix=`2 4`, detail=`full`'],
+            'double quotes' => ['prefix="2 4", detail="full"'],
+            'single quotes' => ["prefix='2 4', detail='full'"],
+            'spacing around the equals sign' => ["  prefix  =  '2 4' ,   detail =  full  "],
+            'uppercase names' => ["PREFIX = '2 4', DETAIL = 'full'"],
+            'a comma-separated prefix' => ["prefix='2,4', detail=full"],
+        ];
+    }
+
+    /** @dataProvider writtenOptions */
+    public function test_the_options_of_a_hand_written_table_are_read_by_name_outside_any_quoting(string $arguments): void
+    {
+        $storage = $this->open();
+        $this->createIndex($storage, 'external');
+        $this->handWrittenTable($storage, $arguments);
+
+        $sql = $this->createStatement();
+        $this->assertStringContainsString("prefix='2 4'", $sql);
+        $this->assertStringContainsString("detail='full'", $sql);
+        $this->assertStringNotContainsString("prefix='9", $sql);
+        $this->assertStringNotContainsString("detail='column'", $sql);
+        $this->assertSame(['a'], $this->ids($storage->search('docs', ['query' => 'running'])));
+    }
+
+    public function test_a_bare_prefix_is_read(): void
+    {
+        $storage = $this->open();
+        $this->createIndex($storage, 'external');
+        $this->handWrittenTable($storage, 'prefix=3');
+
+        $this->assertStringContainsString("prefix='3'", $this->createStatement());
+    }
+
+    public function test_detail_column_in_brackets_still_refuses_stemming(): void
+    {
+        $storage = $this->open();
+        $this->createIndex($storage, 'external');
+        $this->handWrittenTable($storage, 'detail=[column]');
+        $this->assertStringContainsString("detail='column'", $this->createStatement());
+
+        $this->expectException(\InvalidArgumentException::class);
+        $storage->rebuildFts('docs', ['stemming' => true]);
+    }
+
+    public function test_options_named_only_inside_a_tokenizer_are_not_options(): void
+    {
+        $storage = $this->open();
+        $this->createIndex($storage, 'external');
+        $this->handWrittenTable($storage, 'tokenize="unicode61 tokenchars \' prefix=9 detail=column \'"');
+
+        $sql = $this->createStatement();
+        $this->assertStringNotContainsString('prefix=', $sql);
+        $this->assertStringNotContainsString('detail=', $sql);
+        // It has the full detail, so nothing stops it from stemming
+        $storage->rebuildFts('docs', ['stemming' => true]);
+        $this->assertSame('english', $storage->stemmingFor('docs'));
+    }
+
+    /** @dataProvider modes */
+    public function test_the_options_of_the_tables_this_library_creates_are_read_back(string $mode): void
+    {
+        $read = new \ReflectionMethod(SqliteStorage::class, 'existingFtsOptions');
+        if (PHP_VERSION_ID < 80100) {
+            $read->setAccessible(true);
+        }
+        $connection = new \ReflectionProperty(SqliteStorage::class, 'connection');
+        if (PHP_VERSION_ID < 80100) {
+            $connection->setAccessible(true);
+        }
+
+        $storage = $this->open();
+        $this->createIndex($storage, $mode, ['fts' => ['prefix' => [2, 4], 'detail' => 'column']]);
+        $this->assertSame(['prefix' => [2, 4], 'detail' => 'column'], $read->invoke($storage, 'docs'));
+
+        $connection->getValue($storage)->exec('DROP TABLE docs_fts');
+        $this->createIndex($storage, $mode);
+        $this->assertSame(['prefix' => [], 'detail' => null], $read->invoke($storage, 'docs'));
+
+        $connection->getValue($storage)->exec('DROP TABLE docs_fts');
+        $this->assertNull($read->invoke($storage, 'docs'));
+    }
 }

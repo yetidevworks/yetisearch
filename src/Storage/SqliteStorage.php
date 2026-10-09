@@ -2882,22 +2882,113 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             return null;
         }
 
-        // An FTS5 option value is quoted with ' or ", or a bare word
-        $value = '(?:\'([^\']*)\'|"([^"]*)"|([^\s,)]+))';
         $prefix = [];
-        if (preg_match('/[\s,(]prefix\s*=\s*' . $value . '/i', $sql, $m)) {
-            foreach (preg_split('/[\s,]+/', trim($m[1] . ($m[2] ?? '') . ($m[3] ?? ''))) as $n) {
-                if (ctype_digit($n) && (int)$n > 0) {
-                    $prefix[] = (int)$n;
-                }
-            }
-        }
         $detail = null;
-        if (preg_match('/[\s,(]detail\s*=\s*' . $value . '/i', $sql, $m)) {
-            $detail = strtolower($m[1] . ($m[2] ?? '') . ($m[3] ?? ''));
+        foreach (self::ftsTableArguments($sql) as $argument) {
+            // Only an argument that is itself `name = value` is an option; the same text
+            // inside a quoted tokenizer argument, or in a column name, is not
+            if (!preg_match('/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/s', $argument, $m)) {
+                continue;
+            }
+            $name = strtolower($m[1]);
+            if ($name === 'prefix') {
+                foreach (preg_split('/[\s,]+/', trim(self::unquoteFtsValue($m[2]))) as $n) {
+                    if (ctype_digit($n) && (int)$n > 0) {
+                        $prefix[] = (int)$n;
+                    }
+                }
+            } elseif ($name === 'detail') {
+                $detail = strtolower(trim(self::unquoteFtsValue($m[2])));
+            }
         }
 
         return ['prefix' => $prefix, 'detail' => $detail];
+    }
+
+    /**
+     * The top-level arguments of the `fts5(...)` in a CREATE VIRTUAL TABLE statement: split on
+     * the commas outside any quoted section, which SQLite allows as 'text' and "text" (a doubled
+     * quote is an escaped one), [text] and `text` (a doubled backtick is an escaped one).
+     *
+     * @return string[] The arguments, trimmed
+     */
+    private static function ftsTableArguments(string $sql): array
+    {
+        if (!preg_match('/\busing\s+fts5\s*\(/i', $sql, $m, PREG_OFFSET_CAPTURE)) {
+            return [];
+        }
+
+        $arguments = [];
+        $current = '';
+        $depth = 0;
+        $length = strlen($sql);
+        for ($i = $m[0][1] + strlen($m[0][0]); $i < $length; $i++) {
+            $char = $sql[$i];
+            if ($char === "'" || $char === '"' || $char === '`' || $char === '[') {
+                $close = $char === '[' ? ']' : $char;
+                $current .= $char;
+                for ($i++; $i < $length; $i++) {
+                    $current .= $sql[$i];
+                    if ($sql[$i] === $close) {
+                        if ($close !== ']' && ($sql[$i + 1] ?? '') === $close) {
+                            $current .= $sql[++$i];
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                continue;
+            }
+            if ($char === '(') {
+                $depth++;
+            } elseif ($char === ')') {
+                if ($depth === 0) {
+                    break;
+                }
+                $depth--;
+            } elseif ($char === ',' && $depth === 0) {
+                $arguments[] = trim($current);
+                $current = '';
+                continue;
+            }
+            $current .= $char;
+        }
+        if (trim($current) !== '') {
+            $arguments[] = trim($current);
+        }
+
+        return $arguments;
+    }
+
+    /**
+     * The value of an FTS5 option as written: a bare word, or text in any of SQLite's quoting forms.
+     */
+    private static function unquoteFtsValue(string $value): string
+    {
+        $value = trim($value);
+        if ($value === '') {
+            return '';
+        }
+        $open = $value[0];
+        if ($open !== "'" && $open !== '"' && $open !== '`' && $open !== '[') {
+            return $value;
+        }
+        $close = $open === '[' ? ']' : $open;
+        $text = '';
+        $length = strlen($value);
+        for ($i = 1; $i < $length; $i++) {
+            if ($value[$i] === $close) {
+                if ($close !== ']' && ($value[$i + 1] ?? '') === $close) {
+                    $text .= $close;
+                    $i++;
+                    continue;
+                }
+                break;
+            }
+            $text .= $value[$i];
+        }
+
+        return $text;
     }
 
     /**
