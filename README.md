@@ -775,6 +775,17 @@ Rebuild an index after you register a different stemmer for its language, as its
 
 A rebuild makes the FTS table again with the options it has, its `prefix` indexes and its `detail`, read from the table itself, so an index created with its own `fts` options keeps them.
 
+#### What stemming costs
+
+Stemming makes the index bigger and indexing slower, as every document is stemmed when it is written, and a search that also matches by stems matches more documents. On the 31,944 movies of `benchmarks/movies.json` (title, overview and genres in an external-content index, PHP 8.4, batches of 250), indexing took 2.4 seconds with stemming on and 1.0 second with it off, and the database was 35.9 MB against 23.7 MB. A search that finds words by their stems took a median of 1.9 ms against 0.9 ms without stemming, as a word like `movies` then matches 2,990 documents instead of 184. The analyzer remembers the stems of up to 50,000 words (about 6 MB) so a word that comes back is not stemmed again.
+
+`benchmarks/stemming-benchmark.php` repeats these measurements on your own machine, with stemming on or off, and prints the median of several runs:
+
+```bash
+php benchmarks/stemming-benchmark.php --stemming=off --runs=3
+php benchmarks/stemming-benchmark.php --stemming=on --runs=3
+```
+
 #### Registering stemmers
 
 `StemmerFactory::register()` adds a stemmer for a language that has none, or replaces a built-in one:
