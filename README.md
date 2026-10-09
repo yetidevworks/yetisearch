@@ -26,6 +26,8 @@ A powerful, pure-PHP search engine library with advanced full-text search capabi
   - [Document Chunking](#document-chunking)
   - [Field Boosting and Exact Match Scoring](#field-boosting-and-exact-match-scoring)
   - [Multi-language Support](#multi-language-support)
+    - [Stemming](#stemming)
+    - [Registering stemmers](#registering-stemmers)
   - [Custom Stop Words](#custom-stop-words)
   - [Geo-Spatial Search](#geo-spatial-search)
   - [Search Result Deduplication](#search-result-deduplication)
@@ -64,7 +66,7 @@ A powerful, pure-PHP search engine library with advanced full-text search capabi
 - 🎚️ **Self-tuning noise gate** - each index measures what nonsense scores against it, so `asdf` finds nothing while real queries still match by meaning
 - 📄 **Automatic document chunking** for indexing large documents
 - 🎯 **Smart result deduplication** - shows best match per document by default
-- 🌍 **Multi-language support** with built-in stemming for multiple languages
+- 🌍 **Multi-language stemming, per index and opt-in** - `connect` finds "connected", with built-in English, French, German and Spanish stemmers and a way to register your own
 - ⚡ **Lightning-fast** indexing and searching with SQLite backend
 - 🔧 **Flexible architecture** with interfaces for easy extension
 - 📊 **Advanced scoring** with intelligent field boosting and exact match prioritization
@@ -446,7 +448,10 @@ $config = [
         'strip_html' => true,           // Remove HTML tags
         'strip_punctuation' => true,    // Remove punctuation
         'expand_contractions' => true,  // Expand contractions (e.g., don't -> do not)
-        'custom_stop_words' => ['example', 'custom'], // Additional stop words to exclude
+        'custom_stop_words' => ['example', 'custom'], // Additional stop words to exclude, in every language
+        'stop_words' => [               // v2.6.0+: stop words per language, replacing the built-in list of that language
+            'it' => ['il', 'la', 'di']  // or giving one to a language that has none
+        ],
         'disable_stop_words' => false   // Set to true to disable all stop word filtering
     ],
     'indexer' => [
@@ -454,6 +459,8 @@ $config = [
         'auto_flush' => true,           // Auto-flush after batch_size
         'chunk_size' => 1000,           // Characters per chunk
         'chunk_overlap' => 100,         // Overlap between chunks
+        'stemming' => false,            // v2.6.0+: also find words by their stems; fixed when the index is created
+        'language' => null,             // v2.6.0+: language an index stems in when a document or query names none (null: English)
         'fields' => [                   // Field configuration
             'title' => ['boost' => 3.0, 'store' => true],
             'content' => ['boost' => 1.0, 'store' => true],
@@ -489,6 +496,7 @@ $config = [
         'exact_match_boost' => 2.0,     // Multiplier for exact phrase matches
         'exact_terms_boost' => 1.5,     // Multiplier for all exact terms present
         'fuzzy_score_penalty' => 0.5,   // Penalty factor for fuzzy-only matches
+        'stem_weight' => 0.5,           // v2.6.0+: weight of a match on a word's stem, on an index that stems
         
         // NEW: Two-pass search configuration (v2.1.0+)
         'two_pass_search' => false,     // Enable two-pass search for better primary field results
@@ -679,33 +687,133 @@ For comprehensive fuzzy search documentation, see the [Fuzzy Search Guide](docs/
 
 ### Multi-language Support
 
+#### Stemming
+
+YetiSearch can find a word by its stem. With stemming on, `connect` finds "connected" and "connection", `runs` finds "running", and `chanson` finds "chansons". Stemming is off by default and is chosen for an index when the index is created:
+
 ```php
-// Index documents in different languages
-$indexer->insert([
-    'id' => 'doc-fr-1',
-    'title' => 'Introduction à PHP',
-    'content' => 'PHP est un langage de programmation...',
-    'language' => 'french'
+// Stemming on, in English
+$search->createIndex('articles', ['stemming' => true]);
+
+// Stemming on, in French
+$search->createIndex('pages', [
+    'stemming' => true,
+    'language' => 'fr',
 ]);
 
-$indexer->insert([
-    'id' => 'doc-de-1',
-    'title' => 'Einführung in PHP',
-    'content' => 'PHP ist eine Programmiersprache...',
-    'language' => 'german'
-]);
-
-// Search with language-specific stemming
-$results = $search->search('pages', 'programmation', [
-    'language' => 'french'
+// The same through the indexer config, for an index created by its first document
+$search = new YetiSearch([
+    'indexer' => ['stemming' => true, 'language' => 'fr'],
 ]);
 ```
 
-Supported languages:
-- English (default)
-- French
-- German
-- Spanish
+- `stemming` (default `false`): keep the stems of the indexed text next to the text, and search both.
+- `language` (default `null`, meaning English): the language the index stems in, for a document that has no `language` of its own and for a query that has none.
+
+Both are fixed when the index is created: creating an index that already exists again, with other options, does not change whether or how it stems. An index that does not stem is searched exactly as before.
+
+A document is stemmed in its own `language`, else the language of the index. A search is stemmed in its `language` option, else the language of the index. The `language` option of a search also keeps only the documents indexed with that same `language`.
+
+```php
+// Index documents in different languages, in an index that stems
+$indexer->insert([
+    'id' => 'doc-fr-1',
+    'content' => [
+        'title' => 'Introduction à PHP',
+        'content' => 'PHP est un langage de programmation. Des chansons sur PHP...',
+    ],
+    'language' => 'fr'
+]);
+
+// Finds doc-fr-1: 'chanson' and 'chansons' have the same French stem
+$results = $search->search('pages', 'chanson', [
+    'language' => 'fr'
+]);
+```
+
+Languages are known by name, by code and by locale. The built-in stemmers are:
+
+| Language | Names |
+|---|---|
+| English (default) | `english`, `en`, `eng` |
+| French | `french`, `fr`, `fra`, `francais` |
+| German | `german`, `de`, `deu`, `deutsch` |
+| Spanish | `spanish`, `es`, `spa`, `espanol` |
+
+A locale such as `en_US`, `en-GB` or `fr-CA` is the language before the underscore or hyphen, unless that locale is registered as it is. Case and surrounding spaces do not matter. Stop words are found the same way: `fr` and `fr_FR` use the French list.
+
+A language with no stemmer, such as Italian until you register one, is not stemmed. Its documents get no stems and its words match as typed; they are never stemmed with the English stemmer.
+
+What changes on an index that stems:
+
+- Exact matches rank above matches that only share the stem. The stems count for `stem_weight` (default `0.5`) of a word as typed in the ranking; pass it as a search option, or in the `search` config. `0` leaves stems out of the ranking and still finds the documents.
+- Totals, paging, facet counts and `multiSearch()` count the documents found by their stems too. An index that stems and one that does not can be searched together.
+- A result found through "connected" for `connect` has "connected" highlighted.
+- Typo correction suggests the words people wrote, not their stems.
+- In a fuzzy search with typo correction (the default when fuzzy is on) every word must be in a document, either as typed or by its stem.
+- A word added by a synonym or a fuzzy variation is matched as typed, not by its stem.
+- The query's stop words are those of its language. A query with no language on an index that stems uses the stop words of the index's language.
+
+The stems are kept in the index, in a `_stems` column of the FTS table (and of the table that holds the documents, for external content), so a field cannot be named `_stems` on an index that stems. They are made when a document is written, with the stemmer registered at that time.
+
+To switch an existing index to stemming, or off it, without indexing its documents again, rebuild its full-text index with the new settings. The stems are made from the documents the index stores:
+
+```php
+$search->rebuildFts('articles', ['stemming' => true]);                    // on, in English
+$search->rebuildFts('articles', ['stemming' => true, 'language' => 'fr']); // on, in French
+$search->rebuildFts('articles', ['stemming' => false]);                   // off
+
+// Without options, a rebuild keeps the settings the index has and makes its stems again
+$search->rebuildFts('articles');
+```
+
+Rebuild an index after you register a different stemmer for its language, as its stems are still the ones the earlier stemmer made.
+
+#### Registering stemmers
+
+`StemmerFactory::register()` adds a stemmer for a language that has none, or replaces a built-in one:
+
+```php
+use YetiSearch\Stemmer\StemmerFactory;
+use YetiSearch\Stemmer\StemmerInterface;
+
+class ItalianStemmer implements StemmerInterface
+{
+    public function stem(string $word): string
+    {
+        return preg_replace('/(?:i|e|o|a)$/', '', $word);
+    }
+
+    public function getLanguage(): string
+    {
+        return 'it';
+    }
+}
+
+// The canonical name, the stemmer, and other names for the language
+StemmerFactory::register('italian', ItalianStemmer::class, ['it', 'ita', 'italiano']);
+
+$search->createIndex('articoli', ['stemming' => true, 'language' => 'it']);
+```
+
+The stemmer is a class name implementing `StemmerInterface`, an instance of one, or a callable that returns one. A callable is called once, the first time the language is needed. Something else, a class that does not exist or one that does not implement the interface, throws an `InvalidArgumentException`.
+
+Registering the name of a built-in language replaces its stemmer, and its other names keep pointing at it:
+
+```php
+// 'english', 'en' and 'eng' now use this stemmer
+StemmerFactory::register('english', DomainStemmer::class);
+```
+
+An alias that already belongs to another language moves to the one registered. Registration lasts for the process, so register your stemmers where you build `YetiSearch`, before indexing or searching, on every request.
+
+```php
+StemmerFactory::canonical('it_IT');       // 'italian'; null for a language with no stemmer
+StemmerFactory::isSupported('pt_BR');     // false until a stemmer is registered for 'pt'
+StemmerFactory::getSupportedLanguages();  // ['english', 'french', 'german', 'spanish', 'italian']
+StemmerFactory::create('ita');            // the ItalianStemmer
+StemmerFactory::reset();                  // back to the four built-in stemmers; for tests
+```
 
 ### Custom Stop Words
 
@@ -735,6 +843,22 @@ $search = new YetiSearch([
 ```
 
 Custom stop words are applied in addition to the default language-specific stop words. They are case-insensitive and apply across all languages.
+
+Stop words are looked up by the language of the text or query, by name, code or locale: `french`, `fr` and `fr_FR` are the same list. English, French, German and Spanish have built-in lists. A language with no list, such as Italian, has no stop words, so nothing is removed from its text until you give it a list. The `stop_words` option gives a list per language, replacing the built-in list of that language or providing one for a language that has none:
+
+```php
+$search = new YetiSearch([
+    'analyzer' => [
+        'stop_words' => [
+            'it' => ['il', 'la', 'di', 'che'],      // a list for Italian
+            'french' => ['alors', 'donc', 'ainsi'], // instead of the built-in French list
+        ],
+        'custom_stop_words' => ['lorem'],           // still added to whichever list applies
+    ]
+]);
+```
+
+The keys are language names, codes or locales, and the words are case-insensitive. With no language, English is used.
 
 ### Geo-Spatial Search
 
@@ -1740,7 +1864,7 @@ YetiSearch/
 
 ### Key Components
 
-- **Analyzer**: Tokenizes and processes text (stemming, stop words, etc.)
+- **Analyzer**: Tokenizes and processes text (stop words, stemming, etc.); on an index that stems it makes the stems that are kept and searched
 - **Indexer**: Manages document indexing and updates
 - **SearchEngine**: Handles search queries and result processing
 - **Storage**: Abstracts the storage backend (currently SQLite)
@@ -1832,7 +1956,7 @@ $search->delete(string $indexName, string $documentId);
 $search->deleteByIdPrefix(string $indexName, string $prefix, bool $rebuildFts = true): int;
 $search->clear(string $indexName);
 $search->optimize(string $indexName);
-$search->rebuildFts(string $indexName);
+$search->rebuildFts(string $indexName, array $options = []);  // options: 'stemming' (bool), 'language' (?string)
 $search->getStats(string $indexName);
 $search->listIndices(): array;
 $search->close(): void;
