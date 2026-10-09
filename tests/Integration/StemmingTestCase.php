@@ -59,7 +59,9 @@ abstract class StemmingTestCase extends TestCase
     protected function storage(YetiSearch $search): SqliteStorage
     {
         $method = new \ReflectionMethod($search, 'getStorage');
-        $method->setAccessible(true);
+        if (PHP_VERSION_ID < 80100) {
+            $method->setAccessible(true);
+        }
 
         return $method->invoke($search);
     }
@@ -67,7 +69,9 @@ abstract class StemmingTestCase extends TestCase
     protected function pdo(YetiSearch $search): \PDO
     {
         $property = new \ReflectionProperty(SqliteStorage::class, 'connection');
-        $property->setAccessible(true);
+        if (PHP_VERSION_ID < 80100) {
+            $property->setAccessible(true);
+        }
 
         return $property->getValue($this->storage($search));
     }
