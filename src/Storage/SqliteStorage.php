@@ -2861,6 +2861,39 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     }
 
     /**
+     * The prefix indexes and the detail the index's FTS5 table was created with, read from its
+     * CREATE VIRTUAL TABLE statement.
+     *
+     * @return array{prefix: int[], detail: ?string}|null null when the index has no FTS table
+     */
+    private function existingFtsOptions(string $index): ?array
+    {
+        $stmt = $this->connection->prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?");
+        $stmt->execute([$index . '_fts']);
+        $sql = $stmt->fetchColumn();
+        if (!is_string($sql)) {
+            return null;
+        }
+
+        // An FTS5 option value is quoted with ' or ", or a bare word
+        $value = '(?:\'([^\']*)\'|"([^"]*)"|([^\s,)]+))';
+        $prefix = [];
+        if (preg_match('/[\s,(]prefix\s*=\s*' . $value . '/i', $sql, $m)) {
+            foreach (preg_split('/[\s,]+/', trim($m[1] . ($m[2] ?? '') . ($m[3] ?? ''))) as $n) {
+                if (ctype_digit($n) && (int)$n > 0) {
+                    $prefix[] = (int)$n;
+                }
+            }
+        }
+        $detail = null;
+        if (preg_match('/[\s,(]detail\s*=\s*' . $value . '/i', $sql, $m)) {
+            $detail = strtolower($m[1] . ($m[2] ?? '') . ($m[3] ?? ''));
+        }
+
+        return ['prefix' => $prefix, 'detail' => $detail];
+    }
+
+    /**
      * Rebuild an index's FTS table from the documents it stores.
      *
      * Rebuilding also makes the stems again with the stemmer in use now. To
@@ -2885,15 +2918,25 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         $stemLanguage = array_key_exists('language', $options)
             ? $this->normalizeStemmingLanguage($options['language'])
             : $current['language'];
+
+        // The table is made again with the options it has now, its prefix indexes and its detail,
+        // whatever created it: they are read from its CREATE statement, which also covers an index
+        // an older version made, as it kept nothing about them. Only an index with no FTS table
+        // falls back to the configured prefix and the detail it was created with.
+        $existing = $this->existingFtsOptions($index);
+        $prefix = $existing !== null ? $existing['prefix'] : ($this->searchConfig['fts_prefix'] ?? null);
+        $detail = $existing !== null ? $existing['detail'] : $this->getIndexMeta($index, 'fts_detail');
         if ($stemming) {
-            $this->assertCanStem($ftsColumns, $this->getIndexMeta($index, 'fts_detail'));
+            $this->assertCanStem($ftsColumns, $detail);
         }
 
-        $prefix = $this->searchConfig['fts_prefix'] ?? null;
         $prefixSql = '';
         if (is_array($prefix) && !empty($prefix)) {
             $prefixSql = ", prefix='" . implode(' ', array_map('intval', $prefix)) . "'";
         }
+        $detailSql = is_string($detail) && in_array(strtolower($detail), ['full', 'column', 'none'], true)
+            ? ", detail='" . strtolower($detail) . "'"
+            : '';
         $ftsAllColumns = $stemming ? array_merge($ftsColumns, ['_stems']) : $ftsColumns;
         $cols = implode(', ', $ftsAllColumns);
 
@@ -2916,9 +2959,9 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             $this->connection->exec("DROP TABLE IF EXISTS {$index}_fts_colvocab");
             $this->connection->exec("DROP TABLE IF EXISTS {$index}_fts");
             if ($schema === 'external') {
-                $sql = "CREATE VIRTUAL TABLE {$index}_fts USING fts5({$cols}, content='{$index}', content_rowid='doc_id', tokenize='unicode61'{$prefixSql})";
+                $sql = "CREATE VIRTUAL TABLE {$index}_fts USING fts5({$cols}, content='{$index}', content_rowid='doc_id', tokenize='unicode61'{$prefixSql}{$detailSql})";
             } else {
-                $sql = "CREATE VIRTUAL TABLE {$index}_fts USING fts5(id UNINDEXED, {$cols}, tokenize='unicode61'{$prefixSql})";
+                $sql = "CREATE VIRTUAL TABLE {$index}_fts USING fts5(id UNINDEXED, {$cols}, tokenize='unicode61'{$prefixSql}{$detailSql})";
             }
             $this->connection->exec($sql);
 

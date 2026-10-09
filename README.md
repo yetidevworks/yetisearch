@@ -771,6 +771,8 @@ $search->rebuildFts('articles');
 
 Rebuild an index after you register a different stemmer for its language, as its stems are still the ones the earlier stemmer made.
 
+A rebuild makes the FTS table again with the options it has, its `prefix` indexes and its `detail`, read from the table itself, so an index created with its own `fts` options keeps them.
+
 #### Registering stemmers
 
 `StemmerFactory::register()` adds a stemmer for a language that has none, or replaces a built-in one:
