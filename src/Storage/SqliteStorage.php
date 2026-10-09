@@ -1454,10 +1454,10 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 ];
             }
 
-            // A search with nothing but text (no filter, language, location or sort) is ranked
+            // A first page with nothing but text (no filter, language, location or sort) is ranked
             // on the FTS table alone, and only the documents of the page are read
             $rankedRows = null;
-            if (isset($plainSql) && $sql === $plainSql && $params === [$matchQuery, $effectiveLimit, $offset]) {
+            if ($offset == 0 && isset($plainSql) && $sql === $plainSql && $params === [$matchQuery, $effectiveLimit, $offset]) {
                 $rankedRows = $this->rankedRows($index, $rankSql, $rankKey, $params);
             }
 
@@ -1608,7 +1608,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     }
 
     /**
-     * The rows a plain text search returns, ranked, without joining every match to its
+     * The rows of a plain text search's first page, ranked, without joining every match to its
      * document. The join reads a document for each of the matches, thousands for a common
      * word, to keep ten of them: here the FTS table ranks the matches on its own, and then
      * only the documents of the page are read.
@@ -1616,6 +1616,8 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
      * Null when the ranking and the documents do not agree, as when the FTS index still holds
      * a match whose document is gone, which the join leaves out before it counts a page: the
      * search is then run as a join.
+     * Positive offsets always use the join, as a missing document before the offset
+     * cannot be detected by reading only the documents of the page.
      *
      * @param string $rankSql    Selects `rid`, the key of the match, and `rank`, in order, for one page
      * @param string $key        The document column `rid` is the value of

@@ -7,7 +7,7 @@ use YetiSearch\Tests\Integration\StemmingTestCase;
 use YetiSearch\YetiSearch;
 
 /**
- * A search with nothing but text is ranked on the FTS table alone and reads the
+ * A first page with nothing but text is ranked on the FTS table alone and reads the
  * documents of the page only, instead of joining every match to its document.
  * It has to return what the join returns, in every way an index is stored.
  */
@@ -218,6 +218,34 @@ class RankedSearchTest extends StemmingTestCase
         // A page that does not reach the missing match is not affected
         $query = ['query' => 'connected', 'limit' => 2];
         $this->assertSame($this->joined($storage, $pdo, $query), $this->returned($storage, $query));
+    }
+
+    /** @dataProvider schemaModes */
+    public function test_positive_offsets_use_the_join_when_an_orphan_precedes_the_page(string $mode): void
+    {
+        foreach ([false, true] as $stemming) {
+            [, $storage, $pdo] = $this->openTraced($mode, $stemming);
+            $query = ['query' => 'connect', 'limit' => 50];
+            if ($stemming) {
+                $query['stem_query'] = 'connect OR _stems : connect';
+            }
+            $all = $this->joined($storage, $pdo, $query);
+            $this->assertSame('best', $all[0][0], 'The missing match precedes every positive offset');
+            $pdo->exec('DELETE FROM ' . self::INDEX . " WHERE id = 'best'");
+            $total = $storage->count(self::INDEX, $query);
+            $this->assertSame(count($all) - 1, $total);
+
+            foreach ([1, 7, $total - 1, $total] as $offset) {
+                $page = array_replace($query, ['limit' => 1, 'offset' => $offset]);
+                $expected = $this->joined($storage, $pdo, $page);
+                $this->takeStatements();
+                $this->assertSame($expected, $this->returned($storage, $page), "Offset $offset");
+                $this->assertFalse($this->ranked($this->takeStatements()), 'A positive offset uses the join');
+                if ($offset === $total) {
+                    $this->assertSame([], $expected, 'No document is returned beyond the total');
+                }
+            }
+        }
     }
 
     /** @dataProvider schemaModes */
