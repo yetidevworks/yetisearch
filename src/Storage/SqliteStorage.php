@@ -236,14 +236,15 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             $this->connection->exec("CREATE TABLE IF NOT EXISTS {$name}_meta (key TEXT PRIMARY KEY, value TEXT)");
             // Persist schema mode and FTS configuration. An index whose FTS table exists keeps
             // what it was created with: the table is not made again, so options given now
-            // (or none) would only make the meta disagree with the table.
-            if (!$ftsExisted) {
-                $this->setIndexMeta($name, 'schema_mode', $useExternal ? 'external' : 'legacy');
-                $this->setIndexMeta($name, 'multi_column_fts', $useMultiColumnFts ? '1' : '0');
-                $this->setIndexMeta($name, 'fts_columns', json_encode($ftsColumns));
-                $this->setIndexMeta($name, 'stemming', $stemming ? '1' : '0');
-                $this->setIndexMeta($name, 'stemming_language', $stemmingLanguage ?? '');
-            }
+            // (or none) would only make the meta disagree with the table. A setting the meta
+            // lacks (a meta table that is missing or was emptied) is made from the options, as
+            // for a new index, so that such an index is repaired and not left unusable.
+            $this->initIndexMeta($name, 'schema_mode', $useExternal ? 'external' : 'legacy', $ftsExisted);
+            $this->initIndexMeta($name, 'multi_column_fts', $useMultiColumnFts ? '1' : '0', $ftsExisted);
+            $this->initIndexMeta($name, 'fts_columns', json_encode($ftsColumns), $ftsExisted);
+            // Whether an existing table stems is in the table, whatever the options say now
+            $this->initIndexMeta($name, 'stemming', ($ftsExisted ? $this->ftsTableHasStems($name) : $stemming) ? '1' : '0', $ftsExisted);
+            $this->initIndexMeta($name, 'stemming_language', $stemmingLanguage ?? '', $ftsExisted);
             if ($useExternal) {
                 // The stems the FTS row was given are kept here, because FTS5 needs
                 // them back to delete the row and the stemmer can change in between.
@@ -300,11 +301,9 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 $detailSql = ", detail='" . strtolower($detail) . "'";
             }
             // Store FTS columns in meta
-            if (!$ftsExisted) {
-                $this->setIndexMeta($name, 'fts_columns', json_encode($ftsColumns));
-                if ($detail) {
-                    $this->setIndexMeta($name, 'fts_detail', strtolower($detail));
-                }
+            $this->initIndexMeta($name, 'fts_columns', json_encode($ftsColumns), $ftsExisted);
+            if ($detail) {
+                $this->initIndexMeta($name, 'fts_detail', strtolower($detail), $ftsExisted);
             }
 
             // Create FTS5 table with configured columns
@@ -2584,6 +2583,31 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             )
         ";
         $this->connection->exec($sql);
+    }
+
+    /**
+     * Set a setting of an index's FTS table. A table that exists already decides: the setting is
+     * kept when the meta has a value for it, and the value given now only fills a gap.
+     */
+    private function initIndexMeta(string $index, string $key, string $value, bool $ftsExisted): void
+    {
+        if (!$ftsExisted || $this->getIndexMeta($index, $key) === null) {
+            $this->setIndexMeta($index, $key, $value);
+        }
+    }
+
+    /**
+     * Whether the index's FTS table has the `_stems` column.
+     */
+    private function ftsTableHasStems(string $index): bool
+    {
+        foreach ($this->connection->query("PRAGMA table_info({$index}_fts)")->fetchAll(\PDO::FETCH_ASSOC) as $column) {
+            if (strtolower((string)$column['name']) === '_stems') {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function setIndexMeta(string $index, string $key, string $value): void
