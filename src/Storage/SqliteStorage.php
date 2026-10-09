@@ -2793,11 +2793,17 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
      * the text it was indexed with.
      *
      * @param mixed $value
-     * @throws StorageException If the value cannot be encoded at all (INF, NAN, too deep)
+     * @throws StorageException If the value cannot be encoded at all (INF, NAN, too deep, a serializer
+     *                          that throws)
      */
     private function encodeJson($value, string $what, string $id): string
     {
-        $json = json_encode($value, JSON_INVALID_UTF8_SUBSTITUTE, self::JSON_DEPTH);
+        try {
+            $json = json_encode($value, JSON_INVALID_UTF8_SUBSTITUTE, self::JSON_DEPTH);
+        } catch (\Throwable $e) {
+            // A JsonSerializable that throws
+            throw new StorageException("Failed to encode the {$what} of document '{$id}': " . $e->getMessage(), 0, $e);
+        }
         if ($json === false) {
             throw new StorageException("Failed to encode the {$what} of document '{$id}': " . json_last_error_msg());
         }

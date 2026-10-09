@@ -123,6 +123,58 @@ class RejectedDocumentTest extends StemmingTestCase
         $this->assertSame([], $this->ids($search->search(self::INDEX, 'walrus', ['fuzzy' => false])));
     }
 
+    private function throwingSerializer(): \JsonSerializable
+    {
+        return new class implements \JsonSerializable {
+            #[\ReturnTypeWillChange]
+            public function jsonSerialize()
+            {
+                throw new \RuntimeException('cannot serialize');
+            }
+        };
+    }
+
+    /** @return array<string, array{0: string, 1: string}> Schema mode and where the serializer sits */
+    public function throwingSerializers(): array
+    {
+        $cases = [];
+        foreach (['external', 'legacy', 'multi'] as $mode) {
+            $cases["{$mode}, in the content"] = [$mode, 'content'];
+            $cases["{$mode}, in the metadata"] = [$mode, 'metadata'];
+        }
+
+        return $cases;
+    }
+
+    /** @dataProvider throwingSerializers */
+    public function test_a_serializer_that_throws_refuses_the_call_instead_of_skipping_a_document(string $mode, string $where): void
+    {
+        $search = $this->open($mode);
+        $bad = ['id' => 'bad', 'content' => ['title' => 'Bad', 'content' => 'running']];
+        if ($where === 'content') {
+            $bad['content']['title'] =$this->throwingSerializer();
+        } else {
+            $bad['metadata'] = ['extra' => $this->throwingSerializer()];
+        }
+
+        try {
+            $search->getIndexer(self::INDEX)->insert([
+                ['id' => 'first', 'content' => ['title' => 'First', 'content' => 'walrus']],
+                $bad,
+                ['id' => 'last', 'content' => ['title' => 'Last', 'content' => 'giraffe']],
+            ]);
+            $this->fail('A document whose serializer throws was accepted');
+        } catch (StorageException $e) {
+            $this->assertStringContainsString("'bad'", $e->getMessage());
+            $this->assertStringContainsString($where, $e->getMessage());
+            $this->assertInstanceOf(\RuntimeException::class, $e->getPrevious());
+        }
+
+        $this->assertSame([], $this->storedIds($search));
+        $this->assertSame([], $this->ids($search->search(self::INDEX, 'walrus', ['fuzzy' => false])));
+        $this->assertIntegrity($search);
+    }
+
     /** @dataProvider schemaModes */
     public function test_a_queued_batch_is_not_touched_by_a_bad_document(string $mode): void
     {

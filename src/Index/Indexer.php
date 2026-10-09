@@ -489,12 +489,24 @@ class Indexer implements IndexerInterface
      * (invalid UTF-8 is replaced, so it is not a reason to refuse), at the depth the storage
      * allows, which is one less than json_decode()'s default so that it can be read back.
      *
-     * @throws StorageException If either cannot be encoded: NAN, INF, a resource, nesting too deep
+     * @throws StorageException If either cannot be encoded: NAN, INF, a resource, nesting too deep, a
+     *                          serializer that throws
      */
     private function assertStorable(array $document): void
     {
         foreach (['content', 'metadata'] as $what) {
-            if (json_encode($document[$what] ?? [], JSON_INVALID_UTF8_SUBSTITUTE, 511) === false) {
+            try {
+                $json = json_encode($document[$what] ?? [], JSON_INVALID_UTF8_SUBSTITUTE, 511);
+            } catch (\Throwable $e) {
+                // A JsonSerializable that throws is a document that cannot be stored, not a
+                // processing error to skip the document for
+                throw new StorageException(
+                    "Failed to encode the {$what} of document '{$document['id']}': " . $e->getMessage(),
+                    0,
+                    $e
+                );
+            }
+            if ($json === false) {
                 throw new StorageException(
                     "Failed to encode the {$what} of document '{$document['id']}': " . json_last_error_msg()
                 );

@@ -172,6 +172,47 @@ class StoredContentTest extends StemmingTestCase
         $this->assertIntegrity($search);
     }
 
+    /** @dataProvider plainAndStemming */
+    public function test_a_serializer_that_throws_is_refused_and_nothing_is_written(string $mode, bool $stemming): void
+    {
+        $search = $this->openSearch($mode);
+        $this->createIndex($search, $mode, ['stemming' => $stemming]);
+        $storage = $this->storage($search);
+        $storage->insert(self::INDEX, ['id' => 'keep', 'content' => ['title' => 'Keep', 'content' => 'walrus']]);
+        $throwing = new class implements \JsonSerializable {
+            #[\ReturnTypeWillChange]
+            public function jsonSerialize()
+            {
+                throw new \RuntimeException('cannot serialize');
+            }
+        };
+
+        try {
+            $storage->insert(self::INDEX, ['id' => 'bad', 'content' => ['title' => 'Bad', 'content' => 'running', 'n' => $throwing]]);
+            $this->fail('A document whose serializer throws was accepted');
+        } catch (StorageException $e) {
+            $this->assertStringContainsString("'bad'", $e->getMessage());
+            $this->assertInstanceOf(\RuntimeException::class, $e->getPrevious());
+        }
+        try {
+            $storage->insertBatch(self::INDEX, [
+                ['id' => 'fine', 'content' => ['title' => 'Fine', 'content' => 'giraffe']],
+                ['id' => 'bad', 'content' => ['content' => 'running'], 'metadata' => ['n' => $throwing]],
+            ]);
+            $this->fail('A batch with a document whose serializer throws was accepted');
+        } catch (StorageException $e) {
+            $this->assertStringContainsString('metadata', $e->getMessage());
+            $this->assertInstanceOf(\RuntimeException::class, $e->getPrevious());
+        }
+
+        $this->assertFalse($this->pdo($search)->inTransaction());
+        $this->assertNull($storage->getDocument(self::INDEX, 'bad'));
+        $this->assertNull($storage->getDocument(self::INDEX, 'fine'), 'The batch was rolled back as a whole');
+        $this->assertSame([], $this->found($search, 'running'));
+        $this->assertSame(['keep'], $this->found($search, 'walrus'));
+        $this->assertIntegrity($search);
+    }
+
     private function nested(int $depth)
     {
         $value = 'running';
