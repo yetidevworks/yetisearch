@@ -626,7 +626,7 @@ class StandardAnalyzerTest extends TestCase
 
     public function testRememberedStemsFollowAStemmerRegisteredReplacedOrReset(): void
     {
-        // Every word is stemmed and then asked for again, so the second answer is a remembered one
+        // Ask twice to catch stale built-in memo entries after factory changes
         $this->assertSame('run', $this->analyzer->stem('running'));
         $this->assertSame(['run'], $this->analyzer->analyze('running')['tokens']);
 
