@@ -18,8 +18,9 @@ class SpatialOffDeleteTest extends TestCase
     {
         $cases = [];
         foreach (['external' => [true, false], 'own single' => [false, false], 'own multi' => [false, true]] as $name => [$external, $multi]) {
-            foreach ([false, true] as $noRTree) {
-                $cases[$name . ($noRTree ? ', no R-tree' : '')] = [$external, $multi, $noRTree];
+            // The last is the SQLite of PHP on Windows: no R-tree module and no math functions
+            foreach (['' => [false, false], ', no R-tree' => [true, false], ', no R-tree, no math functions' => [true, true]] as $suffix => [$noRTree, $noMath]) {
+                $cases[$name . $suffix] = [$external, $multi, $noRTree, $noMath];
             }
         }
 
@@ -45,12 +46,15 @@ class SpatialOffDeleteTest extends TestCase
         return $property;
     }
 
-    private function open(bool $external, bool $multi, bool $noRTree, bool $spatial = false): SqliteStorage
+    private function open(bool $external, bool $multi, bool $noRTree, bool $spatial = false, bool $noMath = false): SqliteStorage
     {
         $storage = new SqliteStorage();
         $storage->connect(['path' => ':memory:', 'external_content' => $external]);
         if ($noRTree) {
             $this->property($storage, 'rtreeSupport')->setValue($storage, false);
+        }
+        if ($noMath) {
+            $this->property($storage, 'hasMathFunctions')->setValue($storage, false);
         }
         $storage->createIndex(self::INDEX, [
             'enable_spatial' => $spatial,
@@ -88,6 +92,15 @@ class SpatialOffDeleteTest extends TestCase
         return $storage->count(self::INDEX, ['query' => $word, 'fuzzy' => false]);
     }
 
+    /** What the FTS table holds for a word, which does not touch any other table of the index */
+    private function ftsMatches(SqliteStorage $storage, string $word): int
+    {
+        $stmt = $this->pdo($storage)->prepare('SELECT COUNT(*) FROM ' . self::INDEX . '_fts WHERE ' . self::INDEX . '_fts MATCH ?');
+        $stmt->execute([$word]);
+
+        return (int)$stmt->fetchColumn();
+    }
+
     private function integrity(SqliteStorage $storage): void
     {
         $this->pdo($storage)->exec('INSERT INTO ' . self::INDEX . '_fts(' . self::INDEX . '_fts) VALUES(\'integrity-check\')');
@@ -95,17 +108,17 @@ class SpatialOffDeleteTest extends TestCase
     }
 
     /** @dataProvider modes */
-    public function test_an_index_made_without_spatial_has_no_spatial_tables(bool $external, bool $multi, bool $noRTree): void
+    public function test_an_index_made_without_spatial_has_no_spatial_tables(bool $external, bool $multi, bool $noRTree, bool $noMath = false): void
     {
-        $storage = $this->open($external, $multi, $noRTree);
+        $storage = $this->open($external, $multi, $noRTree, false, $noMath);
 
         $this->assertSame([], $this->tables($storage));
     }
 
     /** @dataProvider modes */
-    public function test_delete_removes_a_document(bool $external, bool $multi, bool $noRTree): void
+    public function test_delete_removes_a_document(bool $external, bool $multi, bool $noRTree, bool $noMath = false): void
     {
-        $storage = $this->open($external, $multi, $noRTree);
+        $storage = $this->open($external, $multi, $noRTree, false, $noMath);
         $storage->insert(self::INDEX, $this->doc('a', 'giraffe'));
         $storage->insert(self::INDEX, $this->doc('b', 'walrus'));
         $this->assertSame(1, $this->found($storage, 'giraffe'));
@@ -119,9 +132,9 @@ class SpatialOffDeleteTest extends TestCase
     }
 
     /** @dataProvider modes */
-    public function test_delete_of_a_document_that_is_not_there_does_nothing(bool $external, bool $multi, bool $noRTree): void
+    public function test_delete_of_a_document_that_is_not_there_does_nothing(bool $external, bool $multi, bool $noRTree, bool $noMath = false): void
     {
-        $storage = $this->open($external, $multi, $noRTree);
+        $storage = $this->open($external, $multi, $noRTree, false, $noMath);
         $storage->insert(self::INDEX, $this->doc('a', 'giraffe'));
 
         $storage->delete(self::INDEX, 'missing');
@@ -130,9 +143,9 @@ class SpatialOffDeleteTest extends TestCase
     }
 
     /** @dataProvider modes */
-    public function test_delete_by_id_prefix_removes_the_documents_with_it(bool $external, bool $multi, bool $noRTree): void
+    public function test_delete_by_id_prefix_removes_the_documents_with_it(bool $external, bool $multi, bool $noRTree, bool $noMath = false): void
     {
-        $storage = $this->open($external, $multi, $noRTree);
+        $storage = $this->open($external, $multi, $noRTree, false, $noMath);
         $storage->insert(self::INDEX, $this->doc('page', 'giraffe'));
         $storage->insert(self::INDEX, $this->doc('page#chunk0', 'giraffe'));
         $storage->insert(self::INDEX, $this->doc('page#chunk1', 'giraffe'));
@@ -148,9 +161,9 @@ class SpatialOffDeleteTest extends TestCase
     }
 
     /** @dataProvider modes */
-    public function test_a_document_written_again_replaces_its_old_text(bool $external, bool $multi, bool $noRTree): void
+    public function test_a_document_written_again_replaces_its_old_text(bool $external, bool $multi, bool $noRTree, bool $noMath = false): void
     {
-        $storage = $this->open($external, $multi, $noRTree);
+        $storage = $this->open($external, $multi, $noRTree, false, $noMath);
         $storage->insert(self::INDEX, $this->doc('a', 'giraffe'));
         $storage->insert(self::INDEX, $this->doc('b', 'walrus'));
 
@@ -172,9 +185,9 @@ class SpatialOffDeleteTest extends TestCase
     }
 
     /** @dataProvider modes */
-    public function test_a_document_with_a_location_is_stored_without_one_and_written_again(bool $external, bool $multi, bool $noRTree): void
+    public function test_a_document_with_a_location_is_stored_without_one_and_written_again(bool $external, bool $multi, bool $noRTree, bool $noMath = false): void
     {
-        $storage = $this->open($external, $multi, $noRTree);
+        $storage = $this->open($external, $multi, $noRTree, false, $noMath);
 
         $storage->insert(self::INDEX, $this->doc('a', 'giraffe', 40.0));
         $storage->insertBatch(self::INDEX, [$this->doc('b', 'walrus', 41.0)]);
@@ -189,9 +202,9 @@ class SpatialOffDeleteTest extends TestCase
     }
 
     /** @dataProvider modes */
-    public function test_clear_rebuild_and_drop_work_without_spatial_tables(bool $external, bool $multi, bool $noRTree): void
+    public function test_clear_rebuild_and_drop_work_without_spatial_tables(bool $external, bool $multi, bool $noRTree, bool $noMath = false): void
     {
-        $storage = $this->open($external, $multi, $noRTree);
+        $storage = $this->open($external, $multi, $noRTree, false, $noMath);
         $storage->insert(self::INDEX, $this->doc('a', 'giraffe'));
         $storage->insert(self::INDEX, $this->doc('b', 'walrus'));
 
@@ -210,9 +223,9 @@ class SpatialOffDeleteTest extends TestCase
     }
 
     /** @dataProvider modes */
-    public function test_an_index_whose_spatial_tables_were_dropped_by_hand_still_deletes(bool $external, bool $multi, bool $noRTree): void
+    public function test_an_index_whose_spatial_tables_were_dropped_by_hand_still_deletes(bool $external, bool $multi, bool $noRTree, bool $noMath = false): void
     {
-        $storage = $this->open($external, $multi, $noRTree, true);
+        $storage = $this->open($external, $multi, $noRTree, true, $noMath);
         $storage->insert(self::INDEX, $this->doc('a', 'giraffe', 40.0));
         $storage->insert(self::INDEX, $this->doc('b', 'walrus', 41.0));
         $storage->insert(self::INDEX, $this->doc('c1', 'otter', 42.0));
@@ -226,10 +239,29 @@ class SpatialOffDeleteTest extends TestCase
         $storage->delete(self::INDEX, 'a');
         $this->assertSame(2, $storage->deleteByIdPrefix(self::INDEX, 'c'));
 
-        $this->assertSame(0, $this->found($storage, 'giraffe'));
-        $this->assertSame(0, $this->found($storage, 'otter'));
-        $this->assertSame(1, $this->found($storage, 'walrus'));
+        // Checked in the tables themselves: a count joins the spatial tables that are gone
+        $this->assertSame(['b'], $pdo->query('SELECT id FROM ' . self::INDEX)->fetchAll(\PDO::FETCH_COLUMN));
+        $this->assertSame(0, $this->ftsMatches($storage, 'giraffe'));
+        $this->assertSame(0, $this->ftsMatches($storage, 'otter'));
+        $this->assertSame(1, $this->ftsMatches($storage, 'walrus'));
         $this->integrity($storage);
+    }
+
+    /** @dataProvider modes */
+    public function test_an_index_whose_spatial_tables_were_dropped_by_hand_still_counts_and_searches(bool $external, bool $multi, bool $noRTree, bool $noMath = false): void
+    {
+        $storage = $this->open($external, $multi, $noRTree, true, $noMath);
+        $storage->insert(self::INDEX, $this->doc('a', 'giraffe', 40.0));
+        $storage->insert(self::INDEX, $this->doc('b', 'walrus', 41.0));
+        $pdo = $this->pdo($storage);
+        $pdo->exec('DROP TABLE ' . self::INDEX . '_spatial');
+        if (!$external) {
+            $pdo->exec('DROP TABLE ' . self::INDEX . '_id_map');
+        }
+
+        $this->assertSame(1, $this->found($storage, 'giraffe'));
+        $results = $storage->search(self::INDEX, ['query' => 'walrus', 'fuzzy' => false]);
+        $this->assertSame(['b'], array_column($results, 'id'));
     }
 
     /** @dataProvider rtreeModes */

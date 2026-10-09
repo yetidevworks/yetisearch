@@ -3934,6 +3934,16 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         return [$sql, [$north, $south, $east, $west]];
     }
 
+    /**
+     * Whether the tables a search joins for the location of a document are there: the spatial table, and
+     * for an own-content index the table that maps its string ids to the numeric ids of the spatial one.
+     */
+    private function spatialTablesExist(string $index, string $schema): bool
+    {
+        return $this->tableExists($index . '_spatial')
+            && ($schema === 'external' || $this->tableExists($index . '_id_map'));
+    }
+
     private function buildSpatialQuery(string $index, array $geoFilters): array
     {
         $spatialSql = '';
@@ -3956,6 +3966,13 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             $select = '';
             // Prefer using the spatial table we maintain (regular table when no RTree)
             $schema = $this->getSchemaMode($index);
+            // Without a location filter the join only gives each result its centroid, so an index whose
+            // spatial tables were dropped by hand is still searched, as it is where SQLite has the math functions
+            if (!isset($geoFilters['near']) && !isset($geoFilters['within']) && !isset($geoFilters['distance_sort'])
+                && !$this->spatialTablesExist($index, $schema)
+            ) {
+                return [ 'join' => '', 'where' => '', 'params' => [], 'select' => '' ];
+            }
             if ($schema === 'external') {
                 $spatialJoin = " LEFT JOIN {$index}_spatial s ON s.id = d.doc_id";
             } else {
