@@ -587,6 +587,43 @@ class StandardAnalyzerTest extends TestCase
         $this->assertSame('run', $this->analyzer->stem('running'));
     }
 
+    public function testRegistrationInsideAStemmerCallbackTakesEffectBetweenTokens(): void
+    {
+        StemmerFactory::register('english', new class implements StemmerInterface {
+            public function stem(string $word): string
+            {
+                StemmerFactory::register('english', new class implements StemmerInterface {
+                    public function stem(string $word): string { return $word . 'new'; }
+                    public function getLanguage(): string { return 'en'; }
+                });
+                return $word . 'old';
+            }
+            public function getLanguage(): string { return 'en'; }
+        });
+        $this->assertSame(['catsold', 'dogsnew', 'catsnew'], $this->analyzer->analyze('cats dogs cats')['tokens']);
+        $this->assertSame(StemmerFactory::generation(), $this->privateProperty($this->analyzer, 'stemMemoGeneration'));
+    }
+
+    public function testAliasMovedInsideAStemmerCallbackRefreshesTheCanonicalMemo(): void
+    {
+        StemmerFactory::register('english', new class ($this->analyzer) implements StemmerInterface {
+            private StandardAnalyzer $analyzer;
+            public function __construct(StandardAnalyzer $analyzer) { $this->analyzer = $analyzer; }
+            public function stem(string $word): string
+            {
+                // A callback can itself use the analyzer before moving the alias.
+                StemmerFactory::register('english', EnglishStemmer::class);
+                $this->analyzer->stem('running', 'english');
+                StemmerFactory::register('frenchish', FrenchStemmer::class, ['en']);
+                return $word . 'old';
+            }
+            public function getLanguage(): string { return 'en'; }
+        });
+        $this->assertSame(['catsold', 'running', 'running'], $this->analyzer->analyze('cats running running', 'en')['tokens']);
+        $this->assertSame(['frenchish' => ['running' => 'running']], $this->privateProperty($this->analyzer, 'stemMemo'));
+        $this->assertSame(StemmerFactory::generation(), $this->privateProperty($this->analyzer, 'stemMemoGeneration'));
+    }
+
     public function testRememberedStemsFollowAStemmerRegisteredReplacedOrReset(): void
     {
         // Every word is stemmed and then asked for again, so the second answer is a remembered one

@@ -4,6 +4,7 @@ namespace YetiSearch\Analyzers;
 
 use YetiSearch\Contracts\AnalyzerInterface;
 use YetiSearch\Stemmer\StemmerFactory;
+use YetiSearch\Stemmer\StemmerInterface;
 use YetiSearch\Stemmer\Languages\EnglishStemmer;
 use YetiSearch\Stemmer\Languages\FrenchStemmer;
 use YetiSearch\Stemmer\Languages\GermanStemmer;
@@ -81,16 +82,25 @@ class StandardAnalyzer implements AnalyzerInterface
         $tokens = $this->tokenize($text);
         $tokens = $this->removeStopWords($tokens, $language);
 
-        // The language is the same for every token, so its stemmer is looked up once
+        // Keep the resolved stemmer until a callback changes the factory between tokens.
         $stemLanguage = $this->languageOrDefault($language);
-        $canonical = $this->useOverriddenStem ? null : StemmerFactory::canonical($stemLanguage);
-        $this->syncStemMemo();
+        $resolvedGeneration = -1;
+        $canonical = null;
+        $stemmer = null;
+        $remember = false;
 
         $analyzed = [];
         foreach ($tokens as $token) {
+            if (!$this->useOverriddenStem && $resolvedGeneration !== StemmerFactory::generation()) {
+                $this->syncStemMemo();
+                $resolvedGeneration = $this->stemMemoGeneration;
+                $canonical = StemmerFactory::canonical($stemLanguage);
+                $stemmer = $canonical === null ? null : StemmerFactory::create($stemLanguage);
+                $remember = $stemmer !== null && $this->canRememberStems($stemmer);
+            }
             $stemmed = $this->useOverriddenStem
                 ? $this->stem($token, $language)
-                : ($canonical === null ? $token : $this->stemRemembered($canonical, $stemLanguage, $token));
+                : ($stemmer === null ? $token : $this->stemRemembered($canonical, $stemmer, $remember, $token));
             if ($this->isValidToken($stemmed)) {
                 $analyzed[] = $stemmed;
             }
@@ -145,17 +155,22 @@ class StandardAnalyzer implements AnalyzerInterface
         }
         $this->syncStemMemo();
 
-        return $this->stemRemembered($canonical, $language, $word);
+        $stemmer = StemmerFactory::create($language);
+        return $this->stemRemembered($canonical, $stemmer, $this->canRememberStems($stemmer), $word);
+    }
+
+    private function canRememberStems(StemmerInterface $stemmer): bool
+    {
+        return in_array(get_class($stemmer), [EnglishStemmer::class, FrenchStemmer::class, GermanStemmer::class, SpanishStemmer::class], true);
     }
 
     /**
      * Remember stems only for the four exact built-in classes. Custom stemmers and
      * subclasses can be stateful and must be called for every word.
      */
-    private function stemRemembered(string $canonical, string $language, string $word): string
+    private function stemRemembered(string $canonical, StemmerInterface $stemmer, bool $remember, string $word): string
     {
-        $stemmer = StemmerFactory::create($language);
-        if (!in_array(get_class($stemmer), [EnglishStemmer::class, FrenchStemmer::class, GermanStemmer::class, SpanishStemmer::class], true)) {
+        if (!$remember) {
             return $stemmer->stem($word);
         }
 
