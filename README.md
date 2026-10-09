@@ -630,6 +630,8 @@ Benefits of pre-chunked documents:
 
 See [`examples/pre-chunked-indexing.php`](examples/pre-chunked-indexing.php) for a complete example.
 
+A document and its chunks are written to the index in one transaction, so they are stored together or not at all. Content or metadata that cannot be encoded as JSON (`NAN`, `INF`, a resource, nesting deeper than 511 levels) is refused with a `StorageException` before anything of the call is written, a chunk's included. Separate batches are separate transactions: with more than `batch_size` documents in one call, or with `auto_flush` off, an earlier batch stays stored if the storage itself fails during a later one.
+
 ### Field Boosting and Exact Match Scoring
 
 YetiSearch provides intelligent field-weighted scoring with special handling for exact matches in high-priority fields:
