@@ -705,6 +705,21 @@ class YetiSearch
         $this->clearEngineResults($indexName);
     }
 
+    /**
+     * The language an index stems in: its canonical name ('english', 'french'; a language with no
+     * stemmer is named as it was given, in lower case), or null when the index does not stem or does
+     * not exist. An index that stems with no language of its own stems in English.
+     */
+    public function stemmingFor(string $index): ?string
+    {
+        $storage = $this->getStorage();
+        if (!$storage instanceof ProvidesStemming) {
+            return null;
+        }
+
+        return $storage->stemmingFor($index);
+    }
+
     // Clear index method
     public function clear(string $indexName): void
     {

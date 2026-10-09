@@ -714,6 +714,17 @@ $search = new YetiSearch([
 
 Both are fixed when the index is created: creating an index that already exists again, with other options, does not change whether or how it stems. An index that does not stem is searched exactly as before.
 
+To ask an index what it does, call `stemmingFor()`. It returns the canonical name of the language the index stems in (`english`, `french`, `german`, `spanish`; a language with no stemmer comes back as it was given, in lower case), or `null` when the index does not stem or does not exist:
+
+```php
+$search->createIndex('articles', ['stemming' => true, 'language' => 'fr-CA']);
+
+$search->stemmingFor('articles');   // 'french'
+$search->stemmingFor('posts');      // null, the index does not stem
+```
+
+It follows `rebuildFts()`: after `rebuildFts('articles', ['stemming' => false])` it returns `null`.
+
 An index that stems needs the FTS5 option `detail` at `full`, its default: a stem with a hyphen in it is searched as a phrase, and `column` and `none` keep no positions to search one with. Creating a stemming index with `'fts' => ['detail' => 'column']` (or `'none'`), or switching an index that has one with `rebuildFts()`, throws an `InvalidArgumentException`.
 
 A document is stemmed in its own `language`, else the language of the index. A search is stemmed in its `language` option, else the language of the index. The `language` option of a search also keeps only the documents indexed with that same `language`.
@@ -1977,6 +1988,7 @@ $search->deleteByIdPrefix(string $indexName, string $prefix, bool $rebuildFts = 
 $search->clear(string $indexName);
 $search->optimize(string $indexName);
 $search->rebuildFts(string $indexName, array $options = []);  // options: 'stemming' (bool), 'language' (?string)
+$search->stemmingFor(string $indexName): ?string;  // the language the index stems in, or null
 $search->getStats(string $indexName);
 $search->listIndices(): array;
 $search->close(): void;
