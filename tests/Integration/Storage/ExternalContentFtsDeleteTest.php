@@ -136,7 +136,7 @@ class ExternalContentFtsDeleteTest extends TestCase
 
         $storage = new \ReflectionClass($search);
         $method = $storage->getMethod('getStorage');
-        $method->setAccessible(true);
+        if (PHP_VERSION_ID < 80100) { $method->setAccessible(true); }
         /** @var \YetiSearch\Storage\SqliteStorage $sqlite */
         $sqlite = $method->invoke($search);
         $sqlite->deleteByIdPrefix(self::INDEX, 'page#chunk', false);
@@ -161,12 +161,12 @@ class ExternalContentFtsDeleteTest extends TestCase
 
         $reflection = new \ReflectionClass($search);
         $method = $reflection->getMethod('getStorage');
-        $method->setAccessible(true);
+        if (PHP_VERSION_ID < 80100) { $method->setAccessible(true); }
         /** @var \YetiSearch\Storage\SqliteStorage $sqlite */
         $sqlite = $method->invoke($search);
 
         $connection = new \ReflectionProperty(\YetiSearch\Storage\SqliteStorage::class, 'connection');
-        $connection->setAccessible(true);
+        if (PHP_VERSION_ID < 80100) { $connection->setAccessible(true); }
         /** @var \PDO $pdo */
         $pdo = $connection->getValue($sqlite);
 

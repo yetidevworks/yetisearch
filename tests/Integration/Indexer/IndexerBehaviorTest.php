@@ -52,7 +52,7 @@ class IndexerBehaviorTest extends TestCase
 
         // Verify stored URL via storage API
         $ref = new \ReflectionClass($search);
-        $m = $ref->getMethod('getStorage'); $m->setAccessible(true);
+        $m = $ref->getMethod('getStorage'); if (PHP_VERSION_ID < 80100) { $m->setAccessible(true); }
         $storage = $m->invoke($search);
         $docStored = $storage->getDocument($index, 'doc1');
         $this->assertSame('http://example.com/a', $docStored['content']['url'] ?? null);
@@ -83,10 +83,10 @@ class IndexerBehaviorTest extends TestCase
         $search->getIndexer($index)->flush();
         // Verify persistence via DB count
         $ref = new \ReflectionClass($search);
-        $m = $ref->getMethod('getStorage'); $m->setAccessible(true);
+        $m = $ref->getMethod('getStorage'); if (PHP_VERSION_ID < 80100) { $m->setAccessible(true); }
         $storage = $m->invoke($search);
         $pdoRef = new \ReflectionClass($storage);
-        $prop = $pdoRef->getProperty('connection'); $prop->setAccessible(true);
+        $prop = $pdoRef->getProperty('connection'); if (PHP_VERSION_ID < 80100) { $prop->setAccessible(true); }
         $pdo = $prop->getValue($storage);
         $cnt = (int)$pdo->query("SELECT COUNT(*) FROM {$index}")->fetchColumn();
         $this->assertSame(5, $cnt);

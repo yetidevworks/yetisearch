@@ -17,12 +17,12 @@ class FieldsConfigNormalizationTest extends TestCase
     {
         $ref = new \ReflectionClass($search);
         $method = $ref->getMethod('getStorage');
-        $method->setAccessible(true);
+        if (PHP_VERSION_ID < 80100) { $method->setAccessible(true); }
         $storage = $method->invoke($search);
 
         $storageRef = new \ReflectionClass($storage);
         $columns = $storageRef->getMethod('getFtsColumns');
-        $columns->setAccessible(true);
+        if (PHP_VERSION_ID < 80100) { $columns->setAccessible(true); }
 
         return $columns->invoke($storage, $index);
     }

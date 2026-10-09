@@ -9,7 +9,7 @@ class CountNearTest extends TestCase
     private function getStorage($search)
     {
         $ref = new \ReflectionClass($search);
-        $m = $ref->getMethod('getStorage'); $m->setAccessible(true);
+        $m = $ref->getMethod('getStorage'); if (PHP_VERSION_ID < 80100) { $m->setAccessible(true); }
         return $m->invoke($search);
     }
 

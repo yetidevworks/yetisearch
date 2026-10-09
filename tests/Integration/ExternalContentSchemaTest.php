@@ -11,11 +11,11 @@ class ExternalContentSchemaTest extends TestCase
     {
         $ref = new \ReflectionClass($search);
         $m = $ref->getMethod('getStorage');
-        $m->setAccessible(true);
+        if (PHP_VERSION_ID < 80100) { $m->setAccessible(true); }
         $storage = $m->invoke($search);
         $sref = new \ReflectionClass($storage);
         $p = $sref->getProperty('connection');
-        $p->setAccessible(true);
+        if (PHP_VERSION_ID < 80100) { $p->setAccessible(true); }
         return $p->getValue($storage);
     }
 

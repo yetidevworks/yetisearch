@@ -482,7 +482,7 @@ class CalibrationTest extends TestCase
     private function getTestDbPathOf(YetiSearch $search): string
     {
         $config = (new \ReflectionClass($search))->getProperty('config');
-        $config->setAccessible(true);
+        if (PHP_VERSION_ID < 80100) { $config->setAccessible(true); }
 
         return $config->getValue($search)['storage']['path'];
     }

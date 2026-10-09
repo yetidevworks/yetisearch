@@ -9,10 +9,10 @@ class UpdateDeleteExternalAndLegacyTest extends TestCase
     private function getPdo($search): \PDO
     {
         $ref = new \ReflectionClass($search);
-        $m = $ref->getMethod('getStorage'); $m->setAccessible(true);
+        $m = $ref->getMethod('getStorage'); if (PHP_VERSION_ID < 80100) { $m->setAccessible(true); }
         $storage = $m->invoke($search);
         $sref = new \ReflectionClass($storage);
-        $p = $sref->getProperty('connection'); $p->setAccessible(true);
+        $p = $sref->getProperty('connection'); if (PHP_VERSION_ID < 80100) { $p->setAccessible(true); }
         return $p->getValue($storage);
     }
 
