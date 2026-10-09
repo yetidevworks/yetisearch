@@ -469,8 +469,9 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
 
         $this->indexChanged($index);
 
+        $ownTransaction = null;
         try {
-            $this->connection->beginTransaction();
+            $ownTransaction = $this->beginWrite();
 
             $id = $document['id'];
             // Chunks of an earlier version that this one does not have go first, in this transaction
@@ -634,13 +635,11 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             // Handle spatial indexing
             $this->indexSpatialData($index, $id, $document);
 
-            $this->connection->commit();
+            $this->endWrite($ownTransaction);
         } catch (\Throwable $e) {
             // Whatever failed, a stemmer or analyzer included, the half-written row must not
             // stay in an open transaction for the next write to run into
-            if ($this->connection->inTransaction()) {
-                $this->connection->rollBack();
-            }
+            $this->abortWrite($ownTransaction, $index);
             if ($e instanceof \PDOException) {
                 throw new StorageException("Failed to insert document: " . $e->getMessage());
             }
@@ -661,8 +660,9 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         }
         $this->ensureFtsBuilt($index);
 
+        $ownTransaction = null;
         try {
-            $this->connection->beginTransaction();
+            $ownTransaction = $this->beginWrite();
 
             // Chunks of an earlier version of a document that this batch does not write go first,
             // in this transaction. A chunk is looked up for under its parent only.
@@ -950,11 +950,9 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 $this->indexSpatialData($index, $docId, $doc, false);
             }
 
-            $this->connection->commit();
+            $this->endWrite($ownTransaction);
         } catch (\Throwable $e) {
-            if ($this->connection->inTransaction()) {
-                $this->connection->rollBack();
-            }
+            $this->abortWrite($ownTransaction, $index);
             if ($e instanceof \PDOException) {
                 throw new StorageException("Failed to insert batch: " . $e->getMessage());
             }
@@ -1128,8 +1126,9 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
 
         $this->indexChanged($index);
 
+        $ownTransaction = null;
         try {
-            $this->connection->beginTransaction();
+            $ownTransaction = $this->beginWrite();
             // Capture doc_id early for external schema
             $schema = $this->getSchemaMode($index);
             $savedDocId = null;
@@ -1169,10 +1168,13 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 $this->deleteSpatialRows($index, $schema, [$id]);
             }
 
-            $this->connection->commit();
-        } catch (\PDOException $e) {
-            $this->connection->rollBack();
-            throw new StorageException("Failed to delete document: " . $e->getMessage());
+            $this->endWrite($ownTransaction);
+        } catch (\Throwable $e) {
+            $this->abortWrite($ownTransaction, $index);
+            if ($e instanceof \PDOException) {
+                throw new StorageException("Failed to delete document: " . $e->getMessage());
+            }
+            throw $e;
         }
     }
 
@@ -1198,6 +1200,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         $schema = $this->getSchemaMode($index);
         $deletedCount = 0;
 
+        $ownTransaction = null;
         try {
             // First, get all IDs that match the prefix
             $escapedPrefix = str_replace(['%', '_'], ['\\%', '\\_'], $prefix);
@@ -1210,7 +1213,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             }
             $this->ensureFtsBuilt($index);
 
-            $this->connection->beginTransaction();
+            $ownTransaction = $this->beginWrite();
 
             // Collect spatial IDs and indexed FTS text BEFORE deleting from main
             // table — once the content rows are gone the text cannot be recovered
@@ -1253,11 +1256,9 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             // Spatial cleanup (works for both R-tree and fallback table, and for an index without them)
             $this->deleteSpatialRows($index, $schema, $schema === 'external' ? $spatialIds : $ids);
 
-            $this->connection->commit();
+            $this->endWrite($ownTransaction);
         } catch (\PDOException $e) {
-            if ($this->connection->inTransaction()) {
-                $this->connection->rollBack();
-            }
+            $this->abortWrite($ownTransaction, $index);
             throw new StorageException("Failed to delete documents by prefix: " . $e->getMessage());
         }
 
@@ -3389,7 +3390,9 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
      * The rebuild runs in a transaction that takes the write lock before it reads the mark again, so
      * of two connections that find the mark missing the second waits and then finds it set, and a
      * connection that cannot get the lock fails the write instead of going on. If the rebuild fails
-     * the transaction is rolled back and the write throws without having begun.
+     * the transaction is rolled back and the write throws without having begun. Called while the
+     * caller has a transaction open, it does its work in that transaction and the mark is not
+     * remembered, as the caller may roll it back; the next write looks again.
      *
      * @throws StorageException If the rebuild fails
      */
@@ -3399,7 +3402,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             return;
         }
         if ($this->ftsBuiltCurrent($index)) {
-            $this->ftsBuiltCache[$index] = true;
+            $this->rememberFtsBuilt($index);
 
             return;
         }
@@ -3409,11 +3412,9 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             return;
         }
 
-        $ownTransaction = !$this->connection->inTransaction();
+        $ownTransaction = null;
         try {
-            if ($ownTransaction) {
-                $this->connection->beginTransaction();
-            }
+            $ownTransaction = $this->beginWrite();
             // A statement that writes takes the write lock when it starts, even if it matches no
             // row, so what is read after it cannot be out of date by the time the rebuild writes
             $this->connection->exec(
@@ -3427,14 +3428,10 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                     $this->setIndexMeta($index, self::FTS_BUILT_BY_KEY, self::FTS_BUILT_BY);
                 }
             }
-            if ($ownTransaction) {
-                $this->connection->commit();
-            }
+            $this->endWrite($ownTransaction);
         } catch (\Throwable $e) {
-            if ($ownTransaction && $this->connection->inTransaction()) {
-                $this->connection->rollBack();
-            }
-            unset($this->ftsColumnsCache[$index], $this->stemmingCache[$index], $this->ftsBuiltCache[$index]);
+            $this->abortWrite($ownTransaction, $index);
+            unset($this->ftsColumnsCache[$index], $this->stemmingCache[$index]);
             if ($e instanceof \PDOException) {
                 throw new StorageException(
                     "Failed to rebuild the full-text index of '{$index}' before writing to it: " . $e->getMessage()
@@ -3442,7 +3439,76 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             }
             throw $e;
         }
-        $this->ftsBuiltCache[$index] = true;
+        $this->rememberFtsBuilt($index);
+    }
+
+    /**
+     * Note that an index's FTS table is known to be built by this version, so the next write does not
+     * look again. Only a mark that is committed is noted: inside a transaction the caller opened the
+     * mark, or the rebuild that set it, goes if the caller rolls back, and the cache would go on
+     * saying the table was sound.
+     */
+    private function rememberFtsBuilt(string $index): void
+    {
+        if (!$this->connection->inTransaction()) {
+            $this->ftsBuiltCache[$index] = true;
+        }
+    }
+
+    /**
+     * Begin the transaction of a write. A write made while the caller has a transaction open joins it,
+     * as rebuildFts() does: it neither begins nor commits one, and takes a savepoint, so that if it
+     * fails only its own changes are undone and the rest of the caller's work is left to the caller.
+     *
+     * @return bool Whether the write began a transaction of its own
+     */
+    private function beginWrite(): bool
+    {
+        if ($this->connection->inTransaction()) {
+            $this->connection->exec('SAVEPOINT yetisearch_write');
+
+            return false;
+        }
+        $this->connection->beginTransaction();
+
+        return true;
+    }
+
+    /**
+     * Finish a write begun by beginWrite(): commit a transaction it began, release the savepoint of one it joined.
+     */
+    private function endWrite(bool $ownTransaction): void
+    {
+        if ($ownTransaction) {
+            $this->connection->commit();
+        } else {
+            $this->connection->exec('RELEASE SAVEPOINT yetisearch_write');
+        }
+    }
+
+    /**
+     * Undo a write that failed, and forget that the index is known to be built, as a rolled back
+     * write may have taken the mark with it.
+     *
+     * @param bool|null $ownTransaction What beginWrite() returned, or null if it was not reached
+     */
+    private function abortWrite(?bool $ownTransaction, string $index): void
+    {
+        unset($this->ftsBuiltCache[$index]);
+        if ($ownTransaction === null || !$this->connection->inTransaction()) {
+            return;
+        }
+        if ($ownTransaction) {
+            $this->connection->rollBack();
+
+            return;
+        }
+        try {
+            $this->connection->exec('ROLLBACK TO SAVEPOINT yetisearch_write');
+            $this->connection->exec('RELEASE SAVEPOINT yetisearch_write');
+        } catch (\PDOException $e) {
+            // The savepoint is gone with whatever failed, and the caller learns of it from the exception being thrown
+        }
     }
 
     /**

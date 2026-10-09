@@ -540,4 +540,112 @@ class PollutedIndexHealingTest extends StemmingTestCase
         $pdo->exec('DELETE FROM ' . self::INDEX . "_meta WHERE key = 'yetisearch_pro_fts_built'");
         $this->assertHealed($search);
     }
+
+    /** @return string[] The writes, each done on a polluted index inside the caller's transaction */
+    public function callerWrites(): array
+    {
+        return [
+            'insert' => [function (YetiSearch $s, self $t) {
+                $s->index(self::INDEX, $t->doc('zeta', 'lions roaring'));
+            }, ['alpha', 'beta', 'delta', 'epsilon', 'gamma', 'zeta']],
+            'batch' => [function (YetiSearch $s, self $t) {
+                $s->indexBatch(self::INDEX, [$t->doc('zeta', 'lions roaring'), $t->doc('beta', 'mice squeaking')]);
+            }, ['alpha', 'beta', 'delta', 'epsilon', 'gamma', 'zeta']],
+            'delete' => [function (YetiSearch $s) {
+                $s->delete(self::INDEX, 'beta');
+            }, ['alpha', 'delta', 'epsilon', 'gamma']],
+            'prefix delete' => [function (YetiSearch $s) {
+                $s->deleteByIdPrefix(self::INDEX, 'ep');
+            }, ['alpha', 'beta', 'delta', 'gamma']],
+        ];
+    }
+
+    private function callerWork(\PDO $pdo): int
+    {
+        return (int)$pdo->query('SELECT COUNT(*) FROM caller_work')->fetchColumn();
+    }
+
+    /** @dataProvider callerWrites */
+    public function test_a_write_inside_the_callers_transaction_joins_it(callable $write, array $remaining): void
+    {
+        $search = $this->polluted();
+        $pdo = $this->pdo($search);
+        $pdo->exec('CREATE TABLE caller_work (note TEXT)');
+        $pdo->beginTransaction();
+        $pdo->exec("INSERT INTO caller_work VALUES ('mine')");
+
+        $write($search, $this);
+
+        $this->assertTrue($pdo->inTransaction(), 'The write leaves the transaction to its owner');
+        $pdo->commit();
+        $this->assertSame(1, $this->callerWork($pdo), 'The work of the caller is kept');
+        $this->assertHealed($search);
+        $this->assertSame($remaining, $this->storedIds($search));
+        $this->assertSame(['gamma'], $this->found($search, 'birds'));
+    }
+
+    /** @dataProvider callerWrites */
+    public function test_a_heal_the_callers_transaction_rolled_back_is_not_taken_for_done(callable $write): void
+    {
+        $search = $this->polluted();
+        $pdo = $this->pdo($search);
+        $pdo->exec('CREATE TABLE caller_work (note TEXT)');
+        $pdo->beginTransaction();
+        $pdo->exec("INSERT INTO caller_work VALUES ('mine')");
+        try {
+            $write($search, $this);
+        } catch (StorageException $e) {
+            // A write that is refused in the transaction rolls its heal back with the caller's work, just the same
+        }
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        $this->assertNull($this->builtBy($pdo), 'The mark went with the transaction');
+        $this->assertSame(5, $this->ftsMatches($pdo, 'title'), 'So did the rebuild');
+        $this->assertSame(0, $this->callerWork($pdo));
+
+        // The index is as 2.5.x left it, and an ordinary write has to heal it again
+        $search->delete(self::INDEX, 'beta');
+
+        $this->assertHealed($search);
+        $this->assertSame(['alpha', 'delta', 'epsilon', 'gamma'], $this->storedIds($search));
+        $this->assertSame(['gamma'], $this->found($search, 'birds'));
+    }
+
+    public function test_a_write_that_fails_inside_the_callers_transaction_undoes_only_itself(): void
+    {
+        $search = $this->openSearch('external');
+        $this->createIndex($search, 'external', ['stemming' => true]);
+        $search->indexBatch(self::INDEX, [$this->doc('alpha', 'dogs running in the park')]);
+        $pdo = $this->pdo($search);
+        $pdo->exec('CREATE TABLE caller_work (note TEXT)');
+        StemmerFactory::register('english', new class () implements StemmerInterface {
+            public function stem(string $word): string
+            {
+                throw new \RuntimeException('the stemmer is broken');
+            }
+
+            public function getLanguage(): string
+            {
+                return 'english';
+            }
+        });
+        $pdo->beginTransaction();
+        $pdo->exec("INSERT INTO caller_work VALUES ('mine')");
+
+        try {
+            $search->index(self::INDEX, $this->doc('zeta', 'lions roaring'));
+            $this->fail('The write went on with a broken stemmer');
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString('the stemmer is broken', $e->getMessage());
+        }
+
+        $this->assertTrue($pdo->inTransaction(), 'The transaction of the caller is still open');
+        $pdo->commit();
+        $this->assertSame(1, $this->callerWork($pdo), 'The work of the caller is kept');
+        $this->assertSame(['alpha'], $this->storedIds($search), 'The document of the failed write is not stored');
+        StemmerFactory::reset();
+        $this->assertSame(['alpha'], $this->found($search, 'dogs'));
+        $this->assertIntegrity($search);
+    }
 }
