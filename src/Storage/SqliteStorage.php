@@ -884,6 +884,21 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 $ftsStmt->execute($ftsRow);
             }
 
+            // Every document in the batch loses the fuzzy terms of its earlier version, as
+            // insert() does: the terms are only ever added below
+            if ($this->useTermsIndex) {
+                $batchIds = [];
+                foreach ($documents as $document) {
+                    $batchIds[(string)$document['id']] = true;
+                }
+                foreach (array_chunk(array_keys($batchIds), 500) as $chunk) {
+                    $chunk = array_map('strval', $chunk);
+                    $in = implode(',', array_fill(0, count($chunk), '?'));
+                    $this->connection->prepare("DELETE FROM {$index}_terms WHERE document_id IN ({$in})")
+                        ->execute($chunk);
+                }
+            }
+
             // Batch insert terms if enabled
             if ($this->useTermsIndex && $termsStmt) {
                 foreach ($termsData as [$docId, $docContent]) {
