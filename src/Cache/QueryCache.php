@@ -72,6 +72,9 @@ class QueryCache
         }
 
         $key = $this->generateCacheKey($indexName, $queryParams);
+        if ($key === null) {
+            return null;
+        }
 
         try {
             // Clean expired entries periodically (1% chance)
@@ -119,6 +122,11 @@ class QueryCache
         }
 
         $key = $this->generateCacheKey($indexName, $queryParams);
+        $queryHash = $this->getQueryHash($queryParams);
+        $resultData = $this->encode($results);
+        if ($key === null || $queryHash === null || $resultData === null) {
+            return false;
+        }
         $ttl = $ttl ?? $this->defaultTtl;
 
         try {
@@ -135,8 +143,8 @@ class QueryCache
             $success = $stmt->execute([
                 $key,
                 $indexName,
-                $this->getQueryHash($queryParams),
-                json_encode($results),
+                $queryHash,
+                $resultData,
                 count($results['results'] ?? []),
                 $ttl
             ]);
@@ -256,17 +264,34 @@ class QueryCache
         }
     }
 
-    private function generateCacheKey(string $indexName, array $queryParams): string
+    /**
+     * The key a query is held under, or null when its parameters do not encode (NAN, INF, a
+     * resource, invalid UTF-8, an object whose jsonSerialize() throws): all of those would
+     * encode to the same empty string and so share one key, and one result. Such a query is
+     * neither read from the cache nor written to it.
+     */
+    private function generateCacheKey(string $indexName, array $queryParams): ?string
     {
         // Create a stable, unique key from query parameters
-        $normalized = $this->normalizeQueryParams($queryParams);
-        return $indexName . ':' . md5(json_encode($normalized));
+        $hash = $this->getQueryHash($queryParams);
+        return $hash === null ? null : $indexName . ':' . $hash;
     }
 
-    private function getQueryHash(array $queryParams): string
+    private function getQueryHash(array $queryParams): ?string
     {
-        $normalized = $this->normalizeQueryParams($queryParams);
-        return md5(json_encode($normalized));
+        $encoded = $this->encode($this->normalizeQueryParams($queryParams));
+        return $encoded === null ? null : md5($encoded);
+    }
+
+    private function encode(array $data): ?string
+    {
+        try {
+            $encoded = json_encode($data);
+        } catch (\Throwable $e) {
+            return null;
+        }
+
+        return $encoded === false ? null : $encoded;
     }
 
     private function normalizeQueryParams(array $params): array

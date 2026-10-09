@@ -32,6 +32,8 @@ class SearchEngine implements SearchEngineInterface
     private string $indexName;
     private array $config;
     private array $cache = [];
+    /** Whether the search being run bypasses the storage's query cache because it is not cached anywhere */
+    private bool $bypassStorageCache = false;
     private array $fuzzyTermMap = [];
     private ?array $indexedTermsCache = null;
     private float $indexedTermsCacheTime = 0;
@@ -149,12 +151,16 @@ class SearchEngine implements SearchEngineInterface
 
         // Merge runtime options with config (runtime options take precedence)
         $originalConfig = $this->config;
+        $originalBypassStorageCache = $this->bypassStorageCache;
         $this->config = array_merge($this->config, $options);
 
         // bypass_cache skips the results held here as well as the storage's
         // query cache.
         $cacheKey = !empty($query->getOptions()['bypass_cache']) ? null : $this->getCacheKey($query, $options);
         $changeToken = $cacheKey === null ? null : $this->indexChangeToken();
+        // A search that cannot be told from another by its key is not cached anywhere: the
+        // storage's query cache is bypassed for every query this search makes
+        $this->bypassStorageCache = $cacheKey === null;
 
         $this->logger->debug('SearchEngine::search called', [
             'query_text' => $query->getQuery(),
@@ -168,6 +174,7 @@ class SearchEngine implements SearchEngineInterface
             // Restore original config before returning cached results
             $cachedResults = $this->cache[$cacheKey]['results'];
             $this->config = $originalConfig;
+            $this->bypassStorageCache = $originalBypassStorageCache;
             return $cachedResults;
         }
 
@@ -238,7 +245,7 @@ class SearchEngine implements SearchEngineInterface
                     $firstPassQuery['offset'] = 0;
 
                     try {
-                        $primaryResults = $this->storage->search($this->indexName, $firstPassQuery);
+                        $primaryResults = $this->storageSearch($firstPassQuery);
                         $this->logger->debug('First pass results', ['count' => count($primaryResults)]);
                     } catch (\Exception $e) {
                         $this->logger->warning('First pass search failed', ['error' => $e->getMessage()]);
@@ -250,7 +257,7 @@ class SearchEngine implements SearchEngineInterface
 
                 // Second pass: Full search with all fields
                 $secondPassQuery = $storageQuery;
-                $secondPassResults = $this->storage->search($this->indexName, $secondPassQuery);
+                $secondPassResults = $this->storageSearch($secondPassQuery);
 
                 // Merge results, prioritizing primary field matches
                 $mergedResults = [];
@@ -281,7 +288,7 @@ class SearchEngine implements SearchEngineInterface
                 $totalCount = count($mergedResults);
             } else {
                 // Single-pass search (standard mode)
-                $results = $this->storage->search($this->indexName, $storageQuery);
+                $results = $this->storageSearch($storageQuery);
                 $totalCount = $this->storage->count($this->indexName, $storageQuery);
             }
 
@@ -350,6 +357,7 @@ class SearchEngine implements SearchEngineInterface
         } finally {
             // Always restore original config, even if an exception is thrown
             $this->config = $originalConfig;
+            $this->bypassStorageCache = $originalBypassStorageCache;
         }
     }
 
@@ -418,7 +426,7 @@ class SearchEngine implements SearchEngineInterface
         $keywordQuery = $storageQuery;
         $keywordQuery['limit'] = $candidates;
         $keywordQuery['offset'] = 0;
-        $keywordRows = $this->storage->search($this->indexName, $keywordQuery);
+        $keywordRows = $this->storageSearch($keywordQuery);
         $keywordTotal = $this->storage->count($this->indexName, $storageQuery);
 
         $rows = [];
@@ -984,6 +992,19 @@ class SearchEngine implements SearchEngineInterface
         }
 
         return '(' . $rawQuery . ') OR ' . implode(' OR ', array_keys($alternatives));
+    }
+
+    /**
+     * Runs a query on the storage, without its query cache when the search being run is
+     * one that is not cached (see getCacheKey()).
+     */
+    private function storageSearch(array $storageQuery): array
+    {
+        if ($this->bypassStorageCache) {
+            $storageQuery['bypass_cache'] = true;
+        }
+
+        return $this->storage->search($this->indexName, $storageQuery);
     }
 
     private function buildStorageQuery(SearchQuery $query): array
@@ -1664,7 +1685,7 @@ class SearchEngine implements SearchEngineInterface
                     $facetQuery['stem_query'] = $this->stemQuery;
                 }
                 try {
-                    $results = $this->storage->search($this->indexName, $facetQuery);
+                    $results = $this->storageSearch($facetQuery);
                     // Counted by position: a float array key would be cut to
                     // an int, putting 1.5 km in the 1 km bucket.
                     $ranges = array_values($ranges);
@@ -1731,7 +1752,7 @@ class SearchEngine implements SearchEngineInterface
             }
 
             try {
-                $results = $this->storage->search($this->indexName, array_merge($facetQuery, [
+                $results = $this->storageSearch(array_merge($facetQuery, [
                     'limit' => 1000,
                     'offset' => 0
                 ]));

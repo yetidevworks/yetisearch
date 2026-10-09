@@ -1235,8 +1235,8 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                         $results = array_slice($results, 0, $k);
                     }
 
-                    // Cache the results before returning
-                    if ($this->queryCache) {
+                    // Cache the results before returning, unless the query asked to bypass the cache
+                    if ($this->queryCache && !($query['bypass_cache'] ?? false)) {
                         $this->queryCache->set($index, $query, $results);
                     }
 
@@ -1543,8 +1543,8 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 $results = array_slice($results, $offset, $limit);
             }
 
-            // Cache the results before returning
-            if ($this->queryCache) {
+            // Cache the results before returning, unless the query asked to bypass the cache
+            if ($this->queryCache && !($query['bypass_cache'] ?? false)) {
                 $this->queryCache->set($index, $query, $results);
             }
 

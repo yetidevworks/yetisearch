@@ -1260,6 +1260,7 @@ $results = $search->search('articles', 'PHP programming');  // Cached: <0.5ms
 **Cache Features:**
 - **Automatic invalidation** - Cache clears when documents are added, updated, or deleted, and when an index is cleared, dropped or has its full-text table rebuilt
 - **Results in memory** - Each search engine also keeps its recent results in memory for `search.cache_ttl` seconds (default 300), whether or not the query cache is on. Any write to the index makes them stale at once, through `YetiSearch`, an indexer or the storage, in this process or another, so a long-running worker never sees results from before a write. `clearCache()` empties them too, and the `bypass_cache` search option skips both caches
+- **Searches that are not cached** - A search whose options cannot be encoded into a cache key (`NAN`, `INF`, a resource, a serializer that throws) is neither read from nor written to either cache, and `bypass_cache` also keeps a search's rows out of the query cache
 - **LRU eviction** - Least recently used entries are removed when cache is full
 - **SQLite-based storage** - Cache persists across PHP requests
 - **Hit tracking** - Monitor cache effectiveness with built-in statistics
