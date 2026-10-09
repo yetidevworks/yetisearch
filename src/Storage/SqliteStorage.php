@@ -31,6 +31,8 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     private array $ftsColumnsCache = [];
     /** @var array<string, array{enabled: bool, language: ?string}> Stemming settings per index */
     private array $stemmingCache = [];
+    /** @var array<string, bool> Indexes known to carry the `fts_built_by` mark of this version or later */
+    private array $ftsBuiltCache = [];
     private ?AnalyzerInterface $analyzer = null;
     private array $spatialEnabledCache = [];
     /** @var ?int The database's `data_version` when the per-index caches were last known to be current */
@@ -54,6 +56,16 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
      * One less is what always reads back with json_decode()'s default depth.
      */
     private const JSON_DEPTH = 511;
+
+    /**
+     * The `{index}_meta` key that records which version built the index's FTS table, and the value
+     * this version writes: the first one whose writes cannot damage an external-content index that
+     * 2.5.x's deleteByIdPrefix() had filled with field names. An external-content index without it
+     * has its FTS table built again by its first write. Only a version that needs the table built
+     * again changes the value.
+     */
+    private const FTS_BUILT_BY_KEY = 'fts_built_by';
+    private const FTS_BUILT_BY = '2.6.1';
 
     /**
      * Allowed operators for filter clauses.
@@ -198,6 +210,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         $this->ensureConnected();
 
         unset($this->ftsColumnsCache[$name], $this->stemmingCache[$name]);
+        unset($this->ftsBuiltCache[$name]);
 
         try {
             $useExternal = (bool)($options['external_content'] ?? $this->externalContentDefault);
@@ -322,6 +335,10 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 $sql = "CREATE VIRTUAL TABLE IF NOT EXISTS {$name}_fts USING fts5({$ftsColsSql}, tokenize='unicode61'{$prefixSql}{$detailSql})";
                 $this->connection->exec($sql);
             }
+            // A table made now over documents that are already stored is empty, not built from them
+            if (!$ftsExisted && !$this->hasStoredDocuments($name)) {
+                $this->setIndexMeta($name, self::FTS_BUILT_BY_KEY, self::FTS_BUILT_BY);
+            }
 
             // Only create terms table if Levenshtein fuzzy search is enabled
             if ($this->useTermsIndex) {
@@ -403,6 +420,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         }
         $this->deleteCalibration($name);
         unset($this->spatialRowsKnown[$name], $this->ftsColumnsCache[$name], $this->stemmingCache[$name]);
+        unset($this->ftsBuiltCache[$name]);
         $this->indexChanged($name);
     }
 
@@ -447,6 +465,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         $this->validateIndexName($index);
         $this->ensureConnected();
         $this->syncIndexCaches();
+        $this->ensureFtsBuilt($index);
 
         $this->indexChanged($index);
 
@@ -636,6 +655,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         if (empty($documents)) {
             return;
         }
+        $this->ensureFtsBuilt($index);
 
         try {
             $this->connection->beginTransaction();
@@ -963,6 +983,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         $this->validateIndexName($index);
         $this->ensureConnected();
         $this->syncIndexCaches();
+        $this->ensureFtsBuilt($index);
 
         $this->indexChanged($index);
 
@@ -1050,6 +1071,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             if (empty($ids)) {
                 return 0;
             }
+            $this->ensureFtsBuilt($index);
 
             $this->connection->beginTransaction();
 
@@ -2013,6 +2035,12 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 $this->connection->exec("DELETE FROM {$index}_terms");
             }
 
+            // Whatever the FTS table held is gone with it, field names included, so there is
+            // nothing for a first write to build again
+            if ($this->tableExists($index . '_meta')) {
+                $this->setIndexMeta($index, self::FTS_BUILT_BY_KEY, self::FTS_BUILT_BY);
+            }
+
             $this->connection->commit();
         } catch (\PDOException $e) {
             $this->connection->rollBack();
@@ -2635,6 +2663,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             $this->cacheDataVersion = $version;
             $this->ftsColumnsCache = [];
             $this->stemmingCache = [];
+            $this->ftsBuiltCache = [];
             $this->spatialEnabledCache = [];
         }
     }
@@ -3201,6 +3230,95 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     }
 
     /**
+     * Whether the index records that its FTS table was built by a version whose writes keep it sound.
+     */
+    private function ftsBuiltCurrent(string $index): bool
+    {
+        $builtBy = $this->getIndexMeta($index, self::FTS_BUILT_BY_KEY);
+
+        return $builtBy !== null && version_compare($builtBy, self::FTS_BUILT_BY, '>=');
+    }
+
+    private function hasStoredDocuments(string $index): bool
+    {
+        return $this->connection->query("SELECT 1 FROM {$index} LIMIT 1")->fetchColumn() !== false;
+    }
+
+    /**
+     * Called before a write: an index whose FTS table was not built by this version or later has it
+     * built again, once, and is marked.
+     *
+     * YetiSearch 2.5.x ran FTS5's own 'rebuild' command in deleteByIdPrefix(), which indexed the raw
+     * JSON `content` column of an external-content index, so every field name became a word of every
+     * document. The writes of 2.6.0 and later hand FTS5 the text a row was indexed with, which an
+     * index in that state does not hold, and the first one leaves an index that fails with
+     * 'database disk image is malformed' when searched for such a word. Building the table again from
+     * the stored documents, with the index's own settings and stems, clears it.
+     *
+     * An own-content table is never in that state, as FTS5 reads its own columns for a rebuild, so
+     * it is only marked. An index whose meta is missing does not say how it is stored, and is left to
+     * createIndex() to repair. A search never calls this.
+     *
+     * The rebuild runs in a transaction that takes the write lock before it reads the mark again, so
+     * of two connections that find the mark missing the second waits and then finds it set, and a
+     * connection that cannot get the lock fails the write instead of going on. If the rebuild fails
+     * the transaction is rolled back and the write throws without having begun.
+     *
+     * @throws StorageException If the rebuild fails
+     */
+    private function ensureFtsBuilt(string $index): void
+    {
+        if (!empty($this->ftsBuiltCache[$index])) {
+            return;
+        }
+        if ($this->ftsBuiltCurrent($index)) {
+            $this->ftsBuiltCache[$index] = true;
+
+            return;
+        }
+
+        $schema = $this->getIndexMeta($index, 'schema_mode');
+        if ($schema === null) {
+            return;
+        }
+
+        $ownTransaction = !$this->connection->inTransaction();
+        try {
+            if ($ownTransaction) {
+                $this->connection->beginTransaction();
+            }
+            // A statement that writes takes the write lock when it starts, even if it matches no
+            // row, so what is read after it cannot be out of date by the time the rebuild writes
+            $this->connection->exec(
+                "UPDATE {$index}_meta SET value = value WHERE key = '" . self::FTS_BUILT_BY_KEY . "'"
+            );
+            $this->syncIndexCaches();
+            if (!$this->ftsBuiltCurrent($index)) {
+                if ($this->getIndexMeta($index, 'schema_mode') === 'external') {
+                    $this->rebuildFts($index);
+                } else {
+                    $this->setIndexMeta($index, self::FTS_BUILT_BY_KEY, self::FTS_BUILT_BY);
+                }
+            }
+            if ($ownTransaction) {
+                $this->connection->commit();
+            }
+        } catch (\Throwable $e) {
+            if ($ownTransaction && $this->connection->inTransaction()) {
+                $this->connection->rollBack();
+            }
+            unset($this->ftsColumnsCache[$index], $this->stemmingCache[$index], $this->ftsBuiltCache[$index]);
+            if ($e instanceof \PDOException) {
+                throw new StorageException(
+                    "Failed to rebuild the full-text index of '{$index}' before writing to it: " . $e->getMessage()
+                );
+            }
+            throw $e;
+        }
+        $this->ftsBuiltCache[$index] = true;
+    }
+
+    /**
      * Rebuild an index's FTS table from the documents it stores.
      *
      * Rebuilding also makes the stems again with the stemmer in use now. To
@@ -3317,8 +3435,9 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 }
             } while (count($rows) === 500);
 
+            $this->connection->exec("CREATE TABLE IF NOT EXISTS {$index}_meta (key TEXT PRIMARY KEY, value TEXT)");
+            $this->setIndexMeta($index, self::FTS_BUILT_BY_KEY, self::FTS_BUILT_BY);
             if ($changed) {
-                $this->connection->exec("CREATE TABLE IF NOT EXISTS {$index}_meta (key TEXT PRIMARY KEY, value TEXT)");
                 $this->setIndexMeta($index, 'stemming', $stemming ? '1' : '0');
                 $this->setIndexMeta($index, 'stemming_language', $stemLanguage ?? '');
             }
@@ -3332,7 +3451,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             }
             throw $e;
         } finally {
-            unset($this->ftsColumnsCache[$index], $this->stemmingCache[$index]);
+            unset($this->ftsColumnsCache[$index], $this->stemmingCache[$index], $this->ftsBuiltCache[$index]);
         }
         $this->indexChanged($index);
     }
