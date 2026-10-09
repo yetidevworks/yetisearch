@@ -718,6 +718,34 @@ class StandardAnalyzerTest extends TestCase
         $this->assertSame(1, $this->privateProperty($this->analyzer, 'stemMemoSize'));
     }
 
+    public function testOverriddenStopWordProviderIsAskedOnEveryCall(): void
+    {
+        $analyzer = new class extends StandardAnalyzer {
+            public array $words = ['fox'];
+            public int $calls = 0;
+            public function getStopWords(string $language): array
+            {
+                $this->calls++;
+                return $this->words;
+            }
+        };
+        $this->assertSame(['dog'], $analyzer->removeStopWords(['fox', 'dog'], 'en'));
+        $analyzer->words = ['dog'];
+        $this->assertSame(['fox'], $analyzer->removeStopWords(['fox', 'dog'], 'en'));
+        $this->assertSame(['fox'], $analyzer->analyze('fox dog', 'en')['tokens']);
+        $this->assertSame(3, $analyzer->calls);
+        $this->assertSame([], $this->privateProperty($analyzer, 'stopWordSets'));
+    }
+
+    public function testInheritedStopWordOverrideIsAskedOnEveryCall(): void
+    {
+        $analyzer = new class extends DynamicStopWordTestAnalyzer {};
+        $this->assertSame(['dog'], $analyzer->removeStopWords(['fox', 'dog']));
+        $analyzer->words = ['dog'];
+        $this->assertSame(['fox'], $analyzer->removeStopWords(['fox', 'dog']));
+        $this->assertSame([], $this->privateProperty($analyzer, 'stopWordSets'));
+    }
+
     public function testStopWordChangesAfterTheListWasUsedTakeEffect(): void
     {
         $analyzer = new StandardAnalyzer();
@@ -803,6 +831,15 @@ class StandardAnalyzerTest extends TestCase
         }
 
         return $property->getValue($analyzer);
+    }
+}
+
+class DynamicStopWordTestAnalyzer extends StandardAnalyzer
+{
+    public array $words = ['fox'];
+    public function getStopWords(string $language): array
+    {
+        return $this->words;
     }
 }
 

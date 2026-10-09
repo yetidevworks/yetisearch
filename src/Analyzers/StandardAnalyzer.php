@@ -45,9 +45,12 @@ class StandardAnalyzer implements AnalyzerInterface
      */
     private array $stopWordSets = [];
     private int $stopWordSetsGeneration = -1;
+    private bool $keepStopWordSets;
 
     public function __construct(array $config = [])
     {
+        // All other list providers are private; an overridden public provider may change on every call.
+        $this->keepStopWordSets = (new \ReflectionMethod($this, 'getStopWords'))->getDeclaringClass()->getName() === self::class;
         $this->config = array_merge([
             'min_word_length' => 2,
             'max_word_length' => 50,
@@ -220,7 +223,7 @@ class StandardAnalyzer implements AnalyzerInterface
             $this->stopWordSetsGeneration = $generation;
         }
 
-        if (isset($this->stopWordSets[$language])) {
+        if ($this->keepStopWordSets && isset($this->stopWordSets[$language])) {
             return $this->stopWordSets[$language];
         }
 
@@ -232,14 +235,19 @@ class StandardAnalyzer implements AnalyzerInterface
             }
         }
 
+        $list = [
+            'set' => array_fill_keys($words, true),
+            'numeric' => $numeric,
+        ];
+        if (!$this->keepStopWordSets) {
+            return $list;
+        }
+
         if (count($this->stopWordSets) >= self::STOP_WORD_SETS_LIMIT) {
             $this->stopWordSets = [];
         }
 
-        return $this->stopWordSets[$language] = [
-            'set' => array_fill_keys($words, true),
-            'numeric' => $numeric,
-        ];
+        return $this->stopWordSets[$language] = $list;
     }
 
     public function normalize(string $text): string
