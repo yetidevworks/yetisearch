@@ -991,8 +991,9 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
      *
      * @param string $index The index name
      * @param string $prefix The ID prefix to match (e.g., "page123#chunk" to delete all chunks)
-     * @param bool $rebuildFts Whether to rebuild FTS after deletion (default true). Set to false
-     *                         when doing multiple deletions followed by inserts, then call rebuildFts() once at the end.
+     * @param bool $rebuildFts Kept for compatibility and no longer needed: the FTS entries of the
+     *                         deleted documents are always removed one by one, with the text they were
+     *                         indexed with, so the vocabulary is in step whether it is true or false.
      * @return int Number of documents deleted
      */
     public function deleteByIdPrefix(string $index, string $prefix, bool $rebuildFts = true): int
@@ -1040,16 +1041,12 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
 
             // Handle FTS deletion based on schema
             if ($schema === 'external') {
-                if ($rebuildFts) {
-                    // A full rebuild resyncs the vocabulary in one pass
-                    $this->connection->exec("INSERT INTO {$index}_fts({$index}_fts) VALUES('rebuild')");
-                    $this->dropMeaningOnlyFromRebuiltFts($index);
-                } else {
-                    // Otherwise drop each row's terms individually, using the text
-                    // read before the content rows were deleted
-                    foreach ($indexedFtsRows as [$docId, $indexedText, $indexedStems]) {
-                        $this->deleteFtsRow($index, $docId, $indexedText, $indexedStems);
-                    }
+                // Drop each row's terms individually, using the text read before the
+                // content rows were deleted. FTS5's own 'rebuild' is no way to resync
+                // the vocabulary here: it reads the content table's raw JSON column, so
+                // every field name would become a term of every document.
+                foreach ($indexedFtsRows as [$docId, $indexedText, $indexedStems]) {
+                    $this->deleteFtsRow($index, $docId, $indexedText, $indexedStems);
                 }
             } else {
                 // For non-external content, delete matching rows
@@ -2816,22 +2813,6 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     private static function isMeaningOnly(array $document, array $metadata): bool
     {
         return !empty($document['meaning_only']) || !empty($metadata['_meaning_only']);
-    }
-
-    /**
-     * An external-content FTS5 'rebuild' indexes every row of the content
-     * table, meaning-only ones included. Take those back out, with the text
-     * the rebuild read for them: the raw content column.
-     */
-    private function dropMeaningOnlyFromRebuiltFts(string $index): void
-    {
-        $stemsSql = $this->indexStems($index) ? ', _stems' : ', NULL';
-        $stmt = $this->connection->query(
-            "SELECT doc_id, content{$stemsSql} FROM {$index} WHERE json_extract(metadata, '$._meaning_only') IS NOT NULL"
-        );
-        foreach ($stmt->fetchAll(\PDO::FETCH_NUM) as $row) {
-            $this->deleteFtsRow($index, (int)$row[0], (string)$row[1], $row[2] === null ? null : (string)$row[2]);
-        }
     }
 
     /**

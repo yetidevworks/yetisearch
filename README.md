@@ -1957,7 +1957,7 @@ $search->indexDocument(string $indexName, string $id, $content, array $options =
 $search->indexBatch(string $indexName, array $documents);
 $search->update(string $indexName, $documentOrId, $content = null, array $options = []);
 $search->delete(string $indexName, string $documentId);
-$search->deleteByIdPrefix(string $indexName, string $prefix, bool $rebuildFts = true): int;
+$search->deleteByIdPrefix(string $indexName, string $prefix, bool $rebuildFts = true): int;  // $rebuildFts is no longer needed: the vocabulary is always kept in step
 $search->clear(string $indexName);
 $search->optimize(string $indexName);
 $search->rebuildFts(string $indexName, array $options = []);  // options: 'stemming' (bool), 'language' (?string)

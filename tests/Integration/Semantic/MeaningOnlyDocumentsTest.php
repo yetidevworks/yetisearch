@@ -116,7 +116,7 @@ class MeaningOnlyDocumentsTest extends TestCase
         $this->assertSame([], $this->ids($search->search(self::INDEX, 'shorebreak')));
         $this->assertSame(['cars'], $this->ids($search->search(self::INDEX, 'sedan')));
 
-        // deleteByIdPrefix() rebuilds external-content FTS in one pass.
+        // deleteByIdPrefix() drops the FTS entries of the documents it deletes one by one.
         $search->deleteByIdPrefix(self::INDEX, 'pizza');
         $this->assertSame([], $this->ids($search->search(self::INDEX, 'shorebreak')));
         $this->assertSame(['cars'], $this->ids($search->search(self::INDEX, 'sedan')));

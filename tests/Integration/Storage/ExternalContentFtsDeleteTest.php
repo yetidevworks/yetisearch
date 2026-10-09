@@ -117,9 +117,9 @@ class ExternalContentFtsDeleteTest extends TestCase
     }
 
     /**
-     * deleteByIdPrefix() with $rebuildFts = false leaves the caller responsible
-     * for resyncing, but the targeted deletes it does perform must be correct on
-     * their own so that a following insert cannot inherit anything.
+     * deleteByIdPrefix() drops the FTS entries of the documents it deletes one by
+     * one, with the text they were indexed with, whatever $rebuildFts says, so
+     * that a following insert cannot inherit anything.
      */
     public function test_delete_by_prefix_removes_the_deleted_documents_terms(): void
     {
