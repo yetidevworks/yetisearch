@@ -1148,6 +1148,9 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         // Track whether filters have been applied (for wrapped queries)
         $filtersApplied = false;
 
+        // Set below for a text search: the plain join and how to rank it on the FTS table alone
+        $rankedPlan = null;
+
         // Detect if we need PHP-based sorting (FTS5 + distance sorting)
         $needsPhpSort = false;
         $hasSpatialData = !empty($spatial['select']) && (
@@ -1322,14 +1325,19 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             }
             $params = array_merge([$matchQuery], $spatial['params']);
 
-            // The key to find a result's document by, when a plain text search ranks first
-            // and reads the documents of the best ones only (see rankedRows())
-            $rankKey = $schema === 'external' ? 'doc_id' : 'id';
-            $plainSql = "SELECT d.*, {$bm25} FROM {$index} d INNER JOIN {$index}_fts f ON "
-                . ($schema === 'external' ? 'f.rowid = d.doc_id' : 'd.id = f.id')
-                . " WHERE {$index}_fts MATCH ? ORDER BY rank ASC LIMIT ? OFFSET ?";
-            $rankSql = "SELECT f." . ($schema === 'external' ? 'rowid' : 'id') . " AS rid, {$bm25} FROM {$index}_fts f"
-                . " WHERE {$index}_fts MATCH ? ORDER BY rank ASC LIMIT ? OFFSET ?";
+            // When the search turns out to be plain text (this join and nothing else), it ranks
+            // first and reads the documents of the best ones only (see rankedRows()); `key`
+            // finds a result's document
+            $rankedPlan = [
+                'plain' => "SELECT d.*, {$bm25} FROM {$index} d INNER JOIN {$index}_fts f ON "
+                    . ($schema === 'external' ? 'f.rowid = d.doc_id' : 'd.id = f.id')
+                    . " WHERE {$index}_fts MATCH ? ORDER BY rank ASC LIMIT ? OFFSET ?",
+                'rank' => "SELECT f." . ($schema === 'external' ? 'rowid' : 'id')
+                    . " AS rid, {$bm25} FROM {$index}_fts f"
+                    . " WHERE {$index}_fts MATCH ? ORDER BY rank ASC LIMIT ? OFFSET ?",
+                'key' => $schema === 'external' ? 'doc_id' : 'id',
+                'match' => $matchQuery,
+            ];
 
             // Apply language filter to inner query (while d is in scope)
             if ($language) {
@@ -1457,8 +1465,11 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             // A first page with nothing but text (no filter, language, location or sort) is ranked
             // on the FTS table alone, and only the documents of the page are read
             $rankedRows = null;
-            if ($offset == 0 && isset($plainSql) && $sql === $plainSql && $params === [$matchQuery, $effectiveLimit, $offset]) {
-                $rankedRows = $this->rankedRows($index, $rankSql, $rankKey, $params);
+            if (
+                $offset == 0 && $rankedPlan !== null && $sql === $rankedPlan['plain']
+                && $params === [$rankedPlan['match'], $effectiveLimit, $offset]
+            ) {
+                $rankedRows = $this->rankedRows($index, $rankedPlan['rank'], $rankedPlan['key'], $params);
             }
 
             $stmt = null;

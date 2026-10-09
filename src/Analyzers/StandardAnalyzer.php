@@ -52,8 +52,11 @@ class StandardAnalyzer implements AnalyzerInterface
     public function __construct(array $config = [])
     {
         // All other list providers are private; an overridden public provider may change on every call.
-        $this->keepStopWordSets = (new \ReflectionMethod($this, 'getStopWords'))->getDeclaringClass()->getName() === self::class;
-        $this->useOverriddenStem = (new \ReflectionMethod($this, 'stem'))->getDeclaringClass()->getName() !== self::class;
+        $declaredIn = function (string $method): string {
+            return (new \ReflectionMethod($this, $method))->getDeclaringClass()->getName();
+        };
+        $this->keepStopWordSets = $declaredIn('getStopWords') === self::class;
+        $this->useOverriddenStem = $declaredIn('stem') !== self::class;
         $this->config = array_merge([
             'min_word_length' => 2,
             'max_word_length' => 50,
@@ -161,7 +164,11 @@ class StandardAnalyzer implements AnalyzerInterface
 
     private function canRememberStems(StemmerInterface $stemmer): bool
     {
-        return in_array(get_class($stemmer), [EnglishStemmer::class, FrenchStemmer::class, GermanStemmer::class, SpanishStemmer::class], true);
+        return in_array(
+            get_class($stemmer),
+            [EnglishStemmer::class, FrenchStemmer::class, GermanStemmer::class, SpanishStemmer::class],
+            true
+        );
     }
 
     /**
