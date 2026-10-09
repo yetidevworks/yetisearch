@@ -482,6 +482,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             $previousFtsRow = null;
             $existed = false;
             $stems = null;
+            $contentText = '';
             if ($schema === 'external') {
                 $contentText = $this->getFieldText($document['content'], 'content', $index);
                 // A meaning-only document has no FTS row, so no stems either
