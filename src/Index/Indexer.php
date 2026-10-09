@@ -330,29 +330,14 @@ class Indexer implements IndexerInterface
         }
 
         $processedContent = [];
-        $searchableText = [];
 
         foreach ($this->config['fields'] as $fieldName => $fieldConfig) {
             if (!isset($content[$fieldName])) {
                 continue;
             }
 
-            $fieldValue = $content[$fieldName];
-
             if ($fieldConfig['store'] ?? true) {
-                $processedContent[$fieldName] = $fieldValue;
-            }
-
-            if ($fieldConfig['index'] ?? true) {
-                if (is_string($fieldValue)) {
-                    $analyzed = $this->analyzer->analyze($fieldValue, $language);
-                    $tokens = is_array($analyzed) && isset($analyzed['tokens']) ? $analyzed['tokens'] : $analyzed;
-                    $boost = $fieldConfig['boost'] ?? 1.0;
-
-                    // Instead of duplicating tokens, we'll apply boost at search time
-                    // For now, just add tokens once
-                    $searchableText = array_merge($searchableText, $tokens);
-                }
+                $processedContent[$fieldName] = $content[$fieldName];
             }
         }
 
