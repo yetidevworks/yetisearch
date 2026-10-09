@@ -712,6 +712,8 @@ $search = new YetiSearch([
 
 Both are fixed when the index is created: creating an index that already exists again, with other options, does not change whether or how it stems. An index that does not stem is searched exactly as before.
 
+An index that stems needs the FTS5 option `detail` at `full`, its default: a stem with a hyphen in it is searched as a phrase, and `column` and `none` keep no positions to search one with. Creating a stemming index with `'fts' => ['detail' => 'column']` (or `'none'`), or switching an index that has one with `rebuildFts()`, throws an `InvalidArgumentException`.
+
 A document is stemmed in its own `language`, else the language of the index. A search is stemmed in its `language` option, else the language of the index. The `language` option of a search also keeps only the documents indexed with that same `language`.
 
 ```php

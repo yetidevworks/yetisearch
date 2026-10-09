@@ -2671,9 +2671,11 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 );
             }
         }
-        if (is_string($detail) && strtolower($detail) === 'none') {
+        // A stem with a separator in it (a hyphenated word, or what a custom stemmer makes of
+        // one) is searched as a phrase, and a phrase needs the positions only detail=full keeps
+        if (is_string($detail) && in_array(strtolower($detail), ['none', 'column'], true)) {
             throw new \InvalidArgumentException(
-                "A stemming index cannot use the FTS5 detail option 'none': it needs column filters"
+                "A stemming index cannot use the FTS5 detail option '" . strtolower($detail) . "': it needs detail 'full', the default, for column filters and phrase queries"
             );
         }
     }

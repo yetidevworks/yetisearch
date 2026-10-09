@@ -87,12 +87,50 @@ class StemmingStorageTest extends StemmingTestCase
         ]);
     }
 
-    public function test_a_stemming_index_cannot_have_an_fts_detail_of_none(): void
+    public function ftsDetailsWithoutPhrases(): array
+    {
+        return ['none' => ['none'], 'column' => ['column']];
+    }
+
+    /** @dataProvider ftsDetailsWithoutPhrases */
+    public function test_a_stemming_index_cannot_have_an_fts_detail_that_keeps_no_positions(string $detail): void
     {
         $search = $this->openSearch('multi');
 
         $this->expectException(\InvalidArgumentException::class);
-        $search->createIndex(self::INDEX, ['stemming' => true, 'fts' => ['detail' => 'none']]);
+        $this->expectExceptionMessage("'{$detail}'");
+        $search->createIndex(self::INDEX, ['stemming' => true, 'fts' => ['detail' => $detail]]);
+    }
+
+    /** @dataProvider ftsDetailsWithoutPhrases */
+    public function test_an_index_with_such_a_detail_cannot_be_switched_to_stemming(string $detail): void
+    {
+        $search = $this->openSearch('multi');
+        $search->createIndex(self::INDEX, ['fts' => ['detail' => $detail]]);
+        $this->createdIndexes[] = self::INDEX;
+        $search->index(self::INDEX, $this->doc('a', 'the dogs were running'));
+
+        try {
+            $search->rebuildFts(self::INDEX, ['stemming' => true]);
+            $this->fail('The switch should have been refused');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringContainsString("'{$detail}'", $e->getMessage());
+        }
+
+        $this->assertNull($this->storage($search)->stemmingFor(self::INDEX));
+        $this->assertSame(['a'], $this->found($search, 'running'));
+    }
+
+    /** @dataProvider schemaModes */
+    public function test_a_stem_that_is_a_phrase_is_searched_on_a_full_detail_index(string $mode): void
+    {
+        StemmerFactory::register('hyphenated', HyphenatingStemmer::class);
+        $search = $this->stemmingSearch($mode, ['language' => 'hyphenated', 'fts' => ['detail' => 'full']]);
+        $search->index(self::INDEX, $this->doc('a', 'the dogs were running'));
+
+        $this->assertSame(['a'], $this->found($search, 'running'));
+        $this->assertSame(['a'], $this->found($search, 'runs'), 'Found by a stem that is a phrase');
+        $this->assertIntegrity($search);
     }
 
     /** @dataProvider schemaModes */
@@ -631,5 +669,19 @@ class ExplodingStemmer implements StemmerInterface
     public function getLanguage(): string
     {
         return 'xx';
+    }
+}
+
+/** Gives every word a hyphenated stem of its first three letters, which is searched as a phrase */
+class HyphenatingStemmer implements StemmerInterface
+{
+    public function stem(string $word): string
+    {
+        return substr($word, 0, 3) . '-x';
+    }
+
+    public function getLanguage(): string
+    {
+        return 'hyphenated';
     }
 }
