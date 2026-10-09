@@ -9,15 +9,13 @@ use YetiSearch\Stemmer\Languages\SpanishStemmer;
 
 /**
  * Factory class for creating language-specific stemmers
+ *
+ * The four built-in stemmers can be replaced, and stemmers for other
+ * languages added, with register().
  */
 class StemmerFactory
 {
-    private static array $stemmers = [];
-
-    /**
-     * Supported languages and their aliases
-     */
-    private static array $languageMap = [
+    private const BUILT_IN_ALIASES = [
         'english' => 'english',
         'en' => 'english',
         'eng' => 'english',
@@ -38,67 +36,168 @@ class StemmerFactory
         'espanol' => 'spanish',
     ];
 
+    private const BUILT_IN_STEMMERS = [
+        'english' => EnglishStemmer::class,
+        'french' => FrenchStemmer::class,
+        'german' => GermanStemmer::class,
+        'spanish' => SpanishStemmer::class,
+    ];
+
+    /**
+     * What each language name or alias stands for, once registrations are applied.
+     *
+     * @var array<string, string> alias => canonical name
+     */
+    private static array $languageMap = self::BUILT_IN_ALIASES;
+
+    /**
+     * How each language's stemmer is made: a class name, an instance, or a callable that returns one.
+     *
+     * @var array<string, string|StemmerInterface|callable>
+     */
+    private static array $implementations = self::BUILT_IN_STEMMERS;
+
+    /** @var array<string, StemmerInterface> Stemmers made so far, by canonical name */
+    private static array $stemmers = [];
+
+    /**
+     * Register a stemmer for a language, or replace the built-in one.
+     *
+     * $stemmer is the name of a class implementing StemmerInterface, an
+     * instance of one, or a callable that returns one. A callable is called
+     * once, the first time the language is needed.
+     *
+     * Registering the name of a built-in language (english, french, german,
+     * spanish) replaces its stemmer; its aliases keep pointing at it. An alias
+     * that already belongs to another language moves to this one.
+     *
+     * @param string $language Canonical name of the language, e.g. 'italian'. It is also an alias of itself.
+     * @param string|StemmerInterface|callable $stemmer
+     * @param string[] $aliases Other names for the language, e.g. ['it', 'ita', 'italiano']
+     * @throws \InvalidArgumentException If the name is empty or the stemmer is not usable
+     */
+    public static function register(string $language, $stemmer, array $aliases = []): void
+    {
+        $canonical = self::normalize($language);
+        if ($canonical === '') {
+            throw new \InvalidArgumentException('A stemmer needs a language name to be registered under');
+        }
+
+        if ($stemmer instanceof StemmerInterface) {
+            $definition = $stemmer;
+        } elseif (is_string($stemmer) && class_exists($stemmer)) {
+            if (!is_a($stemmer, StemmerInterface::class, true)) {
+                throw new \InvalidArgumentException("Stemmer class $stemmer must implement " . StemmerInterface::class);
+            }
+            if (!(new \ReflectionClass($stemmer))->isInstantiable()) {
+                throw new \InvalidArgumentException("Stemmer class $stemmer cannot be instantiated");
+            }
+            $definition = $stemmer;
+        } elseif (is_callable($stemmer)) {
+            $definition = $stemmer;
+        } else {
+            throw new \InvalidArgumentException(
+                'A stemmer must be a class name or an instance of ' . StemmerInterface::class . ', or a callable that returns one'
+            );
+        }
+
+        $names = [$canonical];
+        foreach ($aliases as $alias) {
+            if (!is_string($alias)) {
+                throw new \InvalidArgumentException('Stemmer aliases must be strings');
+            }
+            $alias = self::normalize($alias);
+            if ($alias !== '') {
+                $names[] = $alias;
+            }
+        }
+
+        foreach ($names as $name) {
+            self::$languageMap[$name] = $canonical;
+        }
+        self::$implementations[$canonical] = $definition;
+        unset(self::$stemmers[$canonical]);
+    }
+
+    /**
+     * Resolve a language name, alias or locale to its canonical name.
+     *
+     * 'fr', 'FR ', 'francais' and 'fr_CA' all give 'french'. A locale such as
+     * 'en_US' or 'pt-BR' that is not registered as it stands is resolved by
+     * the part before the underscore or hyphen.
+     *
+     * @return string|null The canonical name, or null when no stemmer is registered for the language
+     */
+    public static function canonical(string $language): ?string
+    {
+        $language = self::normalize($language);
+        if (isset(self::$languageMap[$language])) {
+            return self::$languageMap[$language];
+        }
+
+        $base = preg_split('/[_\-.@]/', $language, 2)[0];
+        if ($base !== $language && isset(self::$languageMap[$base])) {
+            return self::$languageMap[$base];
+        }
+
+        return null;
+    }
+
     /**
      * Create or get a stemmer for the specified language
      *
-     * @param string $language Language code or name
+     * @param string $language Language code, name or locale
      * @return StemmerInterface
      * @throws \InvalidArgumentException If language is not supported
      */
     public static function create(string $language): StemmerInterface
     {
-        $language = strtolower(trim($language));
-
-        // Map language alias to canonical name
-        if (!isset(self::$languageMap[$language])) {
-            throw new \InvalidArgumentException("Unsupported language: $language");
+        $canonicalLanguage = self::canonical($language);
+        if ($canonicalLanguage === null) {
+            throw new \InvalidArgumentException('Unsupported language: ' . self::normalize($language));
         }
-
-        $canonicalLanguage = self::$languageMap[$language];
 
         // Return cached instance if available
         if (isset(self::$stemmers[$canonicalLanguage])) {
             return self::$stemmers[$canonicalLanguage];
         }
 
-        // Create new instance
-        switch ($canonicalLanguage) {
-            case 'english':
-                self::$stemmers[$canonicalLanguage] = new EnglishStemmer();
-                break;
-            case 'french':
-                self::$stemmers[$canonicalLanguage] = new FrenchStemmer();
-                break;
-            case 'german':
-                self::$stemmers[$canonicalLanguage] = new GermanStemmer();
-                break;
-            case 'spanish':
-                self::$stemmers[$canonicalLanguage] = new SpanishStemmer();
-                break;
+        $definition = self::$implementations[$canonicalLanguage];
+        if ($definition instanceof StemmerInterface) {
+            $stemmer = $definition;
+        } elseif (is_string($definition) && class_exists($definition)) {
+            $stemmer = new $definition();
+        } else {
+            $stemmer = $definition();
+            if (!$stemmer instanceof StemmerInterface) {
+                throw new \InvalidArgumentException(
+                    "The stemmer callable registered for '$canonicalLanguage' must return an instance of " . StemmerInterface::class
+                );
+            }
         }
 
-        return self::$stemmers[$canonicalLanguage];
+        return self::$stemmers[$canonicalLanguage] = $stemmer;
     }
 
     /**
      * Get list of supported languages
      *
-     * @return array
+     * @return array Canonical names, built-in and registered
      */
     public static function getSupportedLanguages(): array
     {
-        return array_unique(array_values(self::$languageMap));
+        return array_keys(self::$implementations);
     }
 
     /**
      * Check if a language is supported
      *
-     * @param string $language
+     * @param string $language Language code, name or locale
      * @return bool
      */
     public static function isSupported(string $language): bool
     {
-        return isset(self::$languageMap[strtolower(trim($language))]);
+        return self::canonical($language) !== null;
     }
 
     /**
@@ -107,5 +206,22 @@ class StemmerFactory
     public static function clearCache(): void
     {
         self::$stemmers = [];
+    }
+
+    /**
+     * Remove every registration and return to the four built-in stemmers and
+     * their aliases. Meant for tests, so that what one registers does not
+     * reach the next.
+     */
+    public static function reset(): void
+    {
+        self::$languageMap = self::BUILT_IN_ALIASES;
+        self::$implementations = self::BUILT_IN_STEMMERS;
+        self::$stemmers = [];
+    }
+
+    private static function normalize(string $language): string
+    {
+        return strtolower(trim($language));
     }
 }
