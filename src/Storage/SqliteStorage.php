@@ -1008,7 +1008,6 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     private function removeDocuments(string $index, array $ids): void
     {
         $schema = $this->getSchemaMode($index);
-        $hasSpatial = $this->hasSpatialIndex($index);
 
         foreach (array_chunk($ids, 500) as $batch) {
             // The text FTS5 has to be given back for each row, read before the rows go
@@ -1038,23 +1037,52 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                     ->execute($batch);
             }
 
-            if ($schema === 'external') {
-                if ($hasSpatial) {
-                    foreach ($indexedFtsRows as [$docId]) {
-                        $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?")->execute([$docId]);
-                    }
+            $this->deleteSpatialRows(
+                $index,
+                $schema,
+                $schema === 'external' ? array_column($indexedFtsRows, 0) : $batch
+            );
+        }
+    }
+
+    /**
+     * Delete the spatial rows, and the id map rows of an own-content index, of documents, inside an open
+     * transaction. It is the one place delete(), deleteByIdPrefix() and removeDocuments() do it. A table that
+     * is not there is skipped: an index made with `enable_spatial` false never had them, and an own-content
+     * index has an id map only if it has a spatial table.
+     *
+     * @param array<int|string> $keys The doc_ids of an external-content index, the ids of an own-content one
+     */
+    private function deleteSpatialRows(string $index, string $schema, array $keys): void
+    {
+        if (empty($keys)) {
+            return;
+        }
+        $hasSpatial = $this->hasSpatialIndex($index);
+
+        if ($schema === 'external') {
+            if ($hasSpatial) {
+                $stmt = $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?");
+                foreach ($keys as $docId) {
+                    $stmt->execute([$docId]);
                 }
-            } else {
-                if ($this->tableExists($index . '_id_map')) {
-                    $this->connection->prepare("DELETE FROM {$index}_id_map WHERE string_id IN ({$placeholders})")
-                        ->execute($batch);
-                }
-                if ($hasSpatial) {
-                    foreach ($batch as $id) {
-                        $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?")
-                            ->execute([$this->getNumericId($id)]);
-                    }
-                }
+            }
+
+            return;
+        }
+
+        $ids = array_map('strval', $keys);
+        if ($this->tableExists($index . '_id_map')) {
+            foreach (array_chunk($ids, 500) as $chunk) {
+                $placeholders = implode(',', array_fill(0, count($chunk), '?'));
+                $this->connection->prepare("DELETE FROM {$index}_id_map WHERE string_id IN ({$placeholders})")
+                    ->execute($chunk);
+            }
+        }
+        if ($hasSpatial) {
+            $stmt = $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?");
+            foreach ($ids as $id) {
+                $stmt->execute([$this->getNumericId($id)]);
             }
         }
     }
@@ -1134,15 +1162,11 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 $this->connection->prepare("DELETE FROM {$index}_terms WHERE document_id = ?")->execute([$id]);
             }
 
-            // Spatial cleanup (works for both R-tree and fallback table)
+            // Spatial cleanup (works for both R-tree and fallback table, and for an index without them)
             if ($schema === 'external') {
-                if ($savedDocId !== null) {
-                    $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?")->execute([$savedDocId]);
-                }
+                $this->deleteSpatialRows($index, $schema, $savedDocId !== null ? [$savedDocId] : []);
             } else {
-                $this->connection->prepare("DELETE FROM {$index}_id_map WHERE string_id = ?")->execute([$id]);
-                $spatialId = $this->getNumericId($id);
-                $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?")->execute([$spatialId]);
+                $this->deleteSpatialRows($index, $schema, [$id]);
             }
 
             $this->connection->commit();
@@ -1226,18 +1250,8 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 $this->connection->prepare("DELETE FROM {$index}_terms WHERE document_id IN ({$placeholders})")->execute($ids);
             }
 
-            // Spatial cleanup
-            if ($schema === 'external') {
-                foreach ($spatialIds as $spatialId) {
-                    $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?")->execute([$spatialId]);
-                }
-            } else {
-                foreach ($ids as $id) {
-                    $this->connection->prepare("DELETE FROM {$index}_id_map WHERE string_id = ?")->execute([$id]);
-                    $spatialId = $this->getNumericId($id);
-                    $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?")->execute([$spatialId]);
-                }
-            }
+            // Spatial cleanup (works for both R-tree and fallback table, and for an index without them)
+            $this->deleteSpatialRows($index, $schema, $schema === 'external' ? $spatialIds : $ids);
 
             $this->connection->commit();
         } catch (\PDOException $e) {
