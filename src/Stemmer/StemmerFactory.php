@@ -60,6 +60,9 @@ class StemmerFactory
     /** @var array<string, StemmerInterface> Stemmers made so far, by canonical name */
     private static array $stemmers = [];
 
+    /** @var int Moves on whenever a registration or a stemmer instance changes */
+    private static int $generation = 0;
+
     /**
      * Register a stemmer for a language, or replace the built-in one.
      *
@@ -117,6 +120,18 @@ class StemmerFactory
         }
         self::$implementations[$canonical] = $definition;
         unset(self::$stemmers[$canonical]);
+        self::changed();
+    }
+
+    /**
+     * A number that changes whenever a stemmer is registered, the cache of
+     * instances is cleared, or the factory is reset. Whatever is derived from a
+     * stemmer, the stems an analyzer remembers for instance, is valid for as
+     * long as the number stays what it was when it was derived.
+     */
+    public static function generation(): int
+    {
+        return self::$generation;
     }
 
     /**
@@ -206,6 +221,7 @@ class StemmerFactory
     public static function clearCache(): void
     {
         self::$stemmers = [];
+        self::changed();
     }
 
     /**
@@ -218,6 +234,12 @@ class StemmerFactory
         self::$languageMap = self::BUILT_IN_ALIASES;
         self::$implementations = self::BUILT_IN_STEMMERS;
         self::$stemmers = [];
+        self::changed();
+    }
+
+    private static function changed(): void
+    {
+        self::$generation++;
     }
 
     private static function normalize(string $language): string

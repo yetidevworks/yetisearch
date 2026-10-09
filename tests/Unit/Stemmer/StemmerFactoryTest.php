@@ -226,6 +226,39 @@ class StemmerFactoryTest extends TestCase
         $this->assertInstanceOf(EnglishStemmer::class, StemmerFactory::create('en'));
         $this->assertInstanceOf(SpanishStemmer::class, StemmerFactory::create('es'));
     }
+
+    public function test_generation_moves_when_registrations_or_instances_change(): void
+    {
+        $generation = StemmerFactory::generation();
+        $this->assertSame($generation, StemmerFactory::generation(), 'Reading does not move it');
+
+        StemmerFactory::create('en');
+        StemmerFactory::canonical('fr_CA');
+        $this->assertSame($generation, StemmerFactory::generation(), 'Using the stemmers does not move it');
+
+        StemmerFactory::register('ewokese', EwokStemmer::class);
+        $this->assertNotSame($generation, StemmerFactory::generation());
+
+        $generation = StemmerFactory::generation();
+        StemmerFactory::clearCache();
+        $this->assertNotSame($generation, StemmerFactory::generation());
+
+        $generation = StemmerFactory::generation();
+        StemmerFactory::reset();
+        $this->assertNotSame($generation, StemmerFactory::generation());
+    }
+
+    public function test_a_failed_register_leaves_the_generation_alone(): void
+    {
+        $generation = StemmerFactory::generation();
+
+        try {
+            StemmerFactory::register('french', \stdClass::class);
+            $this->fail('A class that is not a stemmer should be refused');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertSame($generation, StemmerFactory::generation());
+        }
+    }
 }
 
 class EwokStemmer implements StemmerInterface

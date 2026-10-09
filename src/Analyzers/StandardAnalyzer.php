@@ -12,6 +12,23 @@ class StandardAnalyzer implements AnalyzerInterface
     private array $customStopWords = [];
     private array $config;
 
+    /** The most stems the analyzer remembers; it forgets them all when it reaches this */
+    private const STEM_MEMO_LIMIT = 50000;
+
+    /** Words longer than this (in bytes) are stemmed each time rather than remembered */
+    private const STEM_MEMO_MAX_WORD = 64;
+
+    /**
+     * Stems of the words stemmed so far, by canonical language and then word. A text repeats
+     * its words, so most are met again, and stemming is by far the costliest part of
+     * analyzing. Dropped when the stemmers change (see StemmerFactory::generation()).
+     *
+     * @var array<string, array<string, string>>
+     */
+    private array $stemMemo = [];
+    private int $stemMemoSize = 0;
+    private int $stemMemoGeneration = -1;
+
     public function __construct(array $config = [])
     {
         $this->config = array_merge([
@@ -93,11 +110,52 @@ class StandardAnalyzer implements AnalyzerInterface
         // A language without a stemmer keeps its words as they are; English
         // suffix stripping would only damage them. The factory holds the stemmer
         // instances, so a stemmer registered later is the one used.
-        if (!StemmerFactory::isSupported($language)) {
+        $canonical = StemmerFactory::canonical($language);
+        if ($canonical === null) {
             return $word;
         }
+        $this->syncStemMemo();
 
-        return StemmerFactory::create($language)->stem($word);
+        return $this->stemRemembered($canonical, $language, $word);
+    }
+
+    /**
+     * The stem of a word in a language that has a stemmer, remembering it. The stemmer is
+     * deterministic, so a word met again is not stemmed again.
+     */
+    private function stemRemembered(string $canonical, string $language, string $word): string
+    {
+        if (isset($this->stemMemo[$canonical][$word])) {
+            return $this->stemMemo[$canonical][$word];
+        }
+
+        $stem = StemmerFactory::create($language)->stem($word);
+
+        if (isset($word[self::STEM_MEMO_MAX_WORD])) {
+            return $stem;
+        }
+        if ($this->stemMemoSize >= self::STEM_MEMO_LIMIT) {
+            $this->stemMemo = [];
+            $this->stemMemoSize = 0;
+        }
+        $this->stemMemo[$canonical][$word] = $stem;
+        $this->stemMemoSize++;
+
+        return $stem;
+    }
+
+    /**
+     * Forget the stems when a stemmer has been registered, replaced or reset since
+     * they were made, so that the new stemmer is the one used straight away.
+     */
+    private function syncStemMemo(): void
+    {
+        $generation = StemmerFactory::generation();
+        if ($generation !== $this->stemMemoGeneration) {
+            $this->stemMemo = [];
+            $this->stemMemoSize = 0;
+            $this->stemMemoGeneration = $generation;
+        }
     }
 
     public function removeStopWords(array $tokens, ?string $language = null): array

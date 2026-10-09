@@ -572,6 +572,151 @@ class StandardAnalyzerTest extends TestCase
         StemmerFactory::reset();
         $this->assertSame('run', $this->analyzer->stem('running'));
     }
+
+    public function testRememberedStemsFollowAStemmerRegisteredReplacedOrReset(): void
+    {
+        // Every word is stemmed and then asked for again, so the second answer is a remembered one
+        $this->assertSame('run', $this->analyzer->stem('running'));
+        $this->assertSame(['run'], $this->analyzer->analyze('running')['tokens']);
+
+        StemmerFactory::register('english', ItalianTestStemmer::class);
+        $this->assertSame('runn', $this->analyzer->stem('running'));
+        $this->assertSame(['runn'], $this->analyzer->analyze('running')['tokens']);
+
+        StemmerFactory::register('english', EwokTestStemmer::class);
+        $this->assertSame('running!', $this->analyzer->stem('running'));
+        $this->assertSame(['running!'], $this->analyzer->analyze('running')['tokens']);
+
+        StemmerFactory::reset();
+        $this->assertSame('run', $this->analyzer->stem('running'));
+        $this->assertSame(['run'], $this->analyzer->analyze('running')['tokens']);
+    }
+
+    public function testRememberedStemsFollowALanguageRegisteredUnderAnAliasOfAnother(): void
+    {
+        $this->assertSame('chanson', $this->analyzer->stem('chansons', 'fr'));
+
+        // 'fr' now means another language
+        StemmerFactory::register('frenchish', EwokTestStemmer::class, ['fr']);
+
+        $this->assertSame('chansons!', $this->analyzer->stem('chansons', 'fr'));
+        $this->assertSame('chanson', $this->analyzer->stem('chansons', 'french'));
+    }
+
+    public function testRememberedStemsAreDroppedByClearCache(): void
+    {
+        $made = 0;
+        StemmerFactory::register('english', function () use (&$made) {
+            $made++;
+
+            return $made === 1 ? new ItalianTestStemmer() : new EwokTestStemmer();
+        });
+
+        $this->assertSame('runn', $this->analyzer->stem('running'));
+        $this->assertSame('runn', $this->analyzer->stem('running'));
+        $this->assertSame(1, $made);
+
+        // The cached instance goes, and the callable makes the next one
+        StemmerFactory::clearCache();
+        $this->assertSame('running!', $this->analyzer->stem('running'));
+        $this->assertSame(2, $made);
+    }
+
+    public function testAWordIsStemmedOnceAndAWordMetAgainComesFromMemory(): void
+    {
+        $calls = new \ArrayObject();
+        StemmerFactory::register('english', new CountingTestStemmer($calls));
+
+        $analyzer = new StandardAnalyzer();
+        $this->assertSame(['cat', 'dog', 'cat', 'cat'], $analyzer->analyze('cats dogs cats cats')['tokens']);
+        $this->assertSame('cat', $analyzer->stem('cats'));
+
+        $this->assertSame(['cats', 'dogs'], $calls->getArrayCopy());
+    }
+
+    public function testRememberedStemsStayUnderTheirLimit(): void
+    {
+        $limit = $this->privateConstant('STEM_MEMO_LIMIT');
+        StemmerFactory::register('ewokese', EwokTestStemmer::class);
+        $analyzer = new StandardAnalyzer();
+
+        for ($i = 0; $i < $limit + 25; $i++) {
+            $this->assertSame('w' . $i . '!', $analyzer->stem('w' . $i, 'ewokese'));
+        }
+
+        $memo = $this->privateProperty($analyzer, 'stemMemo');
+        $remembered = 0;
+        foreach ($memo as $words) {
+            $remembered += count($words);
+        }
+        $this->assertLessThanOrEqual($limit, $remembered);
+        $this->assertSame($remembered, $this->privateProperty($analyzer, 'stemMemoSize'));
+        $this->assertGreaterThan(0, $remembered);
+
+        // What was forgotten is stemmed again, and the same
+        $this->assertSame('w0!', $analyzer->stem('w0', 'ewokese'));
+    }
+
+    public function testAVeryLongWordIsNotRemembered(): void
+    {
+        $long = str_repeat('a', 200) . 's';
+
+        $this->assertSame(str_repeat('a', 200), $this->analyzer->stem($long));
+        $this->assertSame([], $this->privateProperty($this->analyzer, 'stemMemo'));
+        $this->assertSame('cat', $this->analyzer->stem('cats'));
+        $this->assertSame(1, $this->privateProperty($this->analyzer, 'stemMemoSize'));
+    }
+
+    private function privateConstant(string $name): int
+    {
+        return (new \ReflectionClassConstant(StandardAnalyzer::class, $name))->getValue();
+    }
+
+    /** @return mixed */
+    private function privateProperty(StandardAnalyzer $analyzer, string $name)
+    {
+        $property = new \ReflectionProperty(StandardAnalyzer::class, $name);
+        if (PHP_VERSION_ID < 80100) {
+            $property->setAccessible(true);
+        }
+
+        return $property->getValue($analyzer);
+    }
+}
+
+class CountingTestStemmer implements StemmerInterface
+{
+    private \ArrayObject $calls;
+
+    public function __construct(\ArrayObject $calls)
+    {
+        $this->calls = $calls;
+    }
+
+    public function stem(string $word): string
+    {
+        $this->calls[] = $word;
+
+        return rtrim($word, 's');
+    }
+
+    public function getLanguage(): string
+    {
+        return 'en';
+    }
+}
+
+class EwokTestStemmer implements StemmerInterface
+{
+    public function stem(string $word): string
+    {
+        return $word . '!';
+    }
+
+    public function getLanguage(): string
+    {
+        return 'ew';
+    }
 }
 
 class ItalianTestStemmer implements StemmerInterface
