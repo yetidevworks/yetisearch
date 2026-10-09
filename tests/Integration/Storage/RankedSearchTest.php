@@ -22,8 +22,13 @@ class RankedSearchTest extends StemmingTestCase
         parent::tearDown();
     }
 
-    /** @return array{0: YetiSearch, 1: SqliteStorage, 2: \PDO} */
-    private function openTraced(string $mode, bool $stemming): array
+    /**
+     * @param bool $mathFunctions False makes the storage act as on an SQLite built without its
+     *                            math functions (PHP on Windows), where every search joins the
+     *                            spatial table to give each result its centroid
+     * @return array{0: YetiSearch, 1: SqliteStorage, 2: \PDO}
+     */
+    private function openTraced(string $mode, bool $stemming, bool $mathFunctions = true): array
     {
         $path = $this->getTestDbPath();
         $search = $this->openSearch($mode, ['storage' => ['path' => $path]]);
@@ -43,13 +48,28 @@ class RankedSearchTest extends StemmingTestCase
 
         $traced = $this->tracingConnection($path);
         $storage = $this->storage($search);
-        $property = new \ReflectionProperty(SqliteStorage::class, 'connection');
+        $this->storageProperty('connection')->setValue($storage, $traced);
+        if (!$mathFunctions) {
+            $this->storageProperty('hasMathFunctions')->setValue($storage, false);
+        }
+
+        return [$search, $storage, $traced];
+    }
+
+    private function storageProperty(string $name): \ReflectionProperty
+    {
+        $property = new \ReflectionProperty(SqliteStorage::class, $name);
         if (PHP_VERSION_ID < 80100) {
             $property->setAccessible(true);
         }
-        $property->setValue($storage, $traced);
 
-        return [$search, $storage, $traced];
+        return $property;
+    }
+
+    /** Without the math functions every search joins the spatial table, so none is plain text */
+    private function rankingApplies(SqliteStorage $storage): bool
+    {
+        return (bool)$this->storageProperty('hasMathFunctions')->getValue($storage);
     }
 
     private function tracingConnection(string $path): \PDO
@@ -127,6 +147,9 @@ class RankedSearchTest extends StemmingTestCase
     public function test_a_plain_text_search_reads_only_the_documents_of_the_page(string $mode): void
     {
         [, $storage] = $this->openTraced($mode, false);
+        if (!$this->rankingApplies($storage)) {
+            $this->markTestSkipped('This SQLite has no math functions, so every search joins the spatial table');
+        }
         $this->takeStatements();
 
         $rows = $storage->search(self::INDEX, ['query' => 'connected', 'limit' => 3, 'bypass_cache' => true]);
@@ -188,7 +211,7 @@ class RankedSearchTest extends StemmingTestCase
 
             $this->takeStatements();
             $this->returned($storage, ['query' => 'connected', 'limit' => 5]);
-            $this->assertTrue($this->ranked($this->takeStatements()));
+            $this->assertSame($this->rankingApplies($storage), $this->ranked($this->takeStatements()));
         }
     }
 
@@ -210,7 +233,7 @@ class RankedSearchTest extends StemmingTestCase
         $this->assertCount(3, $expected, 'The join fills the page from the matches that have a document');
         $this->assertNotContains('best', array_column($expected, 0));
         $this->assertSame($expected, $returned);
-        $this->assertTrue($this->ranked($statements), 'The ranking was tried');
+        $this->assertSame($this->rankingApplies($storage), $this->ranked($statements), 'The ranking was tried where it applies');
         $this->assertNotEmpty(array_filter($statements, function ($sql) {
             return strpos($sql, 'INNER JOIN') !== false;
         }), 'and the search was run as a join when it did not agree with the documents');
@@ -243,6 +266,27 @@ class RankedSearchTest extends StemmingTestCase
                 $this->assertFalse($this->ranked($this->takeStatements()), 'A positive offset uses the join');
                 if ($offset === $total) {
                     $this->assertSame([], $expected, 'No document is returned beyond the total');
+                }
+            }
+        }
+    }
+
+    /** @dataProvider schemaModes */
+    public function test_without_sql_math_functions_every_search_is_the_join(string $mode): void
+    {
+        foreach ([false, true] as $stemming) {
+            [, $storage, $pdo] = $this->openTraced($mode, $stemming, false);
+            foreach (['connected', 'connect OR running', 'zzzzqqqq'] as $text) {
+                $query = ['query' => $text];
+                if ($stemming) {
+                    $query['stem_query'] = '(' . $text . ') OR _stems : connect';
+                }
+                foreach ([[5, 0], [5, 5], [100, 0]] as [$limit, $offset]) {
+                    $page = $query + ['limit' => $limit, 'offset' => $offset];
+                    $expected = $this->joined($storage, $pdo, $page);
+                    $this->takeStatements();
+                    $this->assertSame($expected, $this->returned($storage, $page), "$text, limit $limit offset $offset");
+                    $this->assertFalse($this->ranked($this->takeStatements()), 'The search is not plain text');
                 }
             }
         }

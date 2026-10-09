@@ -29,6 +29,16 @@ class BatchSpatialDataTest extends TestCase
         return $property;
     }
 
+    private function hasRTree(SqliteStorage $storage): bool
+    {
+        $method = new \ReflectionMethod($storage, 'hasRTreeSupport');
+        if (PHP_VERSION_ID < 80100) {
+            $method->setAccessible(true);
+        }
+
+        return (bool)$method->invoke($storage);
+    }
+
     private function document(string $id, ?float $latitude): array
     {
         $document = ['id' => $id, 'content' => ['title' => 'Local place', 'body' => 'Visit here']];
@@ -44,6 +54,10 @@ class BatchSpatialDataTest extends TestCase
     {
         $storage = new SqliteStorage();
         $storage->connect(['path' => ':memory:', 'external_content' => $external]);
+        if (!$fallback && !$this->hasRTree($storage)) {
+            $storage->disconnect();
+            $this->markTestSkipped('This SQLite has no R-tree module (PHP on Windows); the fallback modes cover it');
+        }
         if ($fallback) {
             $this->property($storage, 'rtreeSupport')->setValue($storage, false);
         }
