@@ -474,6 +474,40 @@ class PollutedIndexHealingTest extends StemmingTestCase
         $this->assertSame(['two'], $this->found($search, 'dogs'), 'The documents that were stored are searchable again');
     }
 
+    public function test_an_fts_table_made_again_over_documents_loses_the_mark_it_had(): void
+    {
+        // Nothing removes the mark by hand here: the table is lost and made again with the mark in place
+        $search = $this->openSearch('external');
+        $this->createIndex($search, 'external', ['stemming' => false]);
+        $search->indexBatch(self::INDEX, [$this->doc('one', 'cats purring'), $this->doc('two', 'dogs barking')]);
+        $pdo = $this->raw($search);
+        $this->assertSame('2.6.1', $this->builtBy($pdo));
+        $pdo->exec('DROP TABLE ' . self::INDEX . '_fts');
+        $this->storage($search)->createIndex(self::INDEX, ['external_content' => true, 'stemming' => false]);
+        $this->assertSame(0, $this->ftsMatches($pdo, 'dogs'), 'The table made again is empty');
+        $this->assertNull($this->builtBy($pdo), 'An empty table over stored documents is not a built one');
+
+        $search->index(self::INDEX, $this->doc('three', 'birds singing'));
+
+        $this->assertSame('2.6.1', $this->builtBy($pdo));
+        $this->assertSame(['two'], $this->found($search, 'dogs'), 'The documents that were stored are searchable again');
+        $this->assertSame(['three'], $this->found($search, 'birds'));
+        $this->assertIntegrity($search);
+    }
+
+    public function test_an_fts_table_made_again_over_no_documents_is_marked(): void
+    {
+        $search = $this->openSearch('external');
+        $this->createIndex($search, 'external', ['stemming' => false]);
+        $pdo = $this->raw($search);
+        $pdo->exec('DROP TABLE ' . self::INDEX . '_fts');
+        $pdo->exec('DELETE FROM ' . self::INDEX . "_meta WHERE key = 'fts_built_by'");
+
+        $this->storage($search)->createIndex(self::INDEX, ['external_content' => true, 'stemming' => false]);
+
+        $this->assertSame('2.6.1', $this->builtBy($pdo));
+    }
+
     public function test_an_index_with_no_meta_is_not_built_again_on_a_guess(): void
     {
         $search = $this->polluted();

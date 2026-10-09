@@ -335,9 +335,14 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 $sql = "CREATE VIRTUAL TABLE IF NOT EXISTS {$name}_fts USING fts5({$ftsColsSql}, tokenize='unicode61'{$prefixSql}{$detailSql})";
                 $this->connection->exec($sql);
             }
-            // A table made now over documents that are already stored is empty, not built from them
-            if (!$ftsExisted && !$this->hasStoredDocuments($name)) {
-                $this->setIndexMeta($name, self::FTS_BUILT_BY_KEY, self::FTS_BUILT_BY);
+            // A table made now over documents that are already stored is empty, not built from them. The
+            // mark of the table that was lost goes, so the first write builds it from the documents.
+            if (!$ftsExisted) {
+                if ($this->hasStoredDocuments($name)) {
+                    $this->connection->prepare("DELETE FROM {$name}_meta WHERE key = ?")->execute([self::FTS_BUILT_BY_KEY]);
+                } else {
+                    $this->setIndexMeta($name, self::FTS_BUILT_BY_KEY, self::FTS_BUILT_BY);
+                }
             }
 
             // Only create terms table if Levenshtein fuzzy search is enabled
