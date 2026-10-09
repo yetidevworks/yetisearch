@@ -630,7 +630,7 @@ Benefits of pre-chunked documents:
 
 See [`examples/pre-chunked-indexing.php`](examples/pre-chunked-indexing.php) for a complete example.
 
-A document and its chunks are written to the index in one transaction, so they are stored together or not at all. Content or metadata that cannot be encoded as JSON (`NAN`, `INF`, a resource, nesting deeper than 511 levels) is refused with a `StorageException` before anything of the call is written, a chunk's included. Separate batches are separate transactions: with more than `batch_size` documents in one call, or with `auto_flush` off, an earlier batch stays stored if the storage itself fails during a later one.
+Writing a document again replaces its chunks: the chunks of the earlier version that the new one does not have (`{id}#chunk{N}` for a number N) are removed in the same transaction, so a document that became shorter, or that is no longer chunked, is not found by the words of its old text. Write a document and its chunks in the same call, as the indexer does, because writing a document without a chunk that is already in the index removes that chunk. A document and its chunks are written to the index in one transaction, so they are stored together or not at all. Content or metadata that cannot be encoded as JSON (`NAN`, `INF`, a resource, nesting deeper than 511 levels) is refused with a `StorageException` before anything of the call is written, a chunk's included. Separate batches are separate transactions: with more than `batch_size` documents in one call, or with `auto_flush` off, an earlier batch stays stored if the storage itself fails during a later one.
 
 ### Field Boosting and Exact Match Scoring
 
@@ -785,6 +785,8 @@ $search->rebuildFts('articles');
 Rebuild an index after you register a different stemmer for its language, as its stems are still the ones the earlier stemmer made.
 
 A rebuild makes the FTS table again with the options it has, its `prefix` indexes and its `detail`, read from the table itself, so an index created with its own `fts` options keeps them.
+
+An external-content index (the default) that YetiSearch 2.5.x ran `deleteByIdPrefix()` on holds the names of the fields (`title`, `content`, `route`, ...) as words of every document, and 2.6.0 could leave such an index failing with `database disk image is malformed` when it was searched for one of those words after a delete or an update. YetiSearch 2.6.1 records in the index's `{index}_meta` table, under `fts_built_by`, the version that built its FTS table, and the first write to an external-content index without it (`index()`, `indexBatch()`, `update()`, `delete()`, `deleteByIdPrefix()`) makes the FTS table again from the stored documents, with the index's own settings and stems, before the write goes on. You do not need to call `rebuildFts()` after a prefix delete or after upgrading. The rebuild takes about 0.3 seconds per 32,000 documents (1.6 seconds with stemming) and happens once; searches never start it, and a write whose rebuild fails throws and changes nothing. An index created by 2.6.0 has no mark either and is rebuilt once, needlessly but harmlessly.
 
 #### What stemming costs
 
