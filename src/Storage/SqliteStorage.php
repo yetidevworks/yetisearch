@@ -473,6 +473,10 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             $this->connection->beginTransaction();
 
             $id = $document['id'];
+            // Chunks of an earlier version that this one does not have go first, in this transaction
+            if (empty($document['metadata']['is_chunk'])) {
+                $this->removeStaleChunks($index, [(string)$id], [(string)$id => true]);
+            }
             $content = $this->encodeJson($document['content'], 'content', $id);
             // What is indexed is the content as stored: a later delete rebuilds the indexed
             // text from the stored JSON, so both have to come from the same bytes
@@ -659,6 +663,18 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
 
         try {
             $this->connection->beginTransaction();
+
+            // Chunks of an earlier version of a document that this batch does not write go first,
+            // in this transaction. A chunk is looked up for under its parent only.
+            $writtenIds = [];
+            $parentIds = [];
+            foreach ($documents as $document) {
+                $writtenIds[(string)$document['id']] = true;
+                if (empty($document['metadata']['is_chunk'])) {
+                    $parentIds[(string)$document['id']] = true;
+                }
+            }
+            $this->removeStaleChunks($index, array_map('strval', array_keys($parentIds)), $writtenIds);
 
             // Prepare statements once
             $schema = $this->getSchemaMode($index);
@@ -943,6 +959,103 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 throw new StorageException("Failed to insert batch: " . $e->getMessage());
             }
             throw $e;
+        }
+    }
+
+    /**
+     * Remove the stored chunks of documents that a write does not write again: the rows named
+     * `{id}#chunk{N}`, N a number, for each of the given ids. A document written again with fewer
+     * chunks, or none, would otherwise keep the chunks of its earlier version in the index, found by
+     * words it no longer has. Runs in the transaction of the write.
+     *
+     * The chunks are found by a range on the id, which the index on that column serves, and not by
+     * LIKE, which scans the table and reads `_` and `%` in an id as wildcards. Every id that starts
+     * with `{id}#chunk` is in the range from that string to `{id}#chunl`; the ones that are not
+     * `#chunk` followed by digits alone (`{id}#chunky`, another document that happens to start the
+     * same) are not chunks of the document and are left.
+     *
+     * @param string[] $parentIds Documents being written whose stored chunks are looked for
+     * @param array<string, true> $keep Ids being written, which the write replaces itself
+     */
+    private function removeStaleChunks(string $index, array $parentIds, array $keep): void
+    {
+        $lookup = null;
+        $stale = [];
+        foreach ($parentIds as $parentId) {
+            $lookup = $lookup ?? $this->connection->prepare("SELECT id FROM {$index} WHERE id >= ? AND id < ?");
+            $lookup->execute([$parentId . '#chunk', $parentId . '#chunl']);
+            $prefixLength = strlen($parentId) + strlen('#chunk');
+            foreach ($lookup->fetchAll(\PDO::FETCH_COLUMN) as $storedId) {
+                $storedId = (string)$storedId;
+                $number = substr($storedId, $prefixLength);
+                if ($number !== '' && ctype_digit($number) && !isset($keep[$storedId])) {
+                    $stale[$storedId] = true;
+                }
+            }
+        }
+        if (!empty($stale)) {
+            $this->removeDocuments($index, array_map('strval', array_keys($stale)));
+        }
+    }
+
+    /**
+     * Remove documents, and everything that belongs to them, inside an open transaction: the way
+     * delete() does it, for several ids. An optional table an index was made without
+     * (`enable_spatial` false) is not touched.
+     *
+     * @param string[] $ids
+     */
+    private function removeDocuments(string $index, array $ids): void
+    {
+        $schema = $this->getSchemaMode($index);
+        $hasSpatial = $this->hasSpatialIndex($index);
+
+        foreach (array_chunk($ids, 500) as $batch) {
+            // The text FTS5 has to be given back for each row, read before the rows go
+            $indexedFtsRows = [];
+            if ($schema === 'external') {
+                foreach ($batch as $id) {
+                    $indexedFtsRow = $this->getIndexedFtsRow($index, $id);
+                    if ($indexedFtsRow !== null) {
+                        $indexedFtsRows[] = $indexedFtsRow;
+                    }
+                }
+            }
+
+            $placeholders = implode(',', array_fill(0, count($batch), '?'));
+            $this->connection->prepare("DELETE FROM {$index} WHERE id IN ({$placeholders})")->execute($batch);
+
+            if ($schema === 'external') {
+                foreach ($indexedFtsRows as [$docId, $indexedText, $indexedStems]) {
+                    $this->deleteFtsRow($index, $docId, $indexedText, $indexedStems);
+                }
+            } else {
+                $this->connection->prepare("DELETE FROM {$index}_fts WHERE id IN ({$placeholders})")->execute($batch);
+            }
+
+            if ($this->useTermsIndex) {
+                $this->connection->prepare("DELETE FROM {$index}_terms WHERE document_id IN ({$placeholders})")
+                    ->execute($batch);
+            }
+
+            if ($schema === 'external') {
+                if ($hasSpatial) {
+                    foreach ($indexedFtsRows as [$docId]) {
+                        $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?")->execute([$docId]);
+                    }
+                }
+            } else {
+                if ($this->tableExists($index . '_id_map')) {
+                    $this->connection->prepare("DELETE FROM {$index}_id_map WHERE string_id IN ({$placeholders})")
+                        ->execute($batch);
+                }
+                if ($hasSpatial) {
+                    foreach ($batch as $id) {
+                        $this->connection->prepare("DELETE FROM {$index}_spatial WHERE id = ?")
+                            ->execute([$this->getNumericId($id)]);
+                    }
+                }
+            }
         }
     }
 
