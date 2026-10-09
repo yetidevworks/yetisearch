@@ -13,6 +13,7 @@ use YetiSearch\Models\SearchQuery;
 use YetiSearch\Geo\GeoPoint;
 use YetiSearch\Geo\GeoBounds;
 use YetiSearch\Cache\CacheManager;
+use YetiSearch\Contracts\ProvidesStemming;
 use YetiSearch\Contracts\EmbeddingProviderInterface;
 use YetiSearch\Exceptions\YetiSearchException;
 use YetiSearch\Semantic\NoiseCalibration;
@@ -550,13 +551,6 @@ class YetiSearch
         $tokens = $analyzer->removeStopWords($tokens, $language);
         $escapedTokens = Fts5Escaper::escapeTokens($tokens);
 
-        // Indexes that stem match each word as typed or by its stem, in the language of
-        // the query, else English; the others use the query as typed
-        $stemLanguage = $language ?: 'english';
-        $stemQuery = StemmerFactory::isSupported($stemLanguage)
-            ? StemQuery::termGroups($analyzer, $tokens, $stemLanguage)['query']
-            : null;
-
         // A termless but non-blank query ("...", ":") must not fall through to
         // storage's match-all branch. An explicitly blank query is left alone:
         // that is how a caller says "no text query" for geo-only or
@@ -584,12 +578,40 @@ class YetiSearch
         $queryArray['query'] = implode(' ', $escapedTokens);
         // Likewise the stem query: it is built here, never taken from the options
         unset($queryArray['stem_query']);
+
+        // Indexes that stem match each word as typed or by its stem, in the language of
+        // the query, else English; the others use the query as typed. It is only made
+        // when one of the indexes stems, so a plain index never runs a stemmer.
+        $stemQuery = null;
+        $stemLanguage = $language ?: 'english';
+        if ($escapedTokens && StemmerFactory::isSupported($stemLanguage) && $this->anyIndexStems($storage, $indices)) {
+            $stemQuery = StemQuery::termGroups($analyzer, $tokens, $stemLanguage)['query'];
+        }
         if ($stemQuery !== null) {
             $queryArray['stem_query'] = $stemQuery;
             $queryArray['stem_weight'] = (float)($options['stem_weight'] ?? $this->config['search']['stem_weight'] ?? 0.5);
         }
 
         return $storage->searchMultiple($indices, $queryArray);
+    }
+
+    /**
+     * Whether any of the indexes keeps stems. A storage that cannot say has none that do.
+     *
+     * @param string[] $indices
+     */
+    private function anyIndexStems($storage, array $indices): bool
+    {
+        if (!$storage instanceof ProvidesStemming) {
+            return false;
+        }
+        foreach ($indices as $index) {
+            if ($storage->stemmingFor($index) !== null) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public function suggest(string $name, string $term, array $options = []): array

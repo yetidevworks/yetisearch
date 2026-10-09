@@ -259,6 +259,39 @@ class StemmingSearchTest extends StemmingTestCase
     }
 
     /** @dataProvider schemaModes */
+    public function test_multi_search_does_not_stem_when_no_index_stems(string $mode): void
+    {
+        $search = $this->openSearch($mode);
+        $this->createIndex($search, $mode, ['stemming' => false], 'plain');
+        $this->createIndex($search, $mode, ['stemming' => false], 'plain2');
+        $search->index('plain', ['id' => 'p1', 'content' => ['title' => 'Devices connected', 'content' => 'The printer was connected']]);
+        $search->index('plain2', ['id' => 'p2', 'content' => ['title' => 'Devices connected', 'content' => 'The printer was connected']]);
+        CountingStemmer::$calls = 0;
+        StemmerFactory::register('english', CountingStemmer::class);
+
+        $results = $search->multiSearch(['plain', 'plain2', 'missing'], 'connected');
+
+        $this->assertSame(2, $results['total']);
+        $this->assertSame(0, CountingStemmer::$calls, 'No stemmer ran for indexes that do not stem');
+    }
+
+    /** @dataProvider schemaModes */
+    public function test_multi_search_stems_when_one_of_the_indexes_stems(string $mode): void
+    {
+        $search = $this->openSearch($mode);
+        $this->createIndex($search, $mode);
+        $this->createIndex($search, $mode, ['stemming' => false], 'plain');
+        $search->index(self::INDEX, ['id' => 's1', 'content' => ['title' => 'Devices connected', 'content' => 'The printer was connected']]);
+        $search->index('plain', ['id' => 'p1', 'content' => ['title' => 'Devices connected', 'content' => 'The printer was connected']]);
+        CountingStemmer::$calls = 0;
+        StemmerFactory::register('english', CountingStemmer::class);
+
+        $search->multiSearch(['plain', self::INDEX], 'connected');
+
+        $this->assertGreaterThan(0, CountingStemmer::$calls);
+    }
+
+    /** @dataProvider schemaModes */
     public function test_multi_search_takes_its_language_from_its_options(string $mode): void
     {
         $search = $this->openSearch($mode);
@@ -447,6 +480,24 @@ class StemmingSearchTest extends StemmingTestCase
         }
 
         return $stems;
+    }
+}
+
+/** Stems like the built-in English stemmer, and counts how often it is asked to */
+class CountingStemmer implements StemmerInterface
+{
+    public static int $calls = 0;
+
+    public function stem(string $word): string
+    {
+        self::$calls++;
+
+        return (new \YetiSearch\Stemmer\Languages\EnglishStemmer())->stem($word);
+    }
+
+    public function getLanguage(): string
+    {
+        return 'english';
     }
 }
 
