@@ -29,6 +29,19 @@ class StandardAnalyzer implements AnalyzerInterface
     private int $stemMemoSize = 0;
     private int $stemMemoGeneration = -1;
 
+    /** The most languages whose stop word lists are kept ready; a language can come from a search request */
+    private const STOP_WORD_SETS_LIMIT = 32;
+
+    /**
+     * The stop words of each language as the analyzer was asked for it, as a set for lookup,
+     * with the numeric ones apart (see removeStopWords()). Dropped when the custom stop words
+     * change or the stemmers do, as a registered language changes which list a name means.
+     *
+     * @var array<string, array{set: array<string, true>, numeric: string[]}>
+     */
+    private array $stopWordSets = [];
+    private int $stopWordSetsGeneration = -1;
+
     public function __construct(array $config = [])
     {
         $this->config = array_merge([
@@ -164,11 +177,55 @@ class StandardAnalyzer implements AnalyzerInterface
             return $tokens;
         }
 
-        $stopWords = $this->getStopWords($this->languageOrDefault($language));
+        $list = $this->stopWordSet($this->languageOrDefault($language));
+        $set = $list['set'];
+        $numeric = $list['numeric'];
 
-        return array_values(array_filter($tokens, function ($token) use ($stopWords) {
-            return !in_array(UTF8::strtolower($token), $stopWords);
+        return array_values(array_filter($tokens, function ($token) use ($set, $numeric) {
+            $word = UTF8::strtolower($token);
+            if (isset($set[$word])) {
+                return false;
+            }
+
+            // A list is compared loosely, which makes numeric strings equal by value ('1e1' is '10')
+            return !($numeric && is_numeric($word) && in_array($word, $numeric));
         }));
+    }
+
+    /**
+     * The stop words of a language ready for lookup. The words are keys of a set, so a
+     * token is found without reading the whole list.
+     *
+     * @return array{set: array<string, true>, numeric: string[]}
+     */
+    private function stopWordSet(string $language): array
+    {
+        $generation = StemmerFactory::generation();
+        if ($generation !== $this->stopWordSetsGeneration) {
+            $this->stopWordSets = [];
+            $this->stopWordSetsGeneration = $generation;
+        }
+
+        if (isset($this->stopWordSets[$language])) {
+            return $this->stopWordSets[$language];
+        }
+
+        $words = $this->getStopWords($language);
+        $numeric = [];
+        foreach ($words as $word) {
+            if (is_numeric($word)) {
+                $numeric[] = $word;
+            }
+        }
+
+        if (count($this->stopWordSets) >= self::STOP_WORD_SETS_LIMIT) {
+            $this->stopWordSets = [];
+        }
+
+        return $this->stopWordSets[$language] = [
+            'set' => array_fill_keys($words, true),
+            'numeric' => $numeric,
+        ];
     }
 
     public function normalize(string $text): string
@@ -434,6 +491,7 @@ class StandardAnalyzer implements AnalyzerInterface
 
     public function setCustomStopWords(array $stopWords): void
     {
+        $this->stopWordSets = [];
         $this->customStopWords = array_map(function ($word) {
             return UTF8::strtolower(trim($word));
         }, $stopWords);
@@ -443,6 +501,7 @@ class StandardAnalyzer implements AnalyzerInterface
     {
         $word = UTF8::strtolower(trim($word));
         if (!in_array($word, $this->customStopWords)) {
+            $this->stopWordSets = [];
             $this->customStopWords[] = $word;
         }
     }
@@ -450,6 +509,7 @@ class StandardAnalyzer implements AnalyzerInterface
     public function removeCustomStopWord(string $word): void
     {
         $word = UTF8::strtolower(trim($word));
+        $this->stopWordSets = [];
         $this->customStopWords = array_values(array_filter($this->customStopWords, function ($stopWord) use ($word) {
             return $stopWord !== $word;
         }));

@@ -667,6 +667,77 @@ class StandardAnalyzerTest extends TestCase
         $this->assertSame(1, $this->privateProperty($this->analyzer, 'stemMemoSize'));
     }
 
+    public function testStopWordChangesAfterTheListWasUsedTakeEffect(): void
+    {
+        $analyzer = new StandardAnalyzer();
+        $this->assertSame(['fox'], $analyzer->removeStopWords(['the', 'fox']));
+
+        $analyzer->addCustomStopWord('Fox');
+        $this->assertSame([], $analyzer->removeStopWords(['the', 'FOX']));
+
+        $analyzer->removeCustomStopWord('fox');
+        $this->assertSame(['fox'], $analyzer->removeStopWords(['the', 'fox']));
+
+        $analyzer->setCustomStopWords(['fox', 'dog']);
+        $this->assertSame(['cat'], $analyzer->removeStopWords(['dog', 'cat', 'fox']));
+
+        $analyzer->setCustomStopWords([]);
+        $this->assertSame(['dog', 'cat'], $analyzer->removeStopWords(['dog', 'cat', 'the']));
+
+        $analyzer->setStopWordsDisabled(true);
+        $this->assertSame(['the', 'cat'], $analyzer->removeStopWords(['the', 'cat']));
+        $analyzer->setStopWordsDisabled(false);
+        $this->assertSame(['cat'], $analyzer->removeStopWords(['the', 'cat']));
+    }
+
+    public function testStopWordsOfEachLanguageStayApart(): void
+    {
+        $analyzer = new StandardAnalyzer(['custom_stop_words' => ['extra']]);
+
+        $this->assertSame(['les'], $analyzer->removeStopWords(['les', 'the', 'extra'], 'en'));
+        $this->assertSame(['the', 'a'], $analyzer->removeStopWords(['les', 'the', 'a', 'extra'], 'fr'));
+        $this->assertSame(['les', 'the', 'a'], $analyzer->removeStopWords(['les', 'the', 'a', 'extra'], 'it'));
+        $this->assertSame(['les'], $analyzer->removeStopWords(['les', 'the'], 'english'));
+        $this->assertSame(['the'], $analyzer->removeStopWords(['les', 'the'], 'fr_FR'));
+    }
+
+    public function testStopWordsFollowALanguageRegisteredAfterTheyWereUsed(): void
+    {
+        $analyzer = new StandardAnalyzer(['stop_words' => ['it' => ['il', 'la']]]);
+        $this->assertSame(['il', 'gatto'], $analyzer->removeStopWords(['il', 'gatto'], 'italian'));
+        $this->assertSame(['gatto'], $analyzer->removeStopWords(['il', 'gatto'], 'it'));
+
+        StemmerFactory::register('italian', ItalianTestStemmer::class, ['it', 'ita']);
+
+        $this->assertSame(['gatto'], $analyzer->removeStopWords(['il', 'gatto'], 'italian'));
+        $this->assertSame(['gatto'], $analyzer->removeStopWords(['il', 'gatto'], 'ita'));
+
+        StemmerFactory::reset();
+
+        $this->assertSame(['il', 'gatto'], $analyzer->removeStopWords(['il', 'gatto'], 'italian'));
+    }
+
+    public function testNumericStopWordsMatchByValueAsTheyAlwaysDid(): void
+    {
+        $analyzer = new StandardAnalyzer(['custom_stop_words' => ['10', 'x1']]);
+
+        // '010' and '1e1' are the number 10, as a loose comparison reads them
+        $this->assertSame(['100', 'x10'], $analyzer->removeStopWords(['10', '010', '1e1', '100', 'a', 'x1', 'x10']));
+    }
+
+    public function testManyLanguagesDoNotGrowTheStopWordListsWithoutLimit(): void
+    {
+        $analyzer = new StandardAnalyzer();
+        $limit = $this->privateConstant('STOP_WORD_SETS_LIMIT');
+
+        for ($i = 0; $i < $limit * 3; $i++) {
+            $this->assertSame(['the', 'fox'], $analyzer->removeStopWords(['the', 'fox'], 'xx' . $i));
+        }
+
+        $this->assertLessThanOrEqual($limit, count($this->privateProperty($analyzer, 'stopWordSets')));
+        $this->assertSame(['fox'], $analyzer->removeStopWords(['the', 'fox'], 'english'));
+    }
+
     private function privateConstant(string $name): int
     {
         return (new \ReflectionClassConstant(StandardAnalyzer::class, $name))->getValue();
