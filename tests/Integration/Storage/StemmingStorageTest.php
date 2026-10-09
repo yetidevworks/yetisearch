@@ -63,6 +63,18 @@ class StemmingStorageTest extends StemmingTestCase
         $this->assertSame('english', $this->storage($search)->stemmingFor(self::INDEX));
     }
 
+    /** @dataProvider schemaModes */
+    public function test_the_indexer_config_creates_a_stemming_index(string $mode): void
+    {
+        $search = $this->openSearch($mode, ['indexer' => ['stemming' => true, 'language' => 'fr']]);
+        $this->createdIndexes[] = self::INDEX;
+        // Created by the first document, as an index is when nothing created it before
+        $search->index(self::INDEX, $this->doc('a', 'des chansons populaires'));
+
+        $this->assertSame('french', $this->storage($search)->stemmingFor(self::INDEX));
+        $this->assertSame(['a'], $this->found($search, 'chanson'));
+    }
+
     public function test_a_field_named_stems_is_refused_on_a_stemming_index(): void
     {
         $search = $this->openSearch('multi');
