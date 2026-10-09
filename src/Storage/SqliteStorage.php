@@ -49,6 +49,13 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     }
 
     /**
+     * The depth content and metadata are encoded to. Decoding counts the innermost value as a
+     * level too, so a structure encoded to the default depth of 512 can fail to decode at it.
+     * One less is what always reads back with json_decode()'s default depth.
+     */
+    private const JSON_DEPTH = 511;
+
+    /**
      * Allowed operators for filter clauses.
      */
     private const ALLOWED_FILTER_OPERATORS = [
@@ -451,7 +458,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             $content = $this->encodeJson($document['content'], 'content', $id);
             // What is indexed is the content as stored: a later delete rebuilds the indexed
             // text from the stored JSON, so both have to come from the same bytes
-            $document['content'] = json_decode($content, true);
+            $document['content'] = $this->decodeContent($content, $id);
             // Persist metadata and, when R-tree or math functions are unavailable, embed geo for JSON fallback
             $metadataArr = $document['metadata'] ?? [];
             if (!$this->hasRTreeSupport() || !$this->hasMathFunctions) {
@@ -734,7 +741,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 $id = $document['id'];
                 $content = $this->encodeJson($document['content'], 'content', $id);
                 // What is indexed is the content as stored (see insert())
-                $document['content'] = json_decode($content, true);
+                $document['content'] = $this->decodeContent($content, $id);
                 // Persist metadata and, when R-tree or math functions are unavailable, embed geo for JSON fallback
                 $metadataArr = $document['metadata'] ?? [];
                 if (!$this->hasRTreeSupport() || !$this->hasMathFunctions) {
@@ -2751,12 +2758,28 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
      */
     private function encodeJson($value, string $what, string $id): string
     {
-        $json = json_encode($value, JSON_INVALID_UTF8_SUBSTITUTE);
+        $json = json_encode($value, JSON_INVALID_UTF8_SUBSTITUTE, self::JSON_DEPTH);
         if ($json === false) {
             throw new StorageException("Failed to encode the {$what} of document '{$id}': " . json_last_error_msg());
         }
 
         return $json;
+    }
+
+    /**
+     * The content of a document as it reads back from the JSON that is stored.
+     *
+     * @throws StorageException If it does not decode, which would index nothing for a document
+     *                          that is stored
+     */
+    private function decodeContent(string $json, string $id)
+    {
+        $content = json_decode($json, true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            throw new StorageException("Failed to read back the content of document '{$id}': " . json_last_error_msg());
+        }
+
+        return $content;
     }
 
     private function getSchemaMode(string $index): string

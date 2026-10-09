@@ -171,4 +171,51 @@ class StoredContentTest extends StemmingTestCase
         $this->assertSame(['keep'], $this->found($search, 'walrus'));
         $this->assertIntegrity($search);
     }
+
+    private function nested(int $depth)
+    {
+        $value = 'running';
+        for ($i = 0; $i < $depth; $i++) {
+            $value = [$value];
+        }
+
+        return $value;
+    }
+
+    /** @dataProvider plainAndStemming */
+    public function test_content_nested_to_the_depth_limit_is_stored_and_read_back_or_refused(string $mode, bool $stemming): void
+    {
+        $search = $this->openSearch($mode);
+        $this->createIndex($search, $mode, ['stemming' => $stemming]);
+        $storage = $this->storage($search);
+
+        // Nesting that encodes is read back by json_decode() at its default depth, which counts
+        // the innermost value too; anything deeper is refused with a StorageException, never a TypeError
+        $accepted = 0;
+        $refused = 0;
+        for ($depth = 505; $depth <= 515; $depth++) {
+            $id = "deep{$depth}";
+            try {
+                $storage->insert(self::INDEX, ['id' => $id, 'content' => ['title' => 'Deep', 'deep' => $this->nested($depth)]]);
+            } catch (StorageException $e) {
+                $refused++;
+                $this->assertNull($storage->getDocument(self::INDEX, $id));
+                continue;
+            }
+            $accepted++;
+            $stored = $storage->getDocument(self::INDEX, $id);
+            $this->assertIsArray($stored['content'], "Content nested {$depth} deep reads back");
+        }
+        $this->assertGreaterThan(0, $accepted);
+        $this->assertGreaterThan(0, $refused);
+
+        try {
+            $storage->insertBatch(self::INDEX, [['id' => 'deepbatch', 'content' => ['title' => 'Deep', 'deep' => $this->nested(600)]]]);
+            $this->fail('Content nested too deep was accepted');
+        } catch (StorageException $e) {
+            $this->assertStringContainsString("'deepbatch'", $e->getMessage());
+        }
+        $this->assertFalse($this->pdo($search)->inTransaction());
+        $this->assertIntegrity($search);
+    }
 }

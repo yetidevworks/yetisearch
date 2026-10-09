@@ -7,6 +7,7 @@ use YetiSearch\Contracts\StorageInterface;
 use YetiSearch\Contracts\AnalyzerInterface;
 use YetiSearch\Exceptions\IndexException;
 use YetiSearch\Exceptions\InvalidArgumentException;
+use YetiSearch\Exceptions\StorageException;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
@@ -17,6 +18,7 @@ class Indexer implements IndexerInterface
     private LoggerInterface $logger;
     private string $indexName;
     private array $config;
+    /** @var array[] Documents waiting for a flush, each one with its chunks as a group of storage documents */
     private array $batchQueue = [];
     private int $batchSize = 100;
 
@@ -144,6 +146,9 @@ class Indexer implements IndexerInterface
 
         $this->logger->debug('Inserting document(s)', ['count' => count($documents)]);
 
+        // Each processed document is a group: its chunks and then the document itself. A group
+        // is written in one storage call, so a document and its chunks are stored together or
+        // not at all, and nothing is written until every document has been processed.
         $processed = [];
         $errors = [];
 
@@ -157,6 +162,13 @@ class Indexer implements IndexerInterface
 
             try {
                 $processed[] = $this->processDocument($document);
+            } catch (StorageException $e) {
+                // A document that cannot be stored stops the whole call before anything is written
+                $this->logger->error('Document cannot be stored', [
+                    'id' => $id,
+                    'error' => $e->getMessage()
+                ]);
+                throw $e;
             } catch (\Exception $e) {
                 $errors[] = [
                     'id' => $id,
@@ -171,9 +183,9 @@ class Indexer implements IndexerInterface
 
         if (!empty($processed)) {
             if ($this->config['auto_flush']) {
-                // Immediate insert using batch for efficiency
-                foreach (array_chunk($processed, $this->batchSize) as $chunk) {
-                    $this->storage->insertBatch($this->indexName, $chunk);
+                // Immediate insert using batch for efficiency, a document and its chunks always in the same batch
+                foreach (array_chunk($processed, $this->batchSize) as $groups) {
+                    $this->storage->insertBatch($this->indexName, array_merge(...$groups));
                 }
             } else {
                 // Add to queue for later flush
@@ -214,8 +226,13 @@ class Indexer implements IndexerInterface
         $this->logger->debug('Updating document', ['id' => $id]);
 
         try {
-            $processedDocument = $this->processDocument($document);
-            $this->storage->update($this->indexName, $id, $processedDocument);
+            $group = $this->processDocument($document);
+            if (count($group) === 1) {
+                $this->storage->update($this->indexName, $id, $group[0]);
+            } else {
+                // The chunks and the document go in one call, so they are stored together or not at all
+                $this->storage->insertBatch($this->indexName, $group);
+            }
 
             $this->logger->info('Document updated successfully', ['id' => $id]);
         } catch (\Exception $e) {
@@ -309,11 +326,19 @@ class Indexer implements IndexerInterface
         }
 
         // Use batch insert for better performance
-        $this->storage->insertBatch($this->indexName, $this->batchQueue);
+        $this->storage->insertBatch($this->indexName, array_merge(...$this->batchQueue));
 
         $this->batchQueue = [];
     }
 
+    /**
+     * Turn a document into the storage documents that are written for it: its chunks, if it has
+     * any, and then the document itself. Nothing is written here. The document, its metadata and
+     * every chunk are checked first, so one that cannot be stored is refused before any of them is.
+     *
+     * @return array[] The chunks, then the document
+     * @throws StorageException If the content or metadata of the document or of a chunk cannot be encoded
+     */
     private function processDocument(array $document): array
     {
         $content = $document['content'] ?? [];
@@ -395,9 +420,6 @@ class Indexer implements IndexerInterface
 
                 $chunkDocs[] = $chunkDoc;
             }
-
-            // Insert all chunks in batch
-            $this->storage->insertBatch($this->indexName, $chunkDocs);
         } elseif ($this->shouldChunkContent($processedContent)) {
             // Use automatic chunking if no pre-chunks provided
             $chunks = $this->chunkContent($processedContent);
@@ -431,9 +453,8 @@ class Indexer implements IndexerInterface
 
                 $chunkDocs[] = $chunkDoc;
             }
-
-            // Insert all chunks in batch
-            $this->storage->insertBatch($this->indexName, $chunkDocs);
+        } else {
+            $chunkDocs = [];
         }
 
         $data = [
@@ -454,7 +475,31 @@ class Indexer implements IndexerInterface
             $data['geo_bounds'] = $document['geo_bounds'];
         }
 
-        return $data;
+        $group = $chunkDocs;
+        $group[] = $data;
+        foreach ($group as $storageDocument) {
+            $this->assertStorable($storageDocument);
+        }
+
+        return $group;
+    }
+
+    /**
+     * Check that the content and the metadata of a document encode as the storage encodes them
+     * (invalid UTF-8 is replaced, so it is not a reason to refuse), at the depth the storage
+     * allows, which is one less than json_decode()'s default so that it can be read back.
+     *
+     * @throws StorageException If either cannot be encoded: NAN, INF, a resource, nesting too deep
+     */
+    private function assertStorable(array $document): void
+    {
+        foreach (['content', 'metadata'] as $what) {
+            if (json_encode($document[$what] ?? [], JSON_INVALID_UTF8_SUBSTITUTE, 511) === false) {
+                throw new StorageException(
+                    "Failed to encode the {$what} of document '{$document['id']}': " . json_last_error_msg()
+                );
+            }
+        }
     }
 
     private function shouldChunkContent(array $content): bool
