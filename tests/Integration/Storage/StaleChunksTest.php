@@ -163,6 +163,94 @@ class StaleChunksTest extends StemmingTestCase
     }
 
     /** @dataProvider modes */
+    public function test_a_document_repeated_in_a_batch_keeps_the_chunks_of_its_last_version_only(string $mode, bool $stemming): void
+    {
+        $search = $this->open($mode, $stemming);
+        $chunked = $this->doc('page', 'first version', ['chunks' => [['content' => 'old giraffe'], ['content' => 'old zebra']]]);
+
+        // A short version after a chunked one
+        $search->indexBatch(self::INDEX, [$chunked, $this->doc('page', 'short replacement'), $this->doc('other', 'plain')]);
+
+        $this->assertSame(['other', 'page'], $this->storedIds($search), 'The chunks of the version that lost are not kept');
+        $this->assertSame([], $this->found($search, 'giraffe'));
+        $this->assertSame([], $this->found($search, 'zebra'));
+        $this->assertSame(['page'], $this->found($search, 'replacement'));
+        $this->assertNotContains('zebra', $this->vocabulary($search));
+
+        // A chunked version after a chunked one with more chunks: the chunks of the last are the ones left
+        $search->indexBatch(self::INDEX, [
+            $this->doc('page', 'second', ['chunks' => [['content' => 'one'], ['content' => 'two'], ['content' => 'three']]]),
+            $this->doc('page', 'third', ['chunks' => [['content' => 'lemur']]]),
+        ]);
+        $this->assertSame(['other', 'page', 'page#chunk0'], $this->storedIds($search));
+        $this->assertSame(['page#chunk0'], $this->found($search, 'lemur'));
+        $this->assertSame([], $this->found($search, 'three'));
+
+        // A chunked version after a short one
+        $search->indexBatch(self::INDEX, [$this->doc('page', 'short again'), $this->doc('page', 'long', ['chunks' => [['content' => 'okapi'], ['content' => 'walrus']]])]);
+        $this->assertSame(['other', 'page', 'page#chunk0', 'page#chunk1'], $this->storedIds($search));
+        $this->assertSame([], $this->found($search, 'lemur'));
+        $this->assertSame(['page#chunk1'], $this->found($search, 'walrus'));
+        $this->assertIntegrity($search);
+    }
+
+    /** @dataProvider modes */
+    public function test_chunks_of_a_document_repeated_in_a_batch_do_not_cost_those_of_another(string $mode, bool $stemming): void
+    {
+        $search = $this->open($mode, $stemming);
+
+        $search->indexBatch(self::INDEX, [
+            $this->doc('a', 'first', ['chunks' => [['content' => 'giraffe'], ['content' => 'zebra']]]),
+            $this->doc('b', 'plain', ['chunks' => [['content' => 'okapi']]]),
+            $this->doc('a', 'last'),
+            $this->doc('b', 'plain again', ['chunks' => [['content' => 'walrus']]]),
+        ]);
+
+        $this->assertSame(['a', 'b', 'b#chunk0'], $this->storedIds($search));
+        $this->assertSame(['b#chunk0'], $this->found($search, 'walrus'));
+        $this->assertSame([], $this->found($search, 'okapi'));
+        $this->assertSame([], $this->found($search, 'zebra'));
+    }
+
+    /** @dataProvider modes */
+    public function test_a_document_repeated_in_a_queued_batch_keeps_the_chunks_of_its_last_version_only(string $mode, bool $stemming): void
+    {
+        $search = $this->open($mode, $stemming, ['indexer' => ['auto_flush' => false, 'batch_size' => 100]]);
+
+        $search->indexBatch(self::INDEX, [$this->doc('page', 'first version', ['chunks' => [['content' => 'old giraffe'], ['content' => 'old zebra']]])]);
+        $search->indexBatch(self::INDEX, [$this->doc('page', 'short replacement')]);
+        $search->getIndexer(self::INDEX)->flush();
+
+        $this->assertSame(['page'], $this->storedIds($search));
+        $this->assertSame([], $this->found($search, 'zebra'));
+    }
+
+    /** @dataProvider modes */
+    public function test_the_storage_resolves_a_document_repeated_in_a_batch_to_its_last_group(string $mode, bool $stemming): void
+    {
+        $search = $this->open($mode, $stemming);
+        $storage = $this->storage($search);
+        $chunk = function (string $id, string $word) {
+            return $this->doc($id, $word, ['metadata' => ['is_chunk' => true]]);
+        };
+
+        // The chunks of a document come before it
+        $storage->insertBatch(self::INDEX, [
+            $chunk('page#chunk0', 'giraffe'),
+            $chunk('page#chunk1', 'zebra'),
+            $this->doc('page', 'parent'),
+            $chunk('page#chunk0', 'walrus'),
+            $this->doc('page', 'parent again'),
+            $this->doc('other', 'plain'),
+        ]);
+
+        $this->assertSame(['other', 'page', 'page#chunk0'], $this->storedIds($search));
+        $this->assertSame(['page#chunk0'], $this->found($search, 'walrus'));
+        $this->assertSame([], $this->found($search, 'zebra'));
+        $this->assertIntegrity($search);
+    }
+
+    /** @dataProvider modes */
     public function test_update_drops_stale_chunks_of_a_document_that_no_longer_chunks(string $mode, bool $stemming): void
     {
         $search = $this->open($mode, $stemming);

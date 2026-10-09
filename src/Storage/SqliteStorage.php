@@ -663,6 +663,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         if (empty($documents)) {
             return;
         }
+        $documents = $this->lastGroupOfEachDocument($documents);
         $this->ensureFtsBuilt($index);
 
         $ownTransaction = null;
@@ -963,6 +964,47 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             }
             throw $e;
         }
+    }
+
+    /**
+     * Leave out of a batch every version of a document but its last. A batch that names a document twice
+     * writes the later version, and the chunks of the earlier one, which the later one may not have,
+     * would be taken for chunks the batch writes and kept. The batch is read as the groups the indexer
+     * makes of it: the chunks of a document, then the document. A chunk of an id is `{id}#chunk{N}`, N a
+     * number, and is marked in its metadata as one. A chunk that no document follows to claim it is a
+     * document of its own.
+     *
+     * @param array[] $documents
+     * @return array[]
+     */
+    private function lastGroupOfEachDocument(array $documents): array
+    {
+        $pendingChunks = [];
+        $lastGroup = [];
+        $earlier = [];
+        foreach ($documents as $position => $document) {
+            if (!empty($document['metadata']['is_chunk'])) {
+                $pendingChunks[$position] = (string)$document['id'];
+                continue;
+            }
+            $id = (string)$document['id'];
+            $prefix = $id . '#chunk';
+            $group = [$position];
+            foreach ($pendingChunks as $chunkPosition => $chunkId) {
+                if (strncmp($chunkId, $prefix, strlen($prefix)) === 0 && ctype_digit(substr($chunkId, strlen($prefix)))) {
+                    $group[] = $chunkPosition;
+                    unset($pendingChunks[$chunkPosition]);
+                }
+            }
+            if (isset($lastGroup[$id])) {
+                foreach ($lastGroup[$id] as $droppedPosition) {
+                    $earlier[$droppedPosition] = true;
+                }
+            }
+            $lastGroup[$id] = $group;
+        }
+
+        return empty($earlier) ? $documents : array_values(array_diff_key($documents, $earlier));
     }
 
     /**
