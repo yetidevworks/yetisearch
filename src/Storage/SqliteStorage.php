@@ -339,7 +339,8 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             // mark of the table that was lost goes, so the first write builds it from the documents.
             if (!$ftsExisted) {
                 if ($this->hasStoredDocuments($name)) {
-                    $this->connection->prepare("DELETE FROM {$name}_meta WHERE key = ?")->execute([self::FTS_BUILT_BY_KEY]);
+                    $unmark = $this->connection->prepare("DELETE FROM {$name}_meta WHERE key = ?");
+                    $unmark->execute([self::FTS_BUILT_BY_KEY]);
                 } else {
                     $this->setIndexMeta($name, self::FTS_BUILT_BY_KEY, self::FTS_BUILT_BY);
                 }
@@ -991,7 +992,8 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             $prefix = $id . '#chunk';
             $group = [$position];
             foreach ($pendingChunks as $chunkPosition => $chunkId) {
-                if (strncmp($chunkId, $prefix, strlen($prefix)) === 0 && ctype_digit(substr($chunkId, strlen($prefix)))) {
+                $number = substr($chunkId, strlen($prefix));
+                if (strncmp($chunkId, $prefix, strlen($prefix)) === 0 && ctype_digit($number)) {
                     $group[] = $chunkPosition;
                     unset($pendingChunks[$chunkPosition]);
                 }
@@ -4010,9 +4012,9 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             $schema = $this->getSchemaMode($index);
             // Without a location filter the join only gives each result its centroid, so an index whose
             // spatial tables were dropped by hand is still searched, as it is where SQLite has the math functions
-            if (!isset($geoFilters['near']) && !isset($geoFilters['within']) && !isset($geoFilters['distance_sort'])
-                && !$this->spatialTablesExist($index, $schema)
-            ) {
+            $locationFilter = isset($geoFilters['near']) || isset($geoFilters['within']);
+            $locationFilter = $locationFilter || isset($geoFilters['distance_sort']);
+            if (!$locationFilter && !$this->spatialTablesExist($index, $schema)) {
                 return [ 'join' => '', 'where' => '', 'params' => [], 'select' => '' ];
             }
             if ($schema === 'external') {
