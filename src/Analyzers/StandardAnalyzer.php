@@ -72,9 +72,14 @@ class StandardAnalyzer implements AnalyzerInterface
         $tokens = $this->tokenize($text);
         $tokens = $this->removeStopWords($tokens, $language);
 
+        // The language is the same for every token, so its stemmer is looked up once
+        $stemLanguage = $this->languageOrDefault($language);
+        $canonical = StemmerFactory::canonical($stemLanguage);
+        $this->syncStemMemo();
+
         $analyzed = [];
         foreach ($tokens as $token) {
-            $stemmed = $this->stem($token, $language);
+            $stemmed = $canonical === null ? $token : $this->stemRemembered($canonical, $stemLanguage, $token);
             if ($this->isValidToken($stemmed)) {
                 $analyzed[] = $stemmed;
             }

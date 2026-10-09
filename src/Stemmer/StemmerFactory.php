@@ -60,6 +60,16 @@ class StemmerFactory
     /** @var array<string, StemmerInterface> Stemmers made so far, by canonical name */
     private static array $stemmers = [];
 
+    /**
+     * What canonical() found for the names it was asked about, null included.
+     * Bounded, as a name can come from a search request.
+     *
+     * @var array<string, ?string>
+     */
+    private static array $canonicalCache = [];
+
+    private const CANONICAL_CACHE_LIMIT = 256;
+
     /** @var int Moves on whenever a registration or a stemmer instance changes */
     private static int $generation = 0;
 
@@ -145,17 +155,24 @@ class StemmerFactory
      */
     public static function canonical(string $language): ?string
     {
-        $language = self::normalize($language);
-        if (isset(self::$languageMap[$language])) {
-            return self::$languageMap[$language];
+        if (array_key_exists($language, self::$canonicalCache)) {
+            return self::$canonicalCache[$language];
         }
 
-        $base = preg_split('/[_\-.@]/', $language, 2)[0];
-        if ($base !== $language && isset(self::$languageMap[$base])) {
-            return self::$languageMap[$base];
+        $name = self::normalize($language);
+        $canonical = self::$languageMap[$name] ?? null;
+        if ($canonical === null) {
+            $base = preg_split('/[_\-.@]/', $name, 2)[0];
+            if ($base !== $name && isset(self::$languageMap[$base])) {
+                $canonical = self::$languageMap[$base];
+            }
         }
 
-        return null;
+        if (count(self::$canonicalCache) >= self::CANONICAL_CACHE_LIMIT) {
+            self::$canonicalCache = [];
+        }
+
+        return self::$canonicalCache[$language] = $canonical;
     }
 
     /**
@@ -239,6 +256,7 @@ class StemmerFactory
 
     private static function changed(): void
     {
+        self::$canonicalCache = [];
         self::$generation++;
     }
 

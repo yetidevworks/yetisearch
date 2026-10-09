@@ -259,6 +259,36 @@ class StemmerFactoryTest extends TestCase
             $this->assertSame($generation, StemmerFactory::generation());
         }
     }
+
+    public function test_the_names_canonical_has_resolved_follow_registrations(): void
+    {
+        $this->assertSame('french', StemmerFactory::canonical('fr_CA'));
+        $this->assertSame('french', StemmerFactory::canonical('fr_CA'));
+        $this->assertNull(StemmerFactory::canonical('ew'));
+        $this->assertNull(StemmerFactory::canonical('ew'));
+
+        StemmerFactory::register('ewokese', EwokStemmer::class, ['ew', 'fr']);
+        $this->assertSame('ewokese', StemmerFactory::canonical('ew'));
+        $this->assertSame('ewokese', StemmerFactory::canonical('fr_CA'));
+
+        StemmerFactory::reset();
+        $this->assertNull(StemmerFactory::canonical('ew'));
+        $this->assertSame('french', StemmerFactory::canonical('fr_CA'));
+    }
+
+    public function test_many_different_names_do_not_grow_the_resolved_names_without_limit(): void
+    {
+        for ($i = 0; $i < 1000; $i++) {
+            $this->assertNull(StemmerFactory::canonical('nolang' . $i));
+        }
+
+        $cache = new \ReflectionProperty(StemmerFactory::class, 'canonicalCache');
+        if (PHP_VERSION_ID < 80100) {
+            $cache->setAccessible(true);
+        }
+        $this->assertLessThanOrEqual(256, count($cache->getValue()));
+        $this->assertSame('english', StemmerFactory::canonical('EN '));
+    }
 }
 
 class EwokStemmer implements StemmerInterface
