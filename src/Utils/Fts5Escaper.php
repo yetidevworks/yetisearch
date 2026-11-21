@@ -33,6 +33,9 @@ class Fts5Escaper
      */
     public static function escapeToken(string $token, bool $inPhrase = false): string
     {
+        // A NUL byte ends the string for SQLite, leaving a quote unterminated
+        $token = str_replace("\0", '', $token);
+
         if ($inPhrase) {
             // The caller wraps the whole phrase in double quotes, so the quote
             // character is the only one that can break out of it. FTS5 escapes
@@ -94,6 +97,7 @@ class Fts5Escaper
             return false;
         }
 
-        return (bool)preg_match('/^[\p{L}\p{N}]+$/u', $token);
+        // \z, as $ also matches before a final newline
+        return (bool)preg_match('/^[\p{L}\p{N}]+\z/u', $token);
     }
 }

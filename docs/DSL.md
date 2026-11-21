@@ -35,13 +35,15 @@ golang tutorial author = "Johan" AND -status IN [draft,deleted] AND (category = 
 ### Keywords
 
 - **FIELDS**: Specify which fields to return
-- **SORT**: Sort results (use `-` prefix for descending)
-- **PAGE**: Pagination (page number, items per page)
+- **SORT**: Sort results (use `-` prefix or a `:desc` suffix for descending: `SORT -date, title:asc`)
+- **PAGE**: Pagination (page number, items per page; 10 per page when the size is left out)
 - **LIMIT**: Maximum results
 - **OFFSET**: Skip results
-- **FUZZY**: Enable fuzzy matching
-- **NEAR**: Geo proximity search
-- **WITHIN**: Geo bounds search
+- **FUZZY**: Enable fuzzy matching (after the search text: `golang tutrial FUZZY`)
+
+Operators and keywords are whole words in any case. A keyword only counts when its arguments follow it, and `IN`/`LIKE` only when a value of their kind does (`IN [a, b]`, `LIKE "%a%"`), so a search for `landing page`, `sorting algorithms` or `made in china` stays search text. Numbers written plainly (`10`, `-2.5`) are numbers; `02134`, `2024-01-15` and `1e3` stay strings.
+
+Geo search has no DSL syntax: use the URL parameters or the fluent interface below.
 
 ## URL Query Parameters (JSON API Compliant)
 
@@ -252,10 +254,10 @@ YetiSearch comes with a predefined list of common metadata fields that are autom
 ```php
 // Default metadata fields (automatically prefixed with 'metadata.')
 $defaultFields = [
-    'author', 'status', 'category', 'tags', 'date', 'published', 'draft', 'type',
+    'author', 'status', 'category', 'tags', 'date', 'published', 'draft',
     'created_at', 'updated_at', 'views', 'likes', 'rating', 'score', 'priority',
     'user', 'owner', 'assignee', 'reviewer', 'editor', 'price', 'cost', 'quantity',
-    'stock', 'sku', 'id', 'uuid', 'slug', 'url', 'email', 'phone', 'address',
+    'stock', 'sku', 'uuid', 'slug', 'url', 'email', 'phone', 'address',
     'city', 'state', 'country', 'zip', 'lat', 'lng', 'latitude', 'longitude'
 ];
 ```

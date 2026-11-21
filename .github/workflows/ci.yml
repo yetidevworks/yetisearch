@@ -14,7 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        php-version: ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4']
+        php-version: ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5', '8.6']
         exclude:
           # Skip some combinations to save CI time
           - os: windows-latest
@@ -36,7 +36,8 @@ jobs:
       with:
         php-version: ${{ matrix.php-version }}
         extensions: mbstring, intl, pdo_sqlite, sqlite3, fileinfo
-        coverage: xdebug
+        # Only the 8.3 job measures coverage, and Xdebug can lag a new PHP release
+        coverage: ${{ matrix.php-version == '8.3' && 'xdebug' || 'none' }}
         tools: composer:v2
     
     - name: Validate composer.json and composer.lock

@@ -5,8 +5,6 @@ declare(strict_types=1);
 require_once __DIR__ . '/../vendor/autoload.php';
 
 use YetiSearch\YetiSearch;
-use YetiSearch\Geo\GeoPoint;
-use YetiSearch\Models\SearchQuery;
 use YetiSearch\DSL\QueryBuilder;
 
 function out($s = "") { fwrite(STDOUT, $s . PHP_EOL); }
@@ -16,14 +14,17 @@ $argv0 = array_shift($argv);
 $cmd = $argv[0] ?? 'help';
 if ($cmd !== 'help') array_shift($argv);
 
+// Every option takes a value, as --name=value
 function parseOpts(array $args): array {
   $opts = [];
   foreach ($args as $a) {
     if (substr($a,0,2) === '--') {
       $eq = strpos($a, '=');
-      if ($eq !== false) { $k = substr($a,2,$eq-2); $v = substr($a,$eq+1); }
-      else { $k = substr($a,2); $v = true; }
-      $opts[$k] = $v;
+      if ($eq === false) {
+        if ($a === '--help') { usage(); exit(0); }
+        err("Option $a needs a value: $a=VALUE"); exit(1);
+      }
+      $opts[substr($a,2,$eq-2)] = substr($a,$eq+1);
     } else {
       $opts['_'][] = $a;
     }
@@ -92,7 +93,7 @@ switch ($cmd) {
     $index = $opts['index'] ?? null; if (!$index) { err('Missing --index'); exit(1); }
     $ys2 = new YetiSearch($config);
     $ref = new ReflectionClass($ys2);
-    $m = $ref->getMethod('getStorage'); $m->setAccessible(true);
+    $m = $ref->getMethod('getStorage'); if (PHP_VERSION_ID < 80100) { $m->setAccessible(true); }
     $storage = $m->invoke($ys2);
     $storage->migrateToExternalContent($index);
     out("Index '$index' migrated to external-content.");
@@ -101,7 +102,7 @@ switch ($cmd) {
   case 'index:rebuild': {
     $index = $opts['index'] ?? null; if (!$index) { err('Missing --index'); exit(1); }
     $ys2 = new YetiSearch($config);
-    $ref = new ReflectionClass($ys2); $m = $ref->getMethod('getStorage'); $m->setAccessible(true);
+    $ref = new ReflectionClass($ys2); $m = $ref->getMethod('getStorage'); if (PHP_VERSION_ID < 80100) { $m->setAccessible(true); }
     $storage = $m->invoke($ys2);
     $storage->rebuildFts($index);
     out("Rebuilt FTS for '$index'.");
@@ -110,11 +111,11 @@ switch ($cmd) {
   case 'index:verify': {
     $index = $opts['index'] ?? null; if (!$index) { err('Missing --index'); exit(1); }
     $ys2 = new YetiSearch($config);
-    $ref = new ReflectionClass($ys2); $m = $ref->getMethod('getStorage'); $m->setAccessible(true);
+    $ref = new ReflectionClass($ys2); $m = $ref->getMethod('getStorage'); if (PHP_VERSION_ID < 80100) { $m->setAccessible(true); }
     $storage = $m->invoke($ys2);
     // Use PDO directly
     $sref = new ReflectionClass($storage);
-    $p = $sref->getProperty('connection'); $p->setAccessible(true);
+    $p = $sref->getProperty('connection'); if (PHP_VERSION_ID < 80100) { $p->setAccessible(true); }
     /** @var PDO $pdo */
     $pdo = $p->getValue($storage);
     $schemaMode = (new ReflectionMethod($storage, 'getSchemaMode'))->invoke($storage, $index);
@@ -133,16 +134,19 @@ switch ($cmd) {
     $geo = [];
     if (isset($opts['lat'],$opts['lng'])) {
       if (isset($opts['radius'])) {
-        $geo['near'] = [ 'point' => ['lat'=>(float)$opts['lat'],'lng'=>(float)$opts['lng']], 'radius' => (float)$opts['radius'], 'units' => ($opts['units'] ?? 'm') ];
+        $geo['near'] = [ 'point' => ['lat'=>(float)$opts['lat'],'lng'=>(float)$opts['lng']], 'radius' => (float)$opts['radius'] ];
+        // The storage is called directly here, so --geo-units is passed on too
+        $units = $opts['units'] ?? $geoUnits;
+        if ($units !== null) { $geo['near']['units'] = $units; }
       }
       $geo['distance_sort'] = [ 'from' => ['lat'=>(float)$opts['lat'],'lng'=>(float)$opts['lng']], 'direction' => ($opts['direction'] ?? 'asc') ];
     }
     $ys2 = new YetiSearch($config);
-    $ref = new ReflectionClass($ys2); $m = $ref->getMethod('getStorage'); $m->setAccessible(true);
+    $ref = new ReflectionClass($ys2); $m = $ref->getMethod('getStorage'); if (PHP_VERSION_ID < 80100) { $m->setAccessible(true); }
     $storage = $m->invoke($ys2);
     $debug = $storage->search($index, [ 'query' => $queryStr, 'limit' => 10, 'geoFilters' => $geo, '_debug_sql' => true ]);
     // Try EXPLAIN QUERY PLAN
-    $sref = new ReflectionClass($storage); $p = $sref->getProperty('connection'); $p->setAccessible(true);
+    $sref = new ReflectionClass($storage); $p = $sref->getProperty('connection'); if (PHP_VERSION_ID < 80100) { $p->setAccessible(true); }
     /** @var PDO $pdo */ $pdo = $p->getValue($storage);
     $plan = [];
     try {
@@ -162,7 +166,9 @@ switch ($cmd) {
     $fuzzyLast = (int)($opts['fuzzy-last'] ?? 0) === 1;
     $geo = [];
     if (isset($opts['lat'],$opts['lng'],$opts['radius'])) {
-      $geo['near'] = [ 'point' => ['lat'=>(float)$opts['lat'],'lng'=>(float)$opts['lng']], 'radius' => (float)$opts['radius'], 'units' => ($opts['units'] ?? 'm') ];
+      $geo['near'] = [ 'point' => ['lat'=>(float)$opts['lat'],'lng'=>(float)$opts['lng']], 'radius' => (float)$opts['radius'] ];
+      // Without --units the radius is in search.geo_units (--geo-units), else meters
+      if (isset($opts['units'])) { $geo['near']['units'] = $opts['units']; }
       $geo['distance_sort'] = [ 'from' => ['lat'=>(float)$opts['lat'],'lng'=>(float)$opts['lng']], 'direction' => 'asc' ];
     }
     $res = $ys->search($index, $query, [
@@ -186,12 +192,12 @@ switch ($cmd) {
   case 'knn': {
     $index = $opts['index'] ?? null; if (!$index) { err('Missing --index'); exit(1); }
     if (!isset($opts['lat'],$opts['lng'])) { err('Missing --lat/--lng'); exit(1); }
-    $k = (int)($opts['k'] ?? 5); $units = $opts['units'] ?? 'm';
+    $k = (int)($opts['k'] ?? 5);
     $geo = [
       'nearest' => $k,
       'distance_sort' => ['from' => ['lat'=>(float)$opts['lat'],'lng'=>(float)$opts['lng']], 'direction' => 'asc'],
-      'units' => $units
     ];
+    if (isset($opts['units'])) { $geo['units'] = $opts['units']; }
     if (isset($opts['max-distance'])) { $geo['max_distance'] = (float)$opts['max-distance']; }
     $res = $ys->search($index, '', [ 'limit' => $k, 'geoFilters' => $geo ]);
     out(json_encode($res, JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES));
@@ -201,16 +207,11 @@ switch ($cmd) {
     $index = $opts['index'] ?? null; if (!$index) { err('Missing --index'); exit(1); }
     if (!isset($opts['lat'],$opts['lng'],$opts['ranges'])) { err('Missing --lat/--lng/--ranges'); exit(1); }
     $ranges = array_map('floatval', explode(',', (string)$opts['ranges']));
-    $units = $opts['units'] ?? 'm';
+    $facet = [ 'from' => ['lat'=>(float)$opts['lat'],'lng'=>(float)$opts['lng']], 'ranges' => $ranges ];
+    if (isset($opts['units'])) { $facet['units'] = $opts['units']; }
     $res = $ys->search($index, '', [
       'limit' => 100,
-      'facets' => [
-        'distance' => [
-          'from' => ['lat'=>(float)$opts['lat'],'lng'=>(float)$opts['lng']],
-          'ranges' => $ranges,
-          'units' => $units
-        ]
-      ],
+      'facets' => [ 'distance' => $facet ],
       'geoFilters' => [ 'distance_sort' => ['from' => ['lat'=>(float)$opts['lat'],'lng'=>(float)$opts['lng']], 'direction' => 'asc'] ]
     ]);
     out(json_encode($res['facets']['distance'] ?? [], JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES));
@@ -224,7 +225,7 @@ switch ($cmd) {
     try {
       $res = $builder->searchWithDSL($index, $dsl);
       out(json_encode($res, JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES));
-    } catch (Exception $e) {
+    } catch (\Throwable $e) {
       err('DSL parse error: ' . $e->getMessage());
       exit(1);
     }
@@ -238,7 +239,7 @@ switch ($cmd) {
     try {
       $res = $builder->searchWithURL($index, $url);
       out(json_encode($res, JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES));
-    } catch (Exception $e) {
+    } catch (\Throwable $e) {
       err('URL parse error: ' . $e->getMessage());
       exit(1);
     }

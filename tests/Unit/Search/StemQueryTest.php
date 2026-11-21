@@ -76,14 +76,17 @@ class StemQueryTest extends TestCase
         $this->assertSame($storage->searches[0]['query'], $storage->counts[0]['query']);
     }
 
-    public function test_correction_mode_groups_each_term_with_its_stem(): void
+    public function test_correction_mode_builds_the_query_a_search_without_fuzzy_does(): void
     {
         $storage = $this->storage('english');
         $this->engine($storage)->search((new SearchQuery('connected users'))->fuzzy(true));
 
         $query = $this->lastQuery($storage);
-        $this->assertSame('connected users', $query['query']);
-        $this->assertSame('(connected OR _stems : connect) AND (users OR _stems : user)', $query['stem_query']);
+        $this->assertSame('"connected users" OR NEAR(connected users, 10) OR connected OR users', $query['query']);
+        $this->assertSame(
+            '("connected users" OR NEAR(connected users, 10) OR connected OR users) OR _stems : connect OR _stems : user',
+            $query['stem_query']
+        );
     }
 
     public function test_a_corrected_term_also_matches_the_stem_of_the_word_as_typed(): void
@@ -94,17 +97,17 @@ class StemQueryTest extends TestCase
 
         $query = $this->lastQuery($storage);
         $this->assertSame('rugs', $query['query']);
-        $this->assertSame('(rugs OR _stems : rug OR _stems : run)', $query['stem_query']);
+        $this->assertSame('(rugs) OR _stems : run OR _stems : rug', $query['stem_query']);
     }
 
-    public function test_a_term_that_needed_no_correction_is_grouped_as_before(): void
+    public function test_a_term_that_needed_no_correction_keeps_its_stem(): void
     {
         $storage = $this->storage('english');
         $storage->terms = ['rugs' => 2, 'running' => 1];
         $this->engine($storage, ['enable_fuzzy' => true])->search((new SearchQuery('running rugs'))->fuzzy(true));
 
         $this->assertSame(
-            '(running OR _stems : run) AND (rugs OR _stems : rug)',
+            '("running rugs" OR NEAR(running rugs, 10) OR running OR rugs) OR _stems : run OR _stems : rug',
             $this->lastQuery($storage)['stem_query']
         );
     }
@@ -116,7 +119,7 @@ class StemQueryTest extends TestCase
         $this->engine($storage, ['enable_fuzzy' => true])->search((new SearchQuery('cats runs'))->fuzzy(true));
 
         $this->assertSame(
-            '(cats OR _stems : cat) AND (rugs OR _stems : rug OR _stems : run)',
+            '("cats rugs" OR NEAR(cats rugs, 10) OR cats OR rugs) OR _stems : run OR _stems : cat OR _stems : rug',
             $this->lastQuery($storage)['stem_query']
         );
     }
@@ -130,16 +133,19 @@ class StemQueryTest extends TestCase
 
         $query = $this->lastQuery($storage);
         $this->assertSame('robocop', $query['query']);
-        $this->assertSame('(robocop OR _stems : robocop)', $query['stem_query']);
+        $this->assertSame('(robocop) OR _stems : robocop', $query['stem_query']);
     }
 
-    public function test_a_term_without_a_stem_stays_as_it_is_in_a_group(): void
+    public function test_a_term_without_a_stem_matches_only_as_it_is(): void
     {
         $storage = $this->storage('english');
         // 'x' is below the analyzer's minimum word length, so it has no stem
         $this->engine($storage)->search((new SearchQuery('connected x'))->fuzzy(true));
 
-        $this->assertSame('(connected OR _stems : connect) AND (x)', $this->lastQuery($storage)['stem_query']);
+        $this->assertSame(
+            '("connected x" OR NEAR(connected x, 10) OR connected OR x) OR _stems : connect',
+            $this->lastQuery($storage)['stem_query']
+        );
     }
 
     public function test_expansion_mode_adds_stems_of_the_original_terms_only(): void
@@ -189,7 +195,7 @@ class StemQueryTest extends TestCase
         $storage = $this->storage('english');
         $this->engine($storage)->search((new SearchQuery('les chansons'))->language('fr')->fuzzy(true));
 
-        $this->assertSame('(chansons OR _stems : chanson)', $this->lastQuery($storage)['stem_query']);
+        $this->assertSame('(chansons) OR _stems : chanson', $this->lastQuery($storage)['stem_query']);
         $this->assertSame('chansons', $this->lastQuery($storage)['query']);
     }
 
@@ -200,8 +206,8 @@ class StemQueryTest extends TestCase
 
         $query = $this->lastQuery($storage);
         // 'les' is a French stop word and 'a' is not; with no language on a plain index it would be the other way round
-        $this->assertSame('chansons a', $query['query']);
-        $this->assertSame('(chansons OR _stems : chanson) AND (a)', $query['stem_query']);
+        $this->assertSame('"chansons a" OR NEAR(chansons a, 10) OR chansons OR a', $query['query']);
+        $this->assertSame('("chansons a" OR NEAR(chansons a, 10) OR chansons OR a) OR _stems : chanson', $query['stem_query']);
     }
 
     public function test_a_plain_index_gets_no_stem_query_and_keeps_english_stop_words(): void
@@ -210,7 +216,7 @@ class StemQueryTest extends TestCase
         $this->engine($storage)->search((new SearchQuery('les chansons a'))->fuzzy(true));
 
         $query = $this->lastQuery($storage);
-        $this->assertSame('les chansons', $query['query']);
+        $this->assertSame('"les chansons" OR NEAR(les chansons, 10) OR les OR chansons', $query['query']);
         $this->assertArrayNotHasKey('stem_query', $query);
         $this->assertArrayNotHasKey('stem_weight', $query);
     }

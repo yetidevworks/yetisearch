@@ -131,37 +131,28 @@ class EnhancedFuzzySearchTest extends TestCase
 
     public function testMultipleTypoCorrection(): void
     {
-        // Test multiple typos in one query: qyick fone -> quick phone
-        // Since no document contains both "quick" and "phone", this should return 0 results
-        // but the correction should still work (we can verify by checking individual terms)
+        // Two typos in one query: qyick fone -> quick phone. No document has both words, and a
+        // fuzzy search, like a search without fuzzy, finds the documents that have either
         $results = $this->search->search($this->index, 'qyick fone', [
             'fuzzy' => true,
             'limit' => 5
         ]);
 
-        // Should find 0 results since no document contains both terms
-        $this->assertEquals(0, $results['total']);
-        
-        // Verify that individual corrections work
-        $qyickResults = $this->search->search($this->index, 'qyick', ['fuzzy' => true, 'limit' => 5]);
-        $foneResults = $this->search->search($this->index, 'fone', ['fuzzy' => true, 'limit' => 5]);
-        
-        $this->assertGreaterThan(0, $qyickResults['total']); // Should find quick document
-        $this->assertGreaterThan(0, $foneResults['total']); // Should find phone document
+        $ids = array_column($results['results'], 'id');
+        $this->assertContains('doc1', $ids); // the quick brown fox
+        $this->assertContains('doc2', $ids); // contact us by phone
     }
 
     public function testDidYouMeanSuggestions(): void
     {
-        // Test suggestion generation for query with no results
+        // A search without fuzzy finds nothing for the typos, and suggests the corrected words
         $results = $this->search->search($this->index, 'qyick fone', [
-            'fuzzy' => true,
+            'fuzzy' => false,
             'limit' => 5
         ]);
 
-        // If no results found, should have suggestions
-        if ($results['total'] === 0) {
-            $this->assertNotEmpty($results['suggestions'] ?? []);
-        }
+        $this->assertSame(0, $results['total']);
+        $this->assertNotEmpty($results['suggestions'] ?? []);
     }
 
     public function testEnhancedVsBasicFuzzy(): void

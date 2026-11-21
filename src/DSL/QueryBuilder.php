@@ -16,6 +16,10 @@ use YetiSearch\Exceptions\InvalidArgumentException;
  */
 class QueryBuilder
 {
+    /** The parameters URLQueryParser reads, as a regex alternation */
+    private const URL_PARAMETERS =
+        '(?:q|query|filter|sort|fields|page|limit|offset|fuzzy|highlight|facets|geo|language|boost)';
+
     private YetiSearch $yetiSearch;
     private QueryParser $queryParser;
     private URLQueryParser $urlParser;
@@ -45,18 +49,18 @@ class QueryBuilder
             'default_fuzzy' => false,
             'default_highlight' => true,
             // Fields that should be treated as metadata (not content)
-            // These are automatically prefixed with 'metadata.' in filters and sorts
+            // These are automatically prefixed with 'metadata.' in filters and sorts.
+            // id, type, language and timestamp are columns of their own and are not here.
             'metadata_fields' => [
-                'author', 'status', 'category', 'tags', 'date', 'published', 'draft', 'type',
+                'author', 'status', 'category', 'tags', 'date', 'published', 'draft',
                 'created_at', 'updated_at', 'views', 'likes', 'rating', 'score', 'priority',
                 'user', 'owner', 'assignee', 'reviewer', 'editor', 'price', 'cost', 'quantity',
-                'stock', 'sku', 'id', 'uuid', 'slug', 'url', 'email', 'phone', 'address',
+                'stock', 'sku', 'uuid', 'slug', 'url', 'email', 'phone', 'address',
                 'city', 'state', 'country', 'zip', 'lat', 'lng', 'latitude', 'longitude'
             ]
         ], $config);
 
-        $this->queryParser = new QueryParser($this->config['field_aliases']);
-        $this->urlParser = new URLQueryParser($this->config['field_aliases']);
+        $this->createParsers();
     }
 
     /**
@@ -93,60 +97,97 @@ class QueryBuilder
     }
 
     /**
-     * Execute a SearchQuery object
+     * Execute a SearchQuery object. Its fields (FIELDS, `fields=`, fields()) are the fields of the
+     * documents it returns, as the DSL has them, and do not narrow the search.
      */
     public function executeSearch(string $index, SearchQuery $searchQuery, array $options = []): array
     {
-        // Apply limits
-        $limit = min($searchQuery->getLimit(), $this->config['max_limit']);
+        $results = $this->yetiSearch->search(
+            $index,
+            $searchQuery->getQuery(),
+            array_merge($this->searchOptions($searchQuery), $options)
+        );
 
-        // Process filters to add metadata prefix where needed
-        $filters = $searchQuery->getFilters();
-        $processedFilters = [];
-        foreach ($filters as $filter) {
-            $field = $filter['field'];
-            // Check if this field should be treated as metadata
-            if (in_array($field, $this->config['metadata_fields']) && strpos($field, 'metadata.') !== 0) {
-                $filter['field'] = 'metadata.' . $field;
+        return $this->selectFields($results, $searchQuery->getFields());
+    }
+
+    /**
+     * The results with only the selected fields in their documents, under the alias a field is
+     * given one (`FIELDS title:headline`); every field when none is selected. A field is read
+     * from the document, else from the metadata (`metadata.views` from the metadata only).
+     *
+     * @param array<int|string, string> $fields A list of fields, or a map of field => alias
+     */
+    private function selectFields(array $results, array $fields): array
+    {
+        if ($fields === []) {
+            return $results;
+        }
+        $names = [];
+        foreach ($fields as $key => $value) {
+            $names[is_int($key) ? (string)$value : $key] = (string)$value;
+        }
+        foreach ($results['results'] ?? [] as $i => $result) {
+            $content = is_array($result['document'] ?? null) ? $result['document'] : [];
+            $metadata = is_array($result['metadata'] ?? null) ? $result['metadata'] : [];
+            $document = [];
+            foreach ($names as $field => $name) {
+                if (strpos($field, 'metadata.') === 0) {
+                    $from = [$metadata, substr($field, 9)];
+                } else {
+                    $from = array_key_exists($field, $content) ? [$content, $field] : [$metadata, $field];
+                }
+                if (array_key_exists($from[1], $from[0])) {
+                    $document[$name] = $from[0][$from[1]];
+                }
             }
-            $processedFilters[] = $filter;
+            $results['results'][$i]['document'] = $document;
         }
 
-        // Process sort fields to add metadata prefix where needed
-        $sort = $searchQuery->getSort();
-        $processedSort = [];
-        foreach ($sort as $field => $direction) {
-            // Check if this field should be treated as metadata
-            if (in_array($field, $this->config['metadata_fields']) && strpos($field, 'metadata.') !== 0) {
-                $processedSort['metadata.' . $field] = $direction;
-            } else {
-                $processedSort[$field] = $direction;
-            }
+        return $results;
+    }
+
+    /**
+     * The YetiSearch::search() options for a query: its limit capped at max_limit,
+     * and the metadata fields in its filters and sort given their 'metadata.' prefix.
+     */
+    private function searchOptions(SearchQuery $searchQuery): array
+    {
+        $filters = [];
+        foreach ($searchQuery->getFilters() as $filter) {
+            $filter['field'] = $this->metadataField($filter['field']);
+            $filters[] = $filter;
         }
 
-        // Build options array for YetiSearch
-        $searchOptions = array_merge([
-            'limit' => $limit,
+        $sort = [];
+        foreach ($searchQuery->getSort() as $field => $direction) {
+            $sort[$this->metadataField($field)] = $direction;
+        }
+
+        $options = [
+            'limit' => min($searchQuery->getLimit(), $this->config['max_limit']),
             'offset' => $searchQuery->getOffset(),
             'fuzzy' => $searchQuery->isFuzzy(),
             'fuzziness' => $searchQuery->getFuzziness(),
             'highlight' => $searchQuery->shouldHighlight(),
             'highlight_length' => $searchQuery->getHighlightLength(),
             'language' => $searchQuery->getLanguage(),
-            'fields' => $searchQuery->getFields(),
             'boost' => $searchQuery->getBoost(),
             'facets' => $searchQuery->getFacets(),
-            'sort' => $processedSort,
-            'filters' => $processedFilters
-        ], $options);
+            'sort' => $sort,
+            'filters' => $filters
+        ];
 
-        // Add geo filters if present
         if ($searchQuery->hasGeoFilters()) {
-            $searchOptions['geoFilters'] = $searchQuery->getGeoFilters();
+            $options['geoFilters'] = $searchQuery->getGeoFilters();
         }
 
-        // Execute search
-        return $this->yetiSearch->search($index, $searchQuery->getQuery(), $searchOptions);
+        return $options;
+    }
+
+    private function metadataField(string $field): string
+    {
+        return in_array($field, $this->config['metadata_fields'], true) ? 'metadata.' . $field : $field;
     }
 
     /**
@@ -159,12 +200,9 @@ class QueryBuilder
         }
 
         if (is_string($query)) {
-            // Try to detect if it's a URL query string or DSL
-            if (strpos($query, '&') !== false || strpos($query, 'filter[') !== false) {
-                return $this->urlParser->parseFromQueryString($query);
-            }
-
-            return $this->queryParser->parse($query);
+            return $this->isQueryString($query)
+                ? $this->urlParser->parseFromQueryString($query)
+                : $this->queryParser->parse($query);
         }
 
         if (is_array($query)) {
@@ -172,6 +210,23 @@ class QueryBuilder
         }
 
         throw new InvalidArgumentException('Invalid query format');
+    }
+
+    /**
+     * Whether a string is URL parameters rather than DSL: key=value pairs joined
+     * by '&', every key one of the parameters URLQueryParser reads.
+     */
+    private function isQueryString(string $query): bool
+    {
+        $pairs = array_filter(explode('&', $query), 'strlen');
+        foreach ($pairs as $pair) {
+            $key = urldecode((string)strstr($pair, '=', true));
+            if (!preg_match('/^' . self::URL_PARAMETERS . '(?:\[.*\])?$/', $key)) {
+                return false;
+            }
+        }
+
+        return $pairs !== [];
     }
 
     /**
@@ -188,10 +243,28 @@ class QueryBuilder
     public function setFieldAliases(array $aliases): self
     {
         $this->config['field_aliases'] = $aliases;
-        $this->queryParser = new QueryParser($aliases);
-        $this->urlParser = new URLQueryParser($aliases);
+        $this->createParsers();
 
         return $this;
+    }
+
+    /**
+     * The SearchQuery options a new query starts from: default_limit,
+     * default_fuzzy and default_highlight
+     */
+    public function getQueryDefaults(): array
+    {
+        return [
+            'limit' => (int)$this->config['default_limit'],
+            'fuzzy' => (bool)$this->config['default_fuzzy'],
+            'highlight' => (bool)$this->config['default_highlight'],
+        ];
+    }
+
+    private function createParsers(): void
+    {
+        $this->queryParser = new QueryParser($this->config['field_aliases'], $this->getQueryDefaults());
+        $this->urlParser = new URLQueryParser($this->config['field_aliases'], $this->getQueryDefaults());
     }
 
     /**
@@ -247,7 +320,7 @@ class FluentQuery
     public function __construct(QueryBuilder $builder, string $query = '')
     {
         $this->builder = $builder;
-        $this->searchQuery = new SearchQuery($query);
+        $this->searchQuery = new SearchQuery($query, $builder->getQueryDefaults());
     }
 
     public function in(string $index): self
@@ -387,11 +460,7 @@ class FluentQuery
 
     public function get(): array
     {
-        if (empty($this->index)) {
-            throw new InvalidArgumentException('Index not specified. Use in() method to set the index.');
-        }
-
-        return $this->builder->executeSearch($this->index, $this->searchQuery);
+        return $this->builder->executeSearch($this->index(), $this->searchQuery);
     }
 
     public function first(): ?array
@@ -402,20 +471,29 @@ class FluentQuery
         return $results['results'][0] ?? null;
     }
 
+    /**
+     * The number of documents get() finds in all, with the same filters,
+     * metadata fields and geo filters
+     */
     public function count(): int
     {
-        if (empty($this->index)) {
+        $results = $this->builder->executeSearch($this->index(), $this->searchQuery, [
+            'limit' => 0,
+            'offset' => 0,
+            'highlight' => false,
+            'facets' => [],
+        ]);
+
+        return (int)($results['total'] ?? 0);
+    }
+
+    private function index(): string
+    {
+        if ($this->index === '') {
             throw new InvalidArgumentException('Index not specified. Use in() method to set the index.');
         }
 
-        $yetiSearch = $this->builder->getYetiSearch();
-        $results = $yetiSearch->search($this->index, $this->searchQuery->getQuery(), [
-            'filters' => $this->searchQuery->getFilters(),
-            'fields' => $this->searchQuery->getFields(),
-            'language' => $this->searchQuery->getLanguage(),
-            'limit' => 0  // Only get the count
-        ]);
-        return $results['total'] ?? 0;
+        return $this->index;
     }
 
     public function toSearchQuery(): SearchQuery

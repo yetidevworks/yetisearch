@@ -31,74 +31,14 @@ class JaroWinkler
      */
     public static function jaro(string $str1, string $str2): float
     {
-        $len1 = mb_strlen($str1);
-        $len2 = mb_strlen($str2);
-
-        // Special cases
-        if ($len1 === 0 && $len2 === 0) {
-            return 1.0;
-        }
-        if ($len1 === 0 || $len2 === 0) {
-            return 0.0;
-        }
         if ($str1 === $str2) {
             return 1.0;
         }
-
-        // Calculate the match window
-        $matchWindow = (int) (max($len1, $len2) / 2) - 1;
-        if ($matchWindow < 1) {
-            $matchWindow = 1;
-        }
-
-        $matches1 = array_fill(0, $len1, false);
-        $matches2 = array_fill(0, $len2, false);
-
-        $matches = 0;
-        $transpositions = 0;
-
-        // Find matches
-        for ($i = 0; $i < $len1; $i++) {
-            $start = max(0, $i - $matchWindow);
-            $end = min($i + $matchWindow + 1, $len2);
-
-            for ($j = $start; $j < $end; $j++) {
-                if ($matches2[$j] || mb_substr($str1, $i, 1) !== mb_substr($str2, $j, 1)) {
-                    continue;
-                }
-
-                $matches1[$i] = true;
-                $matches2[$j] = true;
-                $matches++;
-                break;
-            }
-        }
-
-        if ($matches === 0) {
+        if ($str1 === '' || $str2 === '') {
             return 0.0;
         }
 
-        // Count transpositions
-        $k = 0;
-        for ($i = 0; $i < $len1; $i++) {
-            if (!$matches1[$i]) {
-                continue;
-            }
-
-            while (!$matches2[$k]) {
-                $k++;
-            }
-
-            if (mb_substr($str1, $i, 1) !== mb_substr($str2, $k, 1)) {
-                $transpositions++;
-            }
-            $k++;
-        }
-
-        // Calculate Jaro similarity
-        $jaro = ($matches / $len1 + $matches / $len2 + ($matches - $transpositions / 2) / $matches) / 3.0;
-
-        return $jaro;
+        return self::jaroOfChars(self::chars($str1), self::chars($str2));
     }
 
     /**
@@ -111,7 +51,16 @@ class JaroWinkler
      */
     public static function similarity(string $str1, string $str2, float $prefixScale = self::DEFAULT_PREFIX_SCALE): float
     {
-        $jaro = self::jaro($str1, $str2);
+        if ($str1 === $str2) {
+            return 1.0;
+        }
+        if ($str1 === '' || $str2 === '') {
+            return 0.0;
+        }
+
+        $a = self::chars($str1);
+        $b = self::chars($str2);
+        $jaro = self::jaroOfChars($a, $b);
 
         // Only apply Winkler bonus if Jaro similarity is above threshold
         if ($jaro < 0.7) {
@@ -120,14 +69,9 @@ class JaroWinkler
 
         // Calculate common prefix length (up to MAX_PREFIX_LENGTH)
         $prefixLen = 0;
-        $maxPrefix = min(mb_strlen($str1), mb_strlen($str2), self::MAX_PREFIX_LENGTH);
-
-        for ($i = 0; $i < $maxPrefix; $i++) {
-            if (mb_substr($str1, $i, 1) === mb_substr($str2, $i, 1)) {
-                $prefixLen++;
-            } else {
-                break;
-            }
+        $maxPrefix = min(count($a), count($b), self::MAX_PREFIX_LENGTH);
+        while ($prefixLen < $maxPrefix && $a[$prefixLen] === $b[$prefixLen]) {
+            $prefixLen++;
         }
 
         // Ensure prefix scale is within valid range
@@ -135,6 +79,61 @@ class JaroWinkler
 
         // Calculate Jaro-Winkler similarity
         return $jaro + ($prefixLen * $prefixScale * (1.0 - $jaro));
+    }
+
+    /**
+     * The characters of a string: its bytes when it is ASCII
+     *
+     * @return string[]
+     */
+    private static function chars(string $str): array
+    {
+        return preg_match('/[\x80-\xFF]/', $str) ? mb_str_split($str) : str_split($str);
+    }
+
+    /**
+     * Jaro similarity of two non-empty character lists
+     *
+     * @param string[] $a
+     * @param string[] $b
+     */
+    private static function jaroOfChars(array $a, array $b): float
+    {
+        $len1 = count($a);
+        $len2 = count($b);
+
+        // Calculate the match window
+        $matchWindow = max(1, (int) (max($len1, $len2) / 2) - 1);
+
+        // Find matches: the positions of $b each character of $a matched, in order of $a
+        $matched2 = [];
+        $order1 = [];
+        for ($i = 0; $i < $len1; $i++) {
+            for ($j = max(0, $i - $matchWindow), $end = min($i + $matchWindow + 1, $len2); $j < $end; $j++) {
+                if (!isset($matched2[$j]) && $a[$i] === $b[$j]) {
+                    $matched2[$j] = true;
+                    $order1[] = $a[$i];
+                    break;
+                }
+            }
+        }
+
+        $matches = count($order1);
+        if ($matches === 0) {
+            return 0.0;
+        }
+
+        // Count transpositions: matched characters that are not in the same order in both
+        ksort($matched2);
+        $transpositions = 0;
+        $k = 0;
+        foreach ($matched2 as $j => $unused) {
+            if ($order1[$k++] !== $b[$j]) {
+                $transpositions++;
+            }
+        }
+
+        return ($matches / $len1 + $matches / $len2 + ($matches - $transpositions / 2) / $matches) / 3.0;
     }
 
     /**

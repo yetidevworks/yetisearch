@@ -22,7 +22,8 @@ class GeoUtils
     }
 
     /**
-     * Calculate the Haversine distance using raw coordinates
+     * Calculate the Haversine distance using raw coordinates. GeoPoint::distanceTo()
+     * uses it too.
      *
      * @param float $lat1
      * @param float $lng1
@@ -40,6 +41,9 @@ class GeoUtils
         $a = sin($deltaLatRad / 2) * sin($deltaLatRad / 2) +
              cos($lat1Rad) * cos($lat2Rad) *
              sin($deltaLngRad / 2) * sin($deltaLngRad / 2);
+        // Rounding can take $a a hair past 1 for points nearly opposite each
+        // other, and sqrt(1 - $a) would then be NaN
+        $a = min(1.0, max(0.0, $a));
 
         $c = 2 * atan2(sqrt($a), sqrt(1 - $a));
 

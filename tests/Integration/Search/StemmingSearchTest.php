@@ -146,7 +146,7 @@ class StemmingSearchTest extends StemmingTestCase
     }
 
     /** @dataProvider schemaModes */
-    public function test_correction_mode_needs_every_word_but_accepts_either_form(string $mode): void
+    public function test_correction_mode_ranks_every_word_first_and_accepts_either_form(string $mode): void
     {
         $search = $this->openSearch($mode);
         $this->createIndex($search, $mode);
@@ -159,8 +159,12 @@ class StemmingSearchTest extends StemmingTestCase
 
         $results = $search->search(self::INDEX, 'user connect', ['fuzzy' => true]);
 
-        $this->assertSame(['both'], $this->ids($results));
-        $this->assertSame(1, $results['total']);
+        // Each word matches by its stem ('users', 'connected', 'connecting'); the document with
+        // both comes first, and the ones with either follow, as without fuzzy
+        $ids = $this->ids($results);
+        $this->assertSame('both', $ids[0]);
+        $this->assertEqualsCanonicalizing(['both', 'connect', 'users'], $ids);
+        $this->assertSame(3, $results['total']);
     }
 
     /** @dataProvider schemaModes */

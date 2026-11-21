@@ -34,6 +34,7 @@ class StandardAnalyzer implements AnalyzerInterface
     private int $stemMemoSize = 0;
     private int $stemMemoGeneration = -1;
     private bool $useOverriddenStem;
+    private bool $useOverriddenNormalize;
 
     /** The most languages whose stop word lists are kept ready; a language can come from a search request */
     private const STOP_WORD_SETS_LIMIT = 32;
@@ -57,6 +58,7 @@ class StandardAnalyzer implements AnalyzerInterface
         };
         $this->keepStopWordSets = $declaredIn('getStopWords') === self::class;
         $this->useOverriddenStem = $declaredIn('stem') !== self::class;
+        $this->useOverriddenNormalize = $declaredIn('normalize') !== self::class;
         $this->config = array_merge([
             'min_word_length' => 2,
             'max_word_length' => 50,
@@ -78,33 +80,46 @@ class StandardAnalyzer implements AnalyzerInterface
 
     public function analyze(string $text, ?string $language = null): array
     {
-        $language = $language ?? $this->detectLanguage($text);
+        $language = $language ?? 'english';
 
         $originalText = $text;
-        $text = $this->normalize($text);
+        // Tokenizing splits at whitespace, so text that normalize() would change only in its
+        // whitespace (printable ASCII, tabs and line breaks) goes to tokenize() as it is
+        if ($this->useOverriddenNormalize || preg_match('/[^\t\n\r\x20-\x7E]/', $text)) {
+            $text = $this->normalize($text);
+        }
         $tokens = $this->tokenize($text);
         $tokens = $this->removeStopWords($tokens, $language);
 
-        // Keep the resolved stemmer until a callback changes the factory between tokens.
+        // Keep the resolved stemmer until a callback changes the factory between tokens. A
+        // built-in stemmer, whose stems are remembered, changes nothing there, so with one the
+        // factory is not asked again.
         $stemLanguage = $this->languageOrDefault($language);
         $resolvedGeneration = -1;
-        $canonical = null;
-        $stemmer = null;
+        $canonical = $stemmer = null;
         $remember = false;
+        $minLength = $this->config['min_word_length'];
+        $maxLength = $this->config['max_word_length'];
 
         $analyzed = [];
         foreach ($tokens as $token) {
-            if (!$this->useOverriddenStem && $resolvedGeneration !== StemmerFactory::generation()) {
-                $this->syncStemMemo();
-                $resolvedGeneration = $this->stemMemoGeneration;
-                $canonical = StemmerFactory::canonical($stemLanguage);
-                $stemmer = $canonical === null ? null : StemmerFactory::create($stemLanguage);
-                $remember = $stemmer !== null && $this->canRememberStems($stemmer);
+            if ($this->useOverriddenStem) {
+                $stemmed = $this->stem($token, $language);
+            } else {
+                if (!$remember && $resolvedGeneration !== StemmerFactory::generation()) {
+                    [$canonical, $stemmer, $remember] = $this->resolveStemmer($stemLanguage);
+                    $resolvedGeneration = $this->stemMemoGeneration;
+                }
+                if ($stemmer === null) {
+                    $stemmed = $token;
+                } elseif ($remember && isset($this->stemMemo[$canonical][$token])) {
+                    $stemmed = $this->stemMemo[$canonical][$token];
+                } else {
+                    $stemmed = $this->stemRemembered($canonical, $stemmer, $remember, $token);
+                }
             }
-            $stemmed = $this->useOverriddenStem
-                ? $this->stem($token, $language)
-                : ($stemmer === null ? $token : $this->stemRemembered($canonical, $stemmer, $remember, $token));
-            if ($this->isValidToken($stemmed)) {
+            $length = self::hasMultibyte($stemmed) ? UTF8::strlen($stemmed) : strlen($stemmed);
+            if ($length >= $minLength && $length <= $maxLength) {
                 $analyzed[] = $stemmed;
             }
         }
@@ -118,23 +133,45 @@ class StandardAnalyzer implements AnalyzerInterface
 
     public function tokenize(string $text): array
     {
-        if ($this->config['strip_html']) {
-            $text = strip_tags($text);
+        // ASCII text takes byte functions and patterns, which give the same result faster
+        $ascii = !self::hasMultibyte($text);
+        if (!$ascii) {
+            // Invalid UTF-8 would make the /u patterns below return null
+            $text = mb_scrub($text, 'UTF-8');
         }
 
-        if ($this->config['expand_contractions']) {
+        if ($this->config['strip_html']) {
+            // Only real tags go: a "<" that starts no tag ("I <3 PHP", "3<5") is text, and the
+            // contents of script and style blocks are code, not words
+            if (strpos($text, '<') !== false) {
+                $text = preg_replace([
+                    '#<(script|style)\b[^>]*>.*?</\1\s*>#is',
+                    '/<!--.*?-->/s',
+                    '/<\/?[a-zA-Z][^>]*>/'
+                ], '', $text);
+            }
+            if (strpos($text, '&') !== false) {
+                $text = html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+                $ascii = $ascii && !self::hasMultibyte($text);
+            }
+        }
+
+        if ($this->config['expand_contractions'] && strpos($text, "'") !== false) {
             $text = $this->expandContractions($text);
         }
 
         if ($this->config['strip_punctuation']) {
-            $text = preg_replace('/[^\p{L}\p{N}\s\'-]/u', ' ', $text);
+            // \p{M}: combining marks belong to the letter they follow
+            $text = $ascii
+                ? preg_replace('/[^a-zA-Z0-9\s\'-]/', ' ', $text)
+                : preg_replace('/[^\p{L}\p{M}\p{N}\s\'-]/u', ' ', $text);
         }
 
         if ($this->config['lowercase']) {
-            $text = UTF8::strtolower($text);
+            $text = $ascii ? strtolower($text) : UTF8::strtolower($text);
         }
 
-        $tokens = preg_split('/\s+/', $text, -1, PREG_SPLIT_NO_EMPTY);
+        $tokens = preg_split($ascii ? '/\s+/' : '/\s+/u', $text, -1, PREG_SPLIT_NO_EMPTY);
 
         if ($this->config['remove_numbers']) {
             $tokens = array_filter($tokens, function ($token) {
@@ -147,19 +184,31 @@ class StandardAnalyzer implements AnalyzerInterface
 
     public function stem(string $word, ?string $language = null): string
     {
-        $language = $this->languageOrDefault($language);
-
         // A language without a stemmer keeps its words as they are; English
         // suffix stripping would only damage them. The factory holds the stemmer
         // instances, so a stemmer registered later is the one used.
-        $canonical = StemmerFactory::canonical($language);
-        if ($canonical === null) {
-            return $word;
-        }
+        [$canonical, $stemmer, $remember] = $this->resolveStemmer($this->languageOrDefault($language));
+
+        return $stemmer === null ? $word : $this->stemRemembered($canonical, $stemmer, $remember, $word);
+    }
+
+    /**
+     * The canonical name, the stemmer and whether its stems are remembered for a language;
+     * null for both when no stemmer is registered for it.
+     *
+     * @return array{0: ?string, 1: ?StemmerInterface, 2: bool}
+     */
+    private function resolveStemmer(string $language): array
+    {
         $this->syncStemMemo();
 
+        $canonical = StemmerFactory::canonical($language);
+        if ($canonical === null) {
+            return [null, null, false];
+        }
         $stemmer = StemmerFactory::create($language);
-        return $this->stemRemembered($canonical, $stemmer, $this->canRememberStems($stemmer), $word);
+
+        return [$canonical, $stemmer, $this->canRememberStems($stemmer)];
     }
 
     private function canRememberStems(StemmerInterface $stemmer): bool
@@ -224,15 +273,16 @@ class StandardAnalyzer implements AnalyzerInterface
         $set = $list['set'];
         $numeric = $list['numeric'];
 
-        return array_values(array_filter($tokens, function ($token) use ($set, $numeric) {
-            $word = UTF8::strtolower($token);
-            if (isset($set[$word])) {
-                return false;
-            }
-
+        $kept = [];
+        foreach ($tokens as $token) {
+            $word = preg_match('/[A-Z\x80-\xFF]/', $token) ? UTF8::strtolower($token) : $token;
             // A list is compared loosely, which makes numeric strings equal by value ('1e1' is '10')
-            return !($numeric && is_numeric($word) && in_array($word, $numeric));
-        }));
+            if (!isset($set[$word]) && !($numeric && is_numeric($word) && in_array($word, $numeric))) {
+                $kept[] = $token;
+            }
+        }
+
+        return $kept;
     }
 
     /**
@@ -325,11 +375,6 @@ class StandardAnalyzer implements AnalyzerInterface
         });
 
         return $keywords;
-    }
-
-    private function detectLanguage(string $text): string
-    {
-        return 'english';
     }
 
     private function loadStopWords(): void
@@ -472,61 +517,34 @@ class StandardAnalyzer implements AnalyzerInterface
 
     private function expandContractions(string $text): string
     {
-        $contractions = [
-            "can't" => "cannot",
-            "won't" => "will not",
-            "n't" => " not",
-            "'re" => " are",
-            "'ve" => " have",
-            "'ll" => " will",
-            "'d" => " would",
-            "'m" => " am"
-            // Removed "'s" => " is" as it incorrectly expands possessives like "Grav's"
-            // This needs more sophisticated handling to differentiate between
-            // possessive (Grav's) and contractions (it's, that's)
-        ];
+        $text = str_ireplace(["can't", "won't", "n't"], ['cannot', 'will not', ' not'], $text);
 
-        // Handle specific contractions with 's more carefully
-        // Only expand common contractions, not possessives
-        $specificContractions = [
-            "/\bit's\b/i" => "it is",
-            "/\bthat's\b/i" => "that is",
-            "/\bwhat's\b/i" => "what is",
-            "/\bthere's\b/i" => "there is",
-            "/\bhere's\b/i" => "here is",
-            "/\bhe's\b/i" => "he is",
-            "/\bshe's\b/i" => "she is",
-            "/\bwho's\b/i" => "who is",
-            "/\bhow's\b/i" => "how is",
-            "/\bwhere's\b/i" => "where is",
-            "/\bwhen's\b/i" => "when is",
-            "/\bwhy's\b/i" => "why is"
-        ];
+        // An apostrophe is a contraction only after a letter and at the end of a word: O'Reilly,
+        // O'Donnell and a quoted 'dogs' are not
+        $suffixes = ['d' => ' would', 're' => ' are', 'm' => ' am', 'll' => ' will', 've' => ' have'];
+        $text = preg_replace_callback("/(?<=\p{L})'(d|re|m|ll|ve)\b/iu", function (array $match) use ($suffixes) {
+            return $suffixes[strtolower($match[1])];
+        }, $text);
 
-        // First apply simple replacements
-        $text = str_ireplace(array_keys($contractions), array_values($contractions), $text);
-
-        // Then apply regex-based replacements for 's contractions
-        foreach ($specificContractions as $pattern => $replacement) {
-            $text = preg_replace($pattern, $replacement, $text);
-        }
-
-        return $text;
+        // "'s" is expanded only for the common contractions, as "Grav's" is a possessive
+        return preg_replace(
+            "/\b(it|that|what|there|here|he|she|who|how|where|when|why)'s\b/i",
+            '$1 is',
+            $text
+        );
     }
 
-    private function isValidToken(string $token): bool
+    private static function hasMultibyte(string $text): bool
     {
-        $length = UTF8::strlen($token);
-
-        return $length >= $this->config['min_word_length']
-            && $length <= $this->config['max_word_length'];
+        return preg_match('/[\x80-\xFF]/', $text) === 1;
     }
 
     private function calculateKeywordScore(string $word, int $frequency, string $text): float
     {
         $score = $frequency;
 
-        if (UTF8::stripos($text, $word) < 100) {
+        $position = UTF8::stripos($text, $word);
+        if ($position !== false && $position < 100) {
             $score *= 1.5;
         }
 

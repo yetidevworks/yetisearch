@@ -63,9 +63,7 @@ class QueryParserTest extends TestCase
     
     public function testParsesQueryWithNegation(): void
     {
-        // Note: The tokenizer doesn't capture the '-' prefix on field names
-        // (it's not part of the \w+ field pattern), so negation via prefix
-        // doesn't produce 'not in'. Use NOT IN operator directly instead.
+        // Negation with a '-' prefix on the field is not supported: use NOT IN
         $query = 'status NOT IN [draft, deleted]';
         $result = $this->parser->parse($query);
 
@@ -76,10 +74,7 @@ class QueryParserTest extends TestCase
     
     public function testParsesComplexQuery(): void
     {
-        // Note: Uses NOT IN (explicit operator) instead of -status prefix,
-        // and ascending sort (descending via - prefix not supported by tokenizer).
-        // LIMIT with positive numbers also not parsed (tokenizer limitation).
-        $query = 'golang tutorial author = "John" AND status NOT IN [draft, deleted] FIELDS title, author SORT created_at';
+        $query = 'golang tutorial author = "John" AND status NOT IN [draft, deleted] FIELDS title, author SORT -created_at LIMIT 10';
         $result = $this->parser->parse($query);
 
         $this->assertEquals('golang tutorial', $result->getQuery());
@@ -92,19 +87,18 @@ class QueryParserTest extends TestCase
         $this->assertContains('author', $fields);
 
         $sort = $result->getSort();
-        $this->assertEquals('asc', $sort['created_at']);
+        $this->assertEquals('desc', $sort['created_at']);
+        $this->assertSame(10, $result->getLimit());
     }
     
     public function testParsesQueryWithPagination(): void
     {
-        // Note: PAGE keyword can't read positive numbers (tokenizer limitation:
-        // numbers match 'field' pattern before 'number' pattern). Defaults apply.
         $query = 'search term PAGE 2, 25';
         $result = $this->parser->parse($query);
 
         $this->assertEquals('search term', $result->getQuery());
-        $this->assertEquals(10, $result->getLimit());  // PAGE default pageSize
-        $this->assertEquals(0, $result->getOffset());   // PAGE default (page 1)
+        $this->assertSame(25, $result->getLimit());
+        $this->assertSame(25, $result->getOffset());
     }
     
     public function testParsesGroupedConditions(): void

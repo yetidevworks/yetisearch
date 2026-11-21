@@ -35,9 +35,12 @@ class KeyboardProximity
      */
     public static function keyDistance(string $key1, string $key2): float
     {
-        $key1 = strtolower($key1);
-        $key2 = strtolower($key2);
+        $key1 = mb_strtolower($key1);
+        $key2 = mb_strtolower($key2);
 
+        if ($key1 === $key2) {
+            return 0.0;
+        }
         if (!isset(self::QWERTY_LAYOUT[$key1]) || !isset(self::QWERTY_LAYOUT[$key2])) {
             return 10.0; // Large distance for unknown keys
         }
@@ -52,23 +55,11 @@ class KeyboardProximity
     }
 
     /**
-     * Calculate average keyboard distance between two strings
+     * Calculate average keyboard distance between two strings, character by character
      */
     public static function stringDistance(string $str1, string $str2): float
     {
-        $len1 = strlen($str1);
-        $len2 = strlen($str2);
-
-        if ($len1 !== $len2) {
-            return 10.0; // Different lengths can't be simple keyboard typos
-        }
-
-        $totalDistance = 0.0;
-        for ($i = 0; $i < $len1; $i++) {
-            $totalDistance += self::keyDistance($str1[$i], $str2[$i]);
-        }
-
-        return $totalDistance / $len1;
+        return self::averageKeyDistance(self::chars($str1), self::chars($str2));
     }
 
     /**
@@ -76,56 +67,7 @@ class KeyboardProximity
      */
     public static function isLikelyKeyboardTypo(string $original, string $correction): bool
     {
-        // Only check for single-character differences or similar length strings
-        $lenDiff = abs(strlen($original) - strlen($correction));
-        if ($lenDiff > 1) {
-            return false;
-        }
-
-        // If same length, check average key distance
-        if (strlen($original) === strlen($correction)) {
-            $avgDistance = self::stringDistance($original, $correction);
-            return $avgDistance <= 1.5; // Average distance <= 1.5 keys
-        }
-
-        // If length differs by 1, check for missing/extra character
-        if (strlen($original) < strlen($correction)) {
-            return self::isMissingCharTypo($original, $correction);
-        } else {
-            return self::isExtraCharTypo($original, $correction);
-        }
-    }
-
-    /**
-     * Check if shorter string is missing a character from longer string
-     */
-    private static function isMissingCharTypo(string $shorter, string $longer): bool
-    {
-        $i = $j = 0;
-        $differences = 0;
-
-        while ($i < strlen($shorter) && $j < strlen($longer)) {
-            if ($shorter[$i] === $longer[$j]) {
-                $i++;
-                $j++;
-            } else {
-                $differences++;
-                if ($differences > 1) {
-                    return false;
-                }
-                $j++; // Skip character in longer string
-            }
-        }
-
-        return $differences <= 1;
-    }
-
-    /**
-     * Check if longer string has an extra character compared to shorter string
-     */
-    private static function isExtraCharTypo(string $longer, string $shorter): bool
-    {
-        return self::isMissingCharTypo($shorter, $longer);
+        return self::likelyTypo(self::chars($original), self::chars($correction));
     }
 
     /**
@@ -137,23 +79,73 @@ class KeyboardProximity
             return 1.0;
         }
 
-        $lenDiff = abs(strlen($original) - strlen($correction));
-        if ($lenDiff > 1) {
-            return 0.0;
-        }
+        $a = self::chars($original);
+        $b = self::chars($correction);
+        $lenDiff = abs(count($a) - count($b));
 
-        if (strlen($original) === strlen($correction)) {
-            $avgDistance = self::stringDistance($original, $correction);
+        if ($lenDiff === 0) {
             // Convert distance to score (closer = higher score)
-            return max(0.0, 1.0 - ($avgDistance / 3.0));
+            return max(0.0, 1.0 - (self::averageKeyDistance($a, $b) / 3.0));
         }
 
-        // For length differences, check if it's a simple insertion/deletion
-        if (self::isLikelyKeyboardTypo($original, $correction)) {
-            return 0.8; // Good score for likely insertion/deletion
+        // For a length difference of one, a simple insertion or deletion
+        return $lenDiff === 1 && self::likelyTypo($a, $b) ? 0.8 : 0.0;
+    }
+
+    /**
+     * @return string[]
+     */
+    private static function chars(string $str): array
+    {
+        return preg_match('/[\x80-\xFF]/', $str) ? mb_str_split($str) : str_split($str);
+    }
+
+    /**
+     * @param string[] $a
+     * @param string[] $b
+     */
+    private static function averageKeyDistance(array $a, array $b): float
+    {
+        if (count($a) !== count($b) || $a === []) {
+            return 10.0; // Different lengths can't be simple keyboard typos
         }
 
-        return 0.0;
+        $totalDistance = 0.0;
+        foreach ($a as $i => $char) {
+            $totalDistance += self::keyDistance($char, $b[$i]);
+        }
+
+        return $totalDistance / count($a);
+    }
+
+    /**
+     * Same length with keys close on average, or one character missing or extra
+     *
+     * @param string[] $a
+     * @param string[] $b
+     */
+    private static function likelyTypo(array $a, array $b): bool
+    {
+        $lenDiff = count($a) - count($b);
+        if ($lenDiff === 0) {
+            return self::averageKeyDistance($a, $b) <= 1.5; // Average distance <= 1.5 keys
+        }
+        if (abs($lenDiff) > 1) {
+            return false;
+        }
+
+        // The shorter one is the longer one with one character left out
+        [$shorter, $longer] = $lenDiff < 0 ? [$a, $b] : [$b, $a];
+        $skipped = 0;
+        for ($i = 0, $j = 0; $i < count($shorter); $j++) {
+            if ($shorter[$i] === $longer[$j]) {
+                $i++;
+            } elseif (++$skipped > 1) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**

@@ -116,13 +116,29 @@ class GeoBounds implements \JsonSerializable
             return false;
         }
 
-        // Check longitude overlap (handling date line)
-        if ($this->crossesDateLine() || $other->crossesDateLine()) {
-            // Complex date line logic
-            return true; // Simplified for now
+        // A box that crosses the date line spans two ranges of longitude
+        foreach ($this->longitudeRanges() as [$west, $east]) {
+            foreach ($other->longitudeRanges() as [$otherWest, $otherEast]) {
+                if ($west <= $otherEast && $otherWest <= $east) {
+                    return true;
+                }
+            }
         }
 
-        return !($this->east < $other->getWest() || $this->west > $other->getEast());
+        return false;
+    }
+
+    /**
+     * The longitudes the box spans, as [west, east] ranges: one, or two when it
+     * crosses the date line
+     */
+    private function longitudeRanges(): array
+    {
+        if ($this->crossesDateLine()) {
+            return [[$this->west, 180.0], [-180.0, $this->east]];
+        }
+
+        return [[$this->west, $this->east]];
     }
 
     /**

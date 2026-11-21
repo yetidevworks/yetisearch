@@ -57,8 +57,9 @@ class FuzzyTermCache
 
         // Limit cache size
         if (count($this->cache) >= $this->maxCacheSize && !isset($this->cache[$key])) {
-            // Remove oldest entries (simple FIFO)
-            $this->cache = array_slice($this->cache, -($this->maxCacheSize - 100), null, true);
+            // Drop the oldest tenth, at least one entry, so the new one fits. A slice from
+            // -(max - 100) kept every entry for a size of 100 and none for a smaller one.
+            $this->cache = array_slice($this->cache, max(1, intdiv($this->maxCacheSize, 10)), null, true);
         }
 
         $this->cache[$key] = $variations;

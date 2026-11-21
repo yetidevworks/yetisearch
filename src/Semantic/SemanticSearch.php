@@ -151,6 +151,11 @@ class SemanticSearch
                     array_column($batch, 'text'),
                     EmbeddingProviderInterface::PURPOSE_DOCUMENT
                 );
+                if (count($vectors) !== count($batch)) {
+                    throw new EmbeddingException(
+                        'The provider returned ' . count($vectors) . ' vectors for ' . count($batch) . ' texts'
+                    );
+                }
             } catch (\Throwable $e) {
                 // Keep what earlier batches stored; the rest stays pending.
                 $error = $e->getMessage();
@@ -579,13 +584,17 @@ class SemanticSearch
         $weight = max(0.0, min(1.0, $weight));
         $k = max(1, $k);
 
+        // A weight of 0 is keyword ranking only and 1 is vector ranking only: a side with no
+        // weight adds nothing, not even its documents.
         $scores = [];
-        foreach (array_values($keywordIds) as $rank => $id) {
-            $scores[$id] = (1.0 - $weight) / ($k + $rank + 1);
+        if ($weight < 1.0) {
+            foreach (array_values($keywordIds) as $rank => $id) {
+                $scores[$id] = (1.0 - $weight) / ($k + $rank + 1);
+            }
         }
         $best = empty($vectorScores) ? 0.0 : max($vectorScores);
         $rank = 0;
-        foreach ($vectorScores as $id => $similarity) {
+        foreach ($weight > 0.0 ? $vectorScores : [] as $id => $similarity) {
             $relative = $best > 0.0 ? max(0.0, $similarity) / $best : 1.0;
             $scores[$id] = ($scores[$id] ?? 0.0) + $weight / ($k + ++$rank) * $relative;
         }

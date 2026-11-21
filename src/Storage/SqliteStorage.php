@@ -4,7 +4,9 @@ namespace YetiSearch\Storage;
 
 use YetiSearch\Analyzers\StandardAnalyzer;
 use YetiSearch\Contracts\AnalyzerInterface;
+use YetiSearch\Contracts\ProvidesFieldValues;
 use YetiSearch\Contracts\ProvidesStemming;
+use YetiSearch\Contracts\ProvidesTermLookup;
 use YetiSearch\Contracts\StorageInterface;
 use YetiSearch\Contracts\TracksIndexChanges;
 use YetiSearch\Exceptions\StorageException;
@@ -18,8 +20,27 @@ use YetiSearch\Stemmer\StemmerFactory;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
-class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexChanges, ProvidesStemming
+class SqliteStorage implements
+    StorageInterface,
+    CalibrationStore,
+    TracksIndexChanges,
+    ProvidesStemming,
+    ProvidesTermLookup,
+    ProvidesFieldValues
 {
+    /**
+     * The Latin letters with one accent, lower case, and the letters they are without it: the FTS
+     * tokenizer (unicode61, remove_diacritics=1) indexes them so, and ftsWords() reads them so
+     */
+    private const ACCENTED = 'àáâãäåçèéêëìíîïñòóôõöùúûüýÿāăąćĉċčďēĕėęě'
+        . 'ĝğġģĥĩīĭįĵķĺļľńņňōŏőŕŗřśŝşšţťũūŭůűųŵŷźżž'
+        . 'ơưǎǐǒǔǧǩǫǰǵǹȁȃȅȇȉȋȍȏȑȓȕȗșțȟȧȩȯȳḁḃḅḇḋḍḏḑḓ'
+        . 'ḙḛḟḡḣḥḧḩḫḭḱḳḵḷḻḽḿṁṃṅṇṉṋṕṗṙṛṟṡṣṫṭṯṱṳṵṷṽṿẁ'
+        . 'ẃẅẇẉẋẍẏẑẓẕẖẗẘẙẛạảẹẻẽỉịọỏụủỳỵỷỹ';
+    private const UNACCENTED = 'aaaaaaceeeeiiiinooooouuuuyyaaaccccdeeeeegggghiiiijklllnnnooorrrssssttuuuuuuwyzzz'
+        . 'ouaiougkojgnaaeeiioorruusthaeoyabbbdddddeefghhhhhikkklllmmmnnnnpprrrssttttuuuvvw'
+        . 'wwwwxxyzzzhtwysaaeeeiioouuyyyy';
+
     private ?\PDO $connection = null;
     private array $config = [];
     private array $searchConfig = [];
@@ -28,6 +49,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     private bool $useTermsIndex = false;
     private ?bool $hasMathFunctions = null;
     private bool $hasReturningSupport = false;
+    /** @var array<string, array{columns: string[], multi: bool}> FTS layout per index (see ftsLayout()) */
     private array $ftsColumnsCache = [];
     /** @var array<string, array{enabled: bool, language: ?string}> Stemming settings per index */
     private array $stemmingCache = [];
@@ -39,10 +61,21 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     private ?int $cacheDataVersion = null;
     private bool $externalContentDefault = false;
     private ?QueryCache $queryCache = null;
+    /**
+     * What one insertBatch() call has read: prepared statements by SQL and index meta values, so a
+     * batch does not prepare or read them again for every document. Null outside a batch.
+     *
+     * @var array{sql: array<string, \PDOStatement>, meta: array<string, ?string>}|null
+     */
+    private ?array $batchMemo = null;
     /** @var array<string, bool> Indexes whose spatial table is known to hold rows */
     private array $spatialRowsKnown = [];
     /** @var array<string, int> Writes through this connection, per index */
     private array $indexChanges = [];
+    /** @var array{0: string, 1: array}|null The last field restriction fieldsHoldWord() read, as given and decoded */
+    private ?array $fieldRestriction = null;
+    /** @var array|null The match query calculateFieldWeightedScore() last read, and fieldWeightTerms() of it */
+    private ?array $weightedQuery = null;
     private LoggerInterface $logger;
 
     public function __construct(?LoggerInterface $logger = null)
@@ -119,8 +152,45 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         }
     }
 
+    /**
+     * Check the fields an index's FTS table is made with. Each becomes a column, so it has to be a
+     * plain identifier, and not one of the names the table itself uses: FTS5's own `rank` and
+     * `rowid` (and its aliases), the `id` column of an own-content index, the table's name.
+     * A `_stems` field is refused by assertCanStem() on an index that stems.
+     *
+     * @param mixed[] $columns
+     * @throws \InvalidArgumentException If a field cannot be a column
+     */
+    private function validateFtsColumns(string $index, array $columns): void
+    {
+        $reserved = ['id', 'rank', 'rowid', 'oid', '_rowid_', strtolower($index . '_fts')];
+        foreach ($columns as $column) {
+            if (!is_string($column) || !preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $column)) {
+                throw new \InvalidArgumentException(
+                    'Invalid field name ' . json_encode($column) . ': must match /^[A-Za-z_][A-Za-z0-9_]*$/'
+                );
+            }
+            if (in_array(strtolower($column), $reserved, true)) {
+                throw new \InvalidArgumentException("Invalid field name '{$column}': the name is used by the index itself");
+            }
+        }
+    }
+
+    /**
+     * Column names for SQL, each quoted, so that a field named after an SQL keyword (`order`) is a column.
+     *
+     * @param string[] $columns
+     */
+    private static function columnList(array $columns): string
+    {
+        return implode(', ', array_map(function ($column) {
+            return '"' . str_replace('"', '""', (string)$column) . '"';
+        }, $columns));
+    }
+
     public function connect(array $config): void
     {
+        $this->forgetConnectionState();
         $this->config = $config;
         // Support both 'database' and 'path' keys for database location
         $dbPath = $config['database'] ?? $config['path'] ?? ':memory:';
@@ -145,10 +215,30 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         }
 
         try {
-            $this->connection = new \PDO("sqlite:{$dbPath}", null, null, [
+            $options = [
                 \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
                 \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
-            ]);
+            ];
+            // From PHP 8.4 the connection is a Pdo\Sqlite, which registers SQL functions without
+            // the PDO method PHP 8.5 deprecates
+            $this->connection = method_exists(\PDO::class, 'connect')
+                ? \PDO::connect("sqlite:{$dbPath}", null, null, $options)
+                : new \PDO("sqlite:{$dbPath}", null, null, $options);
+            // A weak reference, so the connection holding the function does not keep the storage
+            $function = 'yetisearch_fields_hold_word';
+            $storage = \WeakReference::create($this);
+            $fieldsHoldWord = static function ($text, $language, $restriction) use ($storage): int {
+                $self = $storage->get();
+
+                return $self !== null && $self->fieldsHoldWord((string)$text, $language, (string)$restriction) ? 1 : 0;
+            };
+            if (method_exists($this->connection, 'createFunction')) {
+                $deterministic = constant('Pdo\\Sqlite::DETERMINISTIC');
+                $this->connection->createFunction($function, $fieldsHoldWord, 3, $deterministic);
+            } else {
+                $deterministic = \PDO::SQLITE_DETERMINISTIC;
+                $this->connection->sqliteCreateFunction($function, $fieldsHoldWord, 3, $deterministic);
+            }
 
             $this->connection->exec('PRAGMA foreign_keys = ON');
             $this->connection->exec('PRAGMA journal_mode = WAL');
@@ -202,6 +292,33 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             $this->stmtCache->clear();
         }
         $this->connection = null;
+        $this->forgetConnectionState();
+    }
+
+    /**
+     * Forget what was learned about the database and its indexes through the connection, so a
+     * storage connected again (to the same file or another) reads every setting afresh. The
+     * per-index write counts stay: the change tokens built from them must never repeat.
+     */
+    private function forgetConnectionState(): void
+    {
+        $this->ftsColumnsCache = [];
+        $this->stemmingCache = [];
+        $this->ftsBuiltCache = [];
+        $this->spatialEnabledCache = [];
+        $this->spatialRowsKnown = [];
+        $this->rtreeSupport = null;
+        $this->hasMathFunctions = null;
+        $this->cacheDataVersion = null;
+        $this->queryCache = null;
+    }
+
+    /**
+     * The cache of keyword search results, or null when `cache.enabled` is off.
+     */
+    public function getQueryCache(): ?QueryCache
+    {
+        return $this->queryCache;
     }
 
     public function createIndex(string $name, array $options = []): void
@@ -224,8 +341,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 $useMultiColumnFts = false;
             }
 
-            $ftsColumns = $options['fields'] ?? ['content'];
-
+            $ftsColumns = array_values($options['fields'] ?? ['content']);
 
             // If multi-column mode is disabled, use single content column
             if (!$useMultiColumnFts) {
@@ -235,6 +351,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 $useMultiColumnFts = false;
             }
             // Otherwise keep the provided fields for multi-column mode
+            $this->validateFtsColumns($name, $ftsColumns);
 
             // Stemming is fixed when the FTS table is created: an index that already
             // has one keeps the settings it was created with.
@@ -313,25 +430,21 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             if (is_string($detail) && in_array(strtolower($detail), ['full','column','none'], true)) {
                 $detailSql = ", detail='" . strtolower($detail) . "'";
             }
-            // Store FTS columns in meta
-            $this->initIndexMeta($name, 'fts_columns', json_encode($ftsColumns), $ftsExisted);
             if ($detail) {
                 $this->initIndexMeta($name, 'fts_detail', strtolower($detail), $ftsExisted);
             }
 
             // Create FTS5 table with configured columns
-            $cols = array_map(function ($c) {
-                return $c;
-            }, $ftsColumns);
+            $cols = $ftsColumns;
             if ($stemming) {
                 $cols[] = '_stems';
             }
             if ($useExternal) {
-                $ftsColsSql = implode(', ', $cols);
+                $ftsColsSql = self::columnList($cols);
                 $sql = "CREATE VIRTUAL TABLE IF NOT EXISTS {$name}_fts USING fts5({$ftsColsSql}, content='{$name}', content_rowid='doc_id', tokenize='unicode61'{$prefixSql}{$detailSql})";
                 $this->connection->exec($sql);
             } else {
-                $ftsColsSql = 'id UNINDEXED, ' . implode(', ', $cols);
+                $ftsColsSql = 'id UNINDEXED, ' . self::columnList($cols);
                 $sql = "CREATE VIRTUAL TABLE IF NOT EXISTS {$name}_fts USING fts5({$ftsColsSql}, tokenize='unicode61'{$prefixSql}{$detailSql})";
                 $this->connection->exec($sql);
             }
@@ -487,7 +600,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             $content = $this->encodeJson($document['content'], 'content', $id);
             // What is indexed is the content as stored: a later delete rebuilds the indexed
             // text from the stored JSON, so both have to come from the same bytes
-            $document['content'] = $this->decodeContent($content, $id);
+            $document['content'] = $this->storedContent($document['content'], $content, $id);
             // Persist metadata and, when R-tree or math functions are unavailable, embed geo for JSON fallback
             $metadataArr = $document['metadata'] ?? [];
             if (!$this->hasRTreeSupport() || !$this->hasMathFunctions) {
@@ -622,7 +735,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                         $columnTexts[] = $this->getFieldText($document['content'], $col, $index);
                     }
                     $values = array_merge($values, $columnTexts);
-                    $columnsSql = 'id, ' . implode(', ', $ftsColumns);
+                    $columnsSql = 'id, ' . self::columnList($ftsColumns);
                     if ($stemming) {
                         $values[] = $this->buildStems($columnTexts, $language, $this->stemmingSettings($index)['language']);
                         $columnsSql .= ', _stems';
@@ -668,6 +781,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         $this->ensureFtsBuilt($index);
 
         $ownTransaction = null;
+        $this->batchMemo = ['sql' => [], 'meta' => []];
         try {
             $ownTransaction = $this->beginWrite();
 
@@ -748,7 +862,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                     $validColumns = ['content'];
                 }
 
-                $columnsSql = 'id, ' . implode(', ', $validColumns) . ($stemming ? ', _stems' : '');
+                $columnsSql = 'id, ' . self::columnList($validColumns) . ($stemming ? ', _stems' : '');
                 $placeholders = implode(', ', array_fill(0, count($validColumns) + ($stemming ? 2 : 1), '?'));
                 $ftsStmt = $this->connection->prepare("INSERT INTO {$index}_fts ({$columnsSql}) VALUES ({$placeholders})");
 
@@ -783,7 +897,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 $id = $document['id'];
                 $content = $this->encodeJson($document['content'], 'content', $id);
                 // What is indexed is the content as stored (see insert())
-                $document['content'] = $this->decodeContent($content, $id);
+                $document['content'] = $this->storedContent($document['content'], $content, $id);
                 // Persist metadata and, when R-tree or math functions are unavailable, embed geo for JSON fallback
                 $metadataArr = $document['metadata'] ?? [];
                 if (!$this->hasRTreeSupport() || !$this->hasMathFunctions) {
@@ -953,7 +1067,15 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             if ($this->isSpatialEnabled($index)) {
                 $this->ensureSpatialTableExists($index);
             }
+            // A document without a location has spatial rows to remove only if the index has any
+            $hadSpatialRows = null;
             foreach ($spatialDocs as [$docId, $doc]) {
+                if (!isset($doc['geo']) && !isset($doc['geo_bounds'])) {
+                    $hadSpatialRows = $hadSpatialRows ?? ($this->isSpatialEnabled($index) && $this->hasSpatialRows($index));
+                    if (!$hadSpatialRows) {
+                        continue;
+                    }
+                }
                 $this->indexSpatialData($index, $docId, $doc, false);
             }
 
@@ -964,6 +1086,8 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 throw new StorageException("Failed to insert batch: " . $e->getMessage());
             }
             throw $e;
+        } finally {
+            $this->batchMemo = null;
         }
     }
 
@@ -1228,7 +1352,8 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     }
 
     /**
-     * Delete all documents whose ID starts with the given prefix.
+     * Delete all documents whose ID starts with the given prefix, as it is written: the match is
+     * case-sensitive, and `%`, `_` and `\` in the prefix are characters like any other.
      * Useful for cleaning up chunks when a parent document is updated.
      *
      * @param string $index The index name
@@ -1246,16 +1371,18 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
 
         $this->indexChanged($index);
 
-        $schema = $this->getSchemaMode($index);
-        $deletedCount = 0;
-
         $ownTransaction = null;
         try {
-            // First, get all IDs that match the prefix
-            $escapedPrefix = str_replace(['%', '_'], ['\\%', '\\_'], $prefix);
-            $stmt = $this->connection->prepare("SELECT id FROM {$index} WHERE id LIKE ? ESCAPE '\\'");
-            $stmt->execute([$escapedPrefix . '%']);
-            $ids = $stmt->fetchAll(\PDO::FETCH_COLUMN);
+            // The ids that start with the prefix are the ones from the prefix up to the first string
+            // after all of them, a range the index on the column serves (see removeStaleChunks())
+            $end = rtrim($prefix, "\xFF");
+            $params = [$prefix];
+            if ($end !== '') {
+                $params[] = substr($end, 0, -1) . chr(ord(substr($end, -1)) + 1);
+            }
+            $stmt = $this->connection->prepare("SELECT id FROM {$index} WHERE id >= ?" . (count($params) > 1 ? ' AND id < ?' : ''));
+            $stmt->execute($params);
+            $ids = array_map('strval', $stmt->fetchAll(\PDO::FETCH_COLUMN));
 
             if (empty($ids)) {
                 return 0;
@@ -1263,55 +1390,17 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             $this->ensureFtsBuilt($index);
 
             $ownTransaction = $this->beginWrite();
-
-            // Collect spatial IDs and indexed FTS text BEFORE deleting from main
-            // table — once the content rows are gone the text cannot be recovered
-            $spatialIds = [];
-            $indexedFtsRows = [];
-            if ($schema === 'external') {
-                foreach ($ids as $id) {
-                    $indexedFtsRow = $this->getIndexedFtsRow($index, $id);
-                    if ($indexedFtsRow !== null) {
-                        $indexedFtsRows[] = $indexedFtsRow;
-                        $spatialIds[] = $indexedFtsRow[0];
-                    }
-                }
-            }
-
-            // Delete from main table
-            $placeholders = implode(',', array_fill(0, count($ids), '?'));
-            $this->connection->prepare("DELETE FROM {$index} WHERE id IN ({$placeholders})")->execute($ids);
-            $deletedCount = count($ids);
-
-            // Handle FTS deletion based on schema
-            if ($schema === 'external') {
-                // Drop each row's terms individually, using the text read before the
-                // content rows were deleted. FTS5's own 'rebuild' is no way to resync
-                // the vocabulary here: it reads the content table's raw JSON column, so
-                // every field name would become a term of every document.
-                foreach ($indexedFtsRows as [$docId, $indexedText, $indexedStems]) {
-                    $this->deleteFtsRow($index, $docId, $indexedText, $indexedStems);
-                }
-            } else {
-                // For non-external content, delete matching rows
-                $this->connection->prepare("DELETE FROM {$index}_fts WHERE id IN ({$placeholders})")->execute($ids);
-            }
-
-            // Terms table
-            if ($this->useTermsIndex) {
-                $this->connection->prepare("DELETE FROM {$index}_terms WHERE document_id IN ({$placeholders})")->execute($ids);
-            }
-
-            // Spatial cleanup (works for both R-tree and fallback table, and for an index without them)
-            $this->deleteSpatialRows($index, $schema, $schema === 'external' ? $spatialIds : $ids);
-
+            $this->removeDocuments($index, $ids);
             $this->endWrite($ownTransaction);
-        } catch (\PDOException $e) {
+        } catch (\Throwable $e) {
             $this->abortWrite($ownTransaction, $index);
-            throw new StorageException("Failed to delete documents by prefix: " . $e->getMessage());
+            if ($e instanceof \PDOException) {
+                throw new StorageException("Failed to delete documents by prefix: " . $e->getMessage());
+            }
+            throw $e;
         }
 
-        return $deletedCount;
+        return count($ids);
     }
 
     public function search(string $index, array $query): array
@@ -1320,209 +1409,157 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         $this->ensureConnected();
         $this->syncIndexCaches();
 
-        // Check cache first if enabled
-        if ($this->queryCache && !($query['bypass_cache'] ?? false)) {
+        // Debug SQL is neither read from the cache nor written to it
+        $useCache = $this->queryCache && !($query['bypass_cache'] ?? false) && empty($query['_debug_sql']);
+        if ($useCache) {
             $cached = $this->queryCache->get($index, $query);
             if ($cached !== null) {
                 return $cached;
             }
         }
 
-        $searchQuery = $query['query'] ?? '';
-        $filters = $query['filters'] ?? [];
-        $limit = $query['limit'] ?? 20;
-        $offset = $query['offset'] ?? 0;
+        try {
+            $results = $this->nearestResults($index, $query) ?? $this->findResults($index, $query);
+        } catch (\PDOException $e) {
+            throw new StorageException("Search failed: " . $e->getMessage());
+        }
+
+        if ($useCache) {
+            $this->queryCache->set($index, $query, $results);
+        }
+
+        return $results;
+    }
+
+    /**
+     * The k documents nearest a point (k-NN), nearest first, for a `nearest` geo filter: of the query's
+     * language and passing its filters, its text ignored. Null when the query asks for no nearest
+     * documents or gives no point to measure from.
+     *
+     * @return array[]|null
+     */
+    private function nearestResults(string $index, array $query): ?array
+    {
+        $geoFilters = $query['geoFilters'] ?? [];
+        if (!isset($geoFilters['nearest'])) {
+            return null;
+        }
+        $k = is_array($geoFilters['nearest']) ? (int)($geoFilters['nearest']['k'] ?? 10) : (int)$geoFilters['nearest'];
+        $k = max(1, min($k, 1000));
+        $from = $geoFilters['nearest']['from'] ?? ($geoFilters['distance_sort']['from'] ?? null);
+        if (is_array($from)) {
+            $from = new GeoPoint($from['lat'], $from['lng']);
+        }
+        if (!$from instanceof GeoPoint) {
+            return null;
+        }
+
+        $join = $this->getSchemaMode($index) === 'external'
+            ? " INNER JOIN {$index}_spatial s ON s.id = d.doc_id"
+            : " INNER JOIN {$index}_id_map m ON m.string_id = d.id INNER JOIN {$index}_spatial s ON s.id = m.numeric_id";
+        $maxD = isset($geoFilters['max_distance'])
+            ? $this->geoDistanceToMeters((float)$geoFilters['max_distance'], $geoFilters)
+            : null;
+        $select = "SELECT d.id, d.content, d.metadata, d.language, d.type, d.timestamp,"
+            . " ((s.minLat+s.maxLat)/2.0) AS _centroid_lat, ((s.minLng+s.maxLng)/2.0) AS _centroid_lng";
+        $where = '';
+        $params = [];
+        if ($this->hasMathFunctions) {
+            $distanceExpr = $this->getDistanceExpression($from->getLatitude(), $from->getLongitude());
+            $select .= ", {$distanceExpr} AS distance";
+            if ($maxD !== null) {
+                $where = " AND ({$distanceExpr}) <= CAST(? AS REAL)";
+                $params[] = $maxD;
+            }
+        } elseif ($maxD !== null) {
+            // Without SQL math functions the distance is measured in PHP below,
+            // after the box around max_distance has narrowed the rows
+            [$where, $params] = $this->buildBoundsIntersectSql($from->getBoundingBox($maxD));
+        }
+        [$filterSql, $filterParams] = $this->filterSql($query['filters'] ?? [], $query['language'] ?? null);
+        $sql = "{$select} FROM {$index} d{$join} WHERE 1=1{$where}{$filterSql}";
+        $params = array_merge($params, $filterParams);
+        if ($this->hasMathFunctions) {
+            $sql .= " ORDER BY distance ASC LIMIT ?";
+            $params[] = $k;
+        }
+
+        $stmt = $this->getPreparedStatement($sql);
+        $stmt->execute($params);
+        $results = [];
+        while ($row = $stmt->fetch()) {
+            if (isset($row['distance'])) {
+                $distance = (float)$row['distance'];
+            } else {
+                $distance = $from->distanceTo(new GeoPoint((float)$row['_centroid_lat'], (float)$row['_centroid_lng']));
+                if ($maxD !== null && $distance > $maxD) {
+                    continue;
+                }
+            }
+            // Nothing is matched, so nothing is scored
+            $results[] = array_merge($this->searchResult($row, json_decode($row['content'], true), 0), [
+                'distance' => $distance,
+                'centroid_lat' => $row['_centroid_lat'] ?? null,
+                'centroid_lng' => $row['_centroid_lng'] ?? null,
+            ]);
+        }
+        if (!$this->hasMathFunctions) {
+            usort($results, function ($a, $b) {
+                return $a['distance'] <=> $b['distance'];
+            });
+            $results = array_slice($results, 0, $k);
+        }
+
+        return $results;
+    }
+
+    /**
+     * One page of a search: the documents that match its text, when it has any, within its location,
+     * of its language and passing its filters, in the order it asks for.
+     *
+     * @return array[]
+     */
+    private function findResults(string $index, array $query): array
+    {
+        $searchQuery = (string)($query['query'] ?? '');
+        $limit = (int)($query['limit'] ?? 20);
+        $offset = max(0, (int)($query['offset'] ?? 0));
         $sort = $query['sort'] ?? [];
-        $language = $query['language'] ?? null;
         $geoFilters = $query['geoFilters'] ?? [];
         $fieldWeights = $query['field_weights'] ?? [];
+        $hasSearchQuery = trim($searchQuery) !== '';
+        $fieldWeighted = !empty($fieldWeights) && $hasSearchQuery;
 
-        // Build spatial query components
         $spatial = $this->buildSpatialQuery($index, $geoFilters);
-
-
-        // Check if we have a search query
-        $hasSearchQuery = !empty(trim($searchQuery));
-
-        // Track whether filters have been applied (for wrapped queries)
-        $filtersApplied = false;
+        [$source, $params] = $this->searchSource($index, $query, $spatial);
 
         // Set below for a text search: the plain join and how to rank it on the FTS table alone
         $rankedPlan = null;
-
-        // Detect if we need PHP-based sorting (FTS5 + distance sorting)
-        $needsPhpSort = false;
-        $hasSpatialData = !empty($spatial['select']) && (
-            strpos($spatial['select'], 'distance') !== false ||
-            strpos($spatial['select'], '_centroid_lat') !== false
-        );
-
-        if ($hasSpatialData && (isset($geoFilters['distance_sort']) || isset($sort['distance']))) {
-            $needsPhpSort = true;
-        }
-
-        // When using field weights, fetch a broader candidate set for post-scoring.
-        // Keep defaults conservative to avoid large memory/CPU spikes on big indexes.
-        if (!empty($fieldWeights) && $hasSearchQuery) {
-            $multiplier = max(1, (int)($query['field_weight_candidate_multiplier'] ?? $this->searchConfig['field_weight_candidate_multiplier'] ?? 20));
-            $minCandidates = max(1, (int)($query['field_weight_candidate_min'] ?? $this->searchConfig['field_weight_candidate_min'] ?? 200));
-            $maxCandidates = max($minCandidates, (int)($query['field_weight_candidate_max'] ?? $this->searchConfig['field_weight_candidate_max'] ?? 2000));
-            $effectiveLimit = min(max($limit * $multiplier, $minCandidates), $maxCandidates);
-            if (isset($query['field_weight_candidate_cap'])) {
-                $effectiveLimit = min($effectiveLimit, max(1, (int)$query['field_weight_candidate_cap']));
-            }
-        } else {
-            $effectiveLimit = $limit;
-        }
-
-
-        // Nearest-neighbor mode (k-NN): ignore text, order by distance asc, limit k
-        if (isset($geoFilters['nearest'])) {
-            $k = is_array($geoFilters['nearest']) ? (int)($geoFilters['nearest']['k'] ?? 10) : (int)$geoFilters['nearest'];
-            $k = max(1, min($k, 1000));
-            $from = $geoFilters['nearest']['from'] ?? ($geoFilters['distance_sort']['from'] ?? null);
-            if ($from && is_array($from)) {
-                $from = new GeoPoint($from['lat'], $from['lng']);
-            }
-            if ($from instanceof GeoPoint) {
-                $lat = $from->getLatitude();
-                $lng = $from->getLongitude();
-                $schema = $this->getSchemaMode($index);
-                $join = $schema === 'external'
-                    ? " INNER JOIN {$index}_spatial s ON s.id = d.doc_id"
-                    : " INNER JOIN {$index}_id_map m ON m.string_id = d.id INNER JOIN {$index}_spatial s ON s.id = m.numeric_id";
-                $maxD = isset($geoFilters['max_distance'])
-                    ? $this->geoDistanceToMeters((float)$geoFilters['max_distance'], $geoFilters)
-                    : null;
-                $centroidSelect = "((s.minLat+s.maxLat)/2.0) AS _centroid_lat, ((s.minLng+s.maxLng)/2.0) AS _centroid_lng";
-                $params = [];
-                if ($this->hasMathFunctions) {
-                    $distanceExpr = $this->getDistanceExpression($lat, $lng);
-                    $sql = "SELECT d.id, d.content, d.metadata, d.language, d.type, d.timestamp, " . $distanceExpr . " AS distance, " . $centroidSelect . " FROM {$index} d" . $join . " WHERE 1=1";
-                    if ($maxD !== null) {
-                        $sql .= " AND (" . $distanceExpr . ") <= CAST(? AS REAL)";
-                        $params[] = $maxD;
-                    }
-                } else {
-                    // Without SQL math functions the distance is measured in PHP below,
-                    // after the box around max_distance has narrowed the rows
-                    $sql = "SELECT d.id, d.content, d.metadata, d.language, d.type, d.timestamp, " . $centroidSelect . " FROM {$index} d" . $join . " WHERE 1=1";
-                    if ($maxD !== null) {
-                        [$boxSql, $boxParams] = $this->buildBoundsIntersectSql($from->getBoundingBox($maxD));
-                        $sql .= $boxSql;
-                        $params = array_merge($params, $boxParams);
-                    }
-                }
-                // Apply standard filters
-                foreach ($filters as $filter) {
-                    [$filterSql, $filterParams] = $this->buildFilterClause($filter);
-                    if ($filterSql !== '') {
-                        $sql .= $filterSql;
-                        $params = array_merge($params, $filterParams);
-                    }
-                }
-                if ($this->hasMathFunctions) {
-                    $sql .= " ORDER BY distance ASC LIMIT ?";
-                    $params[] = $k;
-                }
-
-                try {
-                    $stmt = $this->getPreparedStatement($sql);
-                    $stmt->execute($params);
-                    $results = [];
-                    while ($row = $stmt->fetch()) {
-                        if (isset($row['distance'])) {
-                            $distance = (float)$row['distance'];
-                        } else {
-                            $distance = $from->distanceTo(new GeoPoint((float)$row['_centroid_lat'], (float)$row['_centroid_lng']));
-                            if ($maxD !== null && $distance > $maxD) {
-                                continue;
-                            }
-                        }
-                        $content = json_decode($row['content'], true);
-                        // Content fields at the top level, as every other search returns
-                        // them; nested under 'document' the engine found no fields at all
-                        $results[] = array_merge($content ?: [], [
-                            'id' => $row['id'],
-                            'score' => abs($row['rank'] ?? 0),
-                            'metadata' => json_decode($row['metadata'], true),
-                            'language' => $row['language'],
-                            'type' => $row['type'],
-                            'timestamp' => $row['timestamp'],
-                            'distance' => $distance,
-                            'centroid_lat' => $row['_centroid_lat'] ?? null,
-                            'centroid_lng' => $row['_centroid_lng'] ?? null,
-                        ]);
-                    }
-                    if (!$this->hasMathFunctions) {
-                        usort($results, function ($a, $b) {
-                            return $a['distance'] <=> $b['distance'];
-                        });
-                        $results = array_slice($results, 0, $k);
-                    }
-
-                    // Cache the results before returning, unless the query asked to bypass the cache
-                    if ($this->queryCache && !($query['bypass_cache'] ?? false)) {
-                        $this->queryCache->set($index, $query, $results);
-                    }
-
-                    return $results;
-                } catch (\PDOException $e) {
-                    throw new StorageException("Search failed: " . $e->getMessage());
-                }
-            }
-        }
-
         if ($hasSearchQuery) {
-            // Full text search with optional spatial filters
-            // Compute bm25 weights per FTS column (if available)
-            $ftsColumns = $this->getFtsColumns($index);
-            $isMultiColumn = $this->getIndexMeta($index, 'multi_column_fts') === '1';
-
+            // bm25() takes one weight per column of the FTS table, in order. The field weights weigh the
+            // columns of a multi-column table; a single-column table is weighed by its fields in PHP below.
+            $isMultiColumn = $this->isMultiColumnFts($index);
             $weights = [];
-            if ($isMultiColumn && !empty($fieldWeights)) {
-                // In multi-column mode, apply weights to actual FTS columns
-                foreach ($ftsColumns as $col) {
-                    $weights[] = (float)($fieldWeights[$col] ?? 1.0);
-                }
-            } elseif (!$isMultiColumn && !empty($fieldWeights)) {
-                // In single-column mode, BM25 weights don't apply per field
-                // We'll use post-processing field weighting
-                $weights = [1.0];
-            } else {
-                // No field weights specified
-                foreach ($ftsColumns as $col) {
-                    $weights[] = 1.0;
-                }
+            foreach ($this->getFtsColumns($index) as $column) {
+                $weights[] = $isMultiColumn ? (float)($fieldWeights[$column] ?? 1.0) : 1.0;
             }
 
+            // An own-content table has the id (UNINDEXED, but still a column) before the fields
             $schema = $this->getSchemaMode($index);
-
-            // bm25() takes one weight per column of the FTS table, in order, and an
-            // own-content table has the id (UNINDEXED, but still a column) before the fields
             if ($schema !== 'external') {
                 array_unshift($weights, 1.0);
             }
 
             // The stems column is weighed below the raw columns, so a document that has
             // the words as typed ranks above one that only has their stems.
-            $matchQuery = $searchQuery;
             if ($this->indexStems($index)) {
                 $stemWeight = max(0.0, (float)($query['stem_weight'] ?? $this->searchConfig['stem_weight'] ?? 0.5));
                 $weights[] = sprintf('%.4F', $stemWeight);
-                if (!empty($query['stem_query']) && is_string($query['stem_query'])) {
-                    $matchQuery = $query['stem_query'];
-                }
             }
 
             // Use table name for bm25() (SQLite expects the FTS table name)
             $bm25 = 'bm25(' . $index . '_fts' . (count($weights) ? ', ' . implode(', ', $weights) : '') . ') as rank';
-            if ($schema === 'external') {
-                $inner = "SELECT d.*, {$bm25}" . $spatial['select'] . " FROM {$index} d INNER JOIN {$index}_fts f ON f.rowid = d.doc_id" . $spatial['join'] . " WHERE {$index}_fts MATCH ?" . $spatial['where'];
-            } else {
-                $inner = "SELECT d.*, {$bm25}" . $spatial['select'] . " FROM {$index} d INNER JOIN {$index}_fts f ON d.id = f.id" . $spatial['join'] . " WHERE {$index}_fts MATCH ?" . $spatial['where'];
-            }
-            $params = array_merge([$matchQuery], $spatial['params']);
+            $sql = "SELECT d.*, {$bm25}" . $spatial['select'] . $source;
 
             // When the search turns out to be plain text (this join and nothing else), it ranks
             // first and reads the documents of the best ones only (see rankedRows()); `key`
@@ -1535,286 +1572,364 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                     . " AS rid, {$bm25} FROM {$index}_fts f"
                     . " WHERE {$index}_fts MATCH ? ORDER BY rank ASC LIMIT ? OFFSET ?",
                 'key' => $schema === 'external' ? 'doc_id' : 'id',
-                'match' => $matchQuery,
+                'match' => $this->matchQuery($index, $query),
             ];
-
-            // Apply language filter to inner query (while d is in scope)
-            if ($language) {
-                $inner .= " AND d.language = ?";
-                $params[] = $language;
-            }
-
-            // Apply filters to inner query (while d is in scope)
-            foreach ($filters as $filter) {
-                [$filterSql, $filterParams] = $this->buildFilterClause($filter);
-                if ($filterSql !== '') {
-                    $inner .= $filterSql;
-                    $params = array_merge($params, $filterParams);
-                }
-            }
-
-            if (isset($geoFilters['near']) && !empty($spatial['select']) && strpos($spatial['select'], 'distance') !== false) {
-                $radius = (float)$geoFilters['near']['radius'];
-                $units = $geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? null);
-                if (is_string($units)) {
-                    $u = strtolower($units);
-                    if ($u === 'km') {
-                        $radius *= 1000.0;
-                    } elseif (in_array($u, ['mi','mile','miles'])) {
-                        $radius *= 1609.344;
-                    }
-                }
-                $sql = "SELECT * FROM (" . $inner . ") t WHERE t.distance <= CAST(? AS REAL)";
-                $params[] = $radius;
-            } else {
-                $sql = $inner;
-            }
-            // Mark that filters/language were already applied
-            $filtersApplied = true;
         } else {
-            // No text search, only filters and/or spatial search
-            $sql = "
-                SELECT
-                    d.id, d.content, d.metadata, d.language, d.type, d.timestamp,
-                    0 as rank" . $spatial['select'] . "
-                FROM {$index} d" .
-                (!empty($spatial['join']) ? $spatial['join'] : "") . "
-                WHERE 1=1" . $spatial['where'] . "
-            ";
-            $params = $spatial['params'];
+            $sql = "SELECT d.id, d.content, d.metadata, d.language, d.type, d.timestamp, 0 as rank"
+                . $spatial['select'] . $source;
         }
 
-        // Apply language and filters only if not already applied (for wrapped queries)
-        if (!$filtersApplied) {
-            if ($language) {
-                $sql .= " AND d.language = ?";
-                $params[] = $language;
-            }
-
-            foreach ($filters as $filter) {
-                [$filterSql, $filterParams] = $this->buildFilterClause($filter);
-                if ($filterSql !== '') {
-                    $sql .= $filterSql;
-                    $params = array_merge($params, $filterParams);
-                }
-            }
+        // A distance computed in SQL is ordered on there, a document without a location as the farthest,
+        // as PHP orders it. Without SQL math functions only the centroid is selected, so the best
+        // matches are ordered by their distance in PHP.
+        $sqlDistance = strpos($spatial['select'], 'distance') !== false;
+        $distanceDir = null;
+        if (isset($geoFilters['distance_sort'])) {
+            $distanceDir = strtoupper((string)($geoFilters['distance_sort']['direction'] ?? 'ASC')) === 'DESC' ? 'DESC' : 'ASC';
+        } elseif (isset($sort['distance'])) {
+            $distanceDir = strtoupper((string)$sort['distance']) === 'DESC' ? 'DESC' : 'ASC';
         }
+        $phpDistanceSort = $distanceDir !== null && !$sqlDistance && $spatial['select'] !== '';
 
-        // Handle sorting
-        if ($needsPhpSort) {
-            // For PHP sorting, we need to fetch more results to ensure accurate pagination
-            // Dynamic default: 20x limit (min 200), capped at 1000; override with candidate_cap
-            $fetchLimit = min(1000, max($limit * 20, 200));
-            if (isset($geoFilters['candidate_cap'])) {
-                $fetchLimit = min($fetchLimit, max(10, (int)$geoFilters['candidate_cap']));
-            }
-
-            // Apply basic ordering by rank to get most relevant results first
-            $sql .= " ORDER BY rank ASC";
-            $sql .= " LIMIT ?";
-            $params[] = $fetchLimit;
-        } else {
-            // Normal SQL sorting
-            if (isset($geoFilters['distance_sort']) && !empty($spatial['select']) && strpos($spatial['select'], 'distance') !== false) {
-                $dir = strtoupper($geoFilters['distance_sort']['direction']) === 'DESC' ? 'DESC' : 'ASC';
-                $sql .= " ORDER BY distance {$dir}";
-            } elseif (empty($sort)) {
-                $sql .= " ORDER BY rank ASC";
-            } else {
-                $orderClauses = [];
-                foreach ($sort as $field => $direction) {
-                    $dir = strtoupper($direction) === 'DESC' ? 'DESC' : 'ASC';
-                    if ($field === '_score') {
-                        $orderClauses[] = "rank {$dir}";
-                    } elseif ($field === 'distance' && !empty($spatial['select'])) {
-                        $orderClauses[] = "distance {$dir}";
-                    } elseif (in_array($field, ['type', 'language', 'id', 'timestamp'])) {
-                        // Direct columns
-                        $orderClauses[] = "d.{$field} {$dir}";
-                    } elseif (strpos($field, 'metadata.') === 0) {
-                        // Metadata field - use JSON extraction
-                        $metaField = substr($field, 9);
-                        $this->validateFieldName($metaField);
-                        $orderClauses[] = "CAST(json_extract(d.metadata, '$.{$metaField}') AS REAL) {$dir}";
-                    } else {
-                        // Validate field name for safety
-                        $this->validateFieldName($field);
-                        $orderClauses[] = "d.{$field} {$dir}";
+        $order = [];
+        if (isset($geoFilters['distance_sort']) && $sqlDistance) {
+            $order[] = "distance IS NULL {$distanceDir}, distance {$distanceDir}";
+        } elseif (!$phpDistanceSort) {
+            foreach ($sort as $field => $direction) {
+                $dir = strtoupper((string)$direction) === 'DESC' ? 'DESC' : 'ASC';
+                if ($field === '_score') {
+                    // bm25() gives the best match the lowest rank
+                    $order[] = 'rank ' . ($dir === 'DESC' ? 'ASC' : 'DESC');
+                } elseif ($field === 'distance') {
+                    if ($sqlDistance) {
+                        $order[] = "distance IS NULL {$dir}, distance {$dir}";
                     }
-                }
-                $sql .= " ORDER BY " . implode(', ', $orderClauses);
-            }
-
-            $sql .= " LIMIT ? OFFSET ?";
-            $params[] = $effectiveLimit;
-            $params[] = $offset;
-        }
-
-        try {
-            // Debug mode: return SQL and params without executing
-            if (!empty($query['_debug_sql'])) {
-                return [
-                    '_sql' => $sql,
-                    '_params' => $params,
-                    '_uses_php_sort' => $needsPhpSort,
-                    '_spatial_select' => $spatial['select'],
-                ];
-            }
-
-            // A first page with nothing but text (no filter, language, location or sort) is ranked
-            // on the FTS table alone, and only the documents of the page are read
-            $rankedRows = null;
-            if (
-                $offset == 0 && $rankedPlan !== null && $sql === $rankedPlan['plain']
-                && $params === [$rankedPlan['match'], $effectiveLimit, $offset]
-            ) {
-                $rankedRows = $this->rankedRows($index, $rankedPlan['rank'], $rankedPlan['key'], $params);
-            }
-
-            $stmt = null;
-            if ($rankedRows === null) {
-                $stmt = $this->connection->prepare($sql);
-                $stmt->execute($params);
-            }
-            $nextRow = $rankedRows !== null
-                ? function () use (&$rankedRows) {
-                    $row = current($rankedRows);
-                    next($rankedRows);
-
-                    return $row;
-                }
-                : function () use ($stmt) {
-                    return $stmt->fetch();
-                };
-
-            $results = [];
-            $radiusFilter = null;
-
-            // Check if we're using multi-column FTS
-            $isMultiColumn = $this->getIndexMeta($index, 'multi_column_fts') === '1';
-
-            // Check if we need to do radius post-filtering (ensure meters)
-            if (isset($geoFilters['near'])) {
-                $radiusFilter = (float)$geoFilters['near']['radius'];
-                $units = $geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? null);
-                if (is_string($units)) {
-                    $u = strtolower($units);
-                    if ($u === 'km') {
-                        $radiusFilter *= 1000.0;
-                    } elseif ($u === 'mi' || $u === 'mile' || $u === 'miles') {
-                        $radiusFilter *= 1609.344;
-                    }
-                }
-            }
-            // max_distance trims distance-sorted results by the same rule; SQL applies it
-            // when it can compute the distance, this covers the fallback without SQL math
-            if (isset($geoFilters['max_distance']) && !isset($geoFilters['near'])) {
-                $radiusFilter = $this->geoDistanceToMeters((float)$geoFilters['max_distance'], $geoFilters);
-            }
-
-            $rowCount = 0;
-            // Determine a reference point for distance if needed
-            $refPoint = null;
-            if (isset($geoFilters['distance_sort']['from'])) {
-                $from = $geoFilters['distance_sort']['from'];
-                $refPoint = is_array($from) ? new GeoPoint($from['lat'], $from['lng']) : $from;
-            } elseif (isset($geoFilters['near']['point'])) {
-                $from = $geoFilters['near']['point'];
-                $refPoint = is_array($from) ? new GeoPoint($from['lat'], $from['lng']) : $from;
-            }
-
-            while ($row = $nextRow()) {
-                $rowCount++;
-                $content = json_decode($row['content'], true);
-                $baseScore = abs($row['rank']);
-
-                // Apply field weights if provided
-                // Even in multi-column mode, we should apply additional weighting for exact matches
-                if (!empty($fieldWeights) && $hasSearchQuery && is_array($content)) {
-                    // Apply post-processing field weights for better exact match scoring
-                    $weightedScore = $this->calculateFieldWeightedScore($searchQuery, $content, $fieldWeights, $baseScore);
-                    $finalScore = $weightedScore;
+                } elseif (in_array($field, ['type', 'language', 'id', 'timestamp'], true)) {
+                    $order[] = "d.{$field} {$dir}";
                 } else {
-                    // No field weights configured
-                    $finalScore = $baseScore;
+                    // Ordered as SQLite orders the values json_extract() gives: the numbers first, by
+                    // value, then the strings, as text, so names and ISO dates sort as they read
+                    $order[] = $this->jsonFieldSql((string)$field) . " {$dir}";
                 }
-
-                // Merge content fields directly into result
-                $result = array_merge($content ?: [], [
-                    'id' => $row['id'],
-                    'score' => $finalScore,
-                    'metadata' => json_decode($row['metadata'], true),
-                    'language' => $row['language'],
-                    'type' => $row['type'],
-                    'timestamp' => $row['timestamp']
-                ]);
-
-                // Add or compute distance
-                $distance = null;
-                if (isset($row['distance'])) {
-                    $distance = (float)$row['distance'];
-                } elseif ($refPoint && isset($row['_centroid_lat'], $row['_centroid_lng'])) {
-                    $pt = new GeoPoint((float)$row['_centroid_lat'], (float)$row['_centroid_lng']);
-                    $distance = $refPoint->distanceTo($pt);
-                }
-                if ($distance !== null) {
-                    if ($radiusFilter !== null && $distance > $radiusFilter) {
-                        continue;
-                    }
-                    $result['distance'] = $distance;
-                }
-
-                $results[] = $result;
             }
-
-            // Re-sort results if field weights were applied (only in single-column mode)
-            if (!$isMultiColumn && !empty($fieldWeights) && $hasSearchQuery) {
-                usort($results, function ($a, $b) {
-                    // Sort by score descending (highest score first)
-                    return $b['score'] <=> $a['score'];
-                });
-
-                // Apply the actual limit after sorting
-                $results = array_slice($results, 0, $limit);
-            }
-
-            // Apply PHP sorting if needed
-            if ($needsPhpSort) {
-                // Determine sort field and direction
-                $sortField = 'distance';
-                $sortDir = 'ASC';
-
-                if (isset($geoFilters['distance_sort'])) {
-                    $sortDir = strtoupper($geoFilters['distance_sort']['direction']) === 'DESC' ? 'DESC' : 'ASC';
-                } elseif (isset($sort['distance'])) {
-                    $sortDir = strtoupper($sort['distance']) === 'DESC' ? 'DESC' : 'ASC';
-                }
-
-                // Sort results by distance
-                usort($results, function ($a, $b) use ($sortDir) {
-                    $distA = $a['distance'] ?? PHP_FLOAT_MAX;
-                    $distB = $b['distance'] ?? PHP_FLOAT_MAX;
-
-                    if ($sortDir === 'ASC') {
-                        return $distA <=> $distB;
-                    } else {
-                        return $distB <=> $distA;
-                    }
-                });
-
-                // Apply pagination after sorting
-                $results = array_slice($results, $offset, $limit);
-            }
-
-            // Cache the results before returning, unless the query asked to bypass the cache
-            if ($this->queryCache && !($query['bypass_cache'] ?? false)) {
-                $this->queryCache->set($index, $query, $results);
-            }
-
-            return $results;
-        } catch (\PDOException $e) {
-            throw new StorageException("Search failed: " . $e->getMessage());
         }
+        $sql .= " ORDER BY " . (empty($order) ? 'rank ASC' : implode(', ', $order));
+
+        // Field weights re-rank the best matches by the fields they are found in, so the page is
+        // taken from those after they are scored, as is a page ordered by distance in PHP
+        $rerank = $fieldWeighted && empty($order) && !$phpDistanceSort;
+        if ($phpDistanceSort) {
+            // Dynamic default: 20x limit (min 200), capped at 1000; override with candidate_cap
+            $sqlLimit = min(1000, max($limit * 20, 200));
+            if (isset($geoFilters['candidate_cap'])) {
+                $sqlLimit = min($sqlLimit, max(10, (int)$geoFilters['candidate_cap']));
+            }
+        } elseif ($rerank) {
+            // Kept conservative to avoid large memory/CPU spikes on big indexes, but never short of the page
+            $multiplier = max(1, (int)($query['field_weight_candidate_multiplier'] ?? $this->searchConfig['field_weight_candidate_multiplier'] ?? 20));
+            $minCandidates = max(1, (int)($query['field_weight_candidate_min'] ?? $this->searchConfig['field_weight_candidate_min'] ?? 200));
+            $maxCandidates = max($minCandidates, (int)($query['field_weight_candidate_max'] ?? $this->searchConfig['field_weight_candidate_max'] ?? 2000));
+            $sqlLimit = min(max(($offset + $limit) * $multiplier, $minCandidates), $maxCandidates);
+            if (isset($query['field_weight_candidate_cap'])) {
+                $sqlLimit = min($sqlLimit, max(1, (int)$query['field_weight_candidate_cap']));
+            }
+            $sqlLimit = max($sqlLimit, $offset + $limit);
+        } else {
+            $sqlLimit = $limit;
+        }
+        $sqlOffset = $phpDistanceSort || $rerank ? 0 : $offset;
+        $sql .= " LIMIT ? OFFSET ?";
+        $params[] = $sqlLimit;
+        $params[] = $sqlOffset;
+
+        // Debug mode: return SQL and params without executing
+        if (!empty($query['_debug_sql'])) {
+            return [
+                '_sql' => $sql,
+                '_params' => $params,
+                '_uses_php_sort' => $phpDistanceSort,
+                '_spatial_select' => $spatial['select'],
+            ];
+        }
+
+        // A first page with nothing but text (no filter, language, location or sort) is ranked
+        // on the FTS table alone, and only the documents of the page are read
+        $rows = null;
+        if (
+            $sqlOffset === 0 && $rankedPlan !== null && $sql === $rankedPlan['plain']
+            && $params === [$rankedPlan['match'], $sqlLimit, $sqlOffset]
+        ) {
+            $rows = $this->rankedRows($index, $rankedPlan['rank'], $rankedPlan['key'], $params);
+        }
+        if ($rows === null) {
+            $rows = $this->connection->prepare($sql);
+            $rows->execute($params);
+        }
+
+        // Rows farther than the radius (or max_distance) are left out; SQL has done it when it can
+        // compute the distance, this covers the fallback without SQL math
+        $radius = $geoFilters['near']['radius'] ?? $geoFilters['max_distance'] ?? null;
+        $radius = $radius !== null ? $this->geoDistanceToMeters((float)$radius, $geoFilters) : null;
+        $refPoint = $geoFilters['distance_sort']['from'] ?? $geoFilters['near']['point'] ?? null;
+        if (is_array($refPoint)) {
+            $refPoint = new GeoPoint($refPoint['lat'], $refPoint['lng']);
+        }
+
+        $results = [];
+        foreach ($rows as $row) {
+            $content = json_decode($row['content'], true);
+            $score = abs($row['rank']);
+            // Even in multi-column mode, exact matches in the weighted fields add to the score
+            if ($fieldWeighted && is_array($content)) {
+                $language = $query['language'] ?? null;
+                $score = $this->calculateFieldWeightedScore($searchQuery, $content, $fieldWeights, $score, $language);
+            }
+            $result = $this->searchResult($row, $content, $score);
+
+            $distance = null;
+            if (isset($row['distance'])) {
+                $distance = (float)$row['distance'];
+            } elseif ($refPoint instanceof GeoPoint && isset($row['_centroid_lat'], $row['_centroid_lng'])) {
+                $distance = $refPoint->distanceTo(new GeoPoint((float)$row['_centroid_lat'], (float)$row['_centroid_lng']));
+            }
+            if ($distance !== null) {
+                if ($radius !== null && $distance > $radius) {
+                    continue;
+                }
+                $result['distance'] = $distance;
+            }
+
+            $results[] = $result;
+        }
+
+        // Rows that compare equal keep their SQL order, which PHP 7's sort does not
+        if ($rerank) {
+            uksort($results, function (int $a, int $b) use ($results): int {
+                return ($results[$b]['score'] <=> $results[$a]['score']) ?: $a <=> $b;
+            });
+        } elseif ($phpDistanceSort) {
+            uksort($results, function (int $a, int $b) use ($results, $distanceDir): int {
+                $nearer = ($results[$a]['distance'] ?? PHP_FLOAT_MAX) <=> ($results[$b]['distance'] ?? PHP_FLOAT_MAX);
+
+                return ($distanceDir === 'DESC' ? -$nearer : $nearer) ?: $a <=> $b;
+            });
+        }
+
+        return $rerank || $phpDistanceSort ? array_slice($results, $offset, $limit) : $results;
+    }
+
+    /**
+     * A row of the documents table in the form search() returns it: the content fields at the top
+     * level, as the engine reads them, and the document's own columns.
+     *
+     * @param array<string, mixed> $row
+     * @param mixed $content The decoded content
+     * @param int|float $score
+     * @return array<string, mixed>
+     */
+    private function searchResult(array $row, $content, $score): array
+    {
+        return array_merge(is_array($content) ? $content : [], [
+            'id' => $row['id'],
+            'score' => $score,
+            'metadata' => json_decode((string)$row['metadata'], true),
+            'language' => $row['language'],
+            'type' => $row['type'],
+            'timestamp' => $row['timestamp'],
+        ]);
+    }
+
+    /**
+     * The FROM and WHERE of a search, and of its count: the documents, joined to the FTS table when the
+     * query has text and to the spatial tables for a location, narrowed by the language and the filters.
+     * The parameters come in that order: the match query, the location's, the filters'.
+     *
+     * @param array{join: string, where: string, params: array, select: string} $spatial From buildSpatialQuery()
+     * @return array{0: string, 1: array}
+     */
+    private function searchSource(string $index, array $query, array $spatial): array
+    {
+        if (trim((string)($query['query'] ?? '')) === '') {
+            $sql = " FROM {$index} d{$spatial['join']} WHERE 1=1";
+            $params = [];
+        } else {
+            $join = $this->getSchemaMode($index) === 'external' ? 'f.rowid = d.doc_id' : 'd.id = f.id';
+            $sql = " FROM {$index} d INNER JOIN {$index}_fts f ON {$join}{$spatial['join']} WHERE {$index}_fts MATCH ?";
+            $params = [$this->matchQuery($index, $query)];
+        }
+        [$filterSql, $filterParams] = $this->filterSql($query['filters'] ?? [], $query['language'] ?? null);
+        $sql .= $spatial['where'] . $filterSql;
+        $params = array_merge($params, $spatial['params'], $filterParams);
+
+        // A search restricted to some fields keeps the documents with a word of its match query in
+        // one of them (see fieldsHoldWord()), which is given their values, those of a list or an
+        // object each, and no more of the document. A name that is no field name holds nothing.
+        $fields = (array)($query['fields'] ?? []);
+        if ($fields !== [] && trim((string)($query['query'] ?? '')) !== '') {
+            $texts = [];
+            foreach ($fields as $field) {
+                if (is_string($field) && preg_match('/^[a-zA-Z_][a-zA-Z0-9_.]*$/', $field)) {
+                    $values = "SELECT group_concat(value, ' ') FROM json_each(d.content, '$.{$field}')";
+                    $texts[] = "COALESCE(({$values}), '')";
+                }
+            }
+            if ($texts === []) {
+                $sql .= ' AND 0';
+            } else {
+                $sql .= ' AND yetisearch_fields_hold_word(' . implode(" || ' ' || ", $texts) . ', d.language, ?)';
+                $params[] = json_encode([
+                    'terms' => self::matchTerms($this->matchQuery($index, $query)),
+                    'language' => $this->stemmingSettings($index)['language'] ?? null,
+                ]);
+            }
+        }
+
+        return [$sql, $params];
+    }
+
+    /**
+     * The words of an FTS5 match expression, in the form fieldsHoldWord() compares them: those
+     * of its terms and phrases as the tokenizer reads them ('words'), the last of a term or
+     * phrase that ends with `*` as a prefix ('prefixes'), and the same for those under the
+     * `_stems` column ('stems', 'stem_prefixes'). Operators, column names and NEAR distances
+     * are left out.
+     *
+     * @return array{words: string[], prefixes: string[], stems: string[], stem_prefixes: string[]}
+     */
+    private static function matchTerms(string $match): array
+    {
+        $terms = ['words' => [], 'prefixes' => [], 'stems' => [], 'stem_prefixes' => []];
+        preg_match_all(
+            '/"(?<quoted>(?:[^"]|"")*)"(?<quotedPrefix>\*?)|,|\{[^}]*\}\s*:|(?<column>[A-Za-z_]\w*)\s*:'
+            . '|(?<bare>[^\s"(){}:,*^+]+)(?<barePrefix>\*?)/u',
+            $match,
+            $tokens,
+            PREG_SET_ORDER
+        );
+        $stems = false;
+        $afterComma = false;
+        foreach ($tokens as $token) {
+            $first = $token[0][0];
+            if ($first === ',' || $first === '{' || ($token['column'] ?? '') !== '') {
+                $afterComma = $first === ',';
+                $stems = ($token['column'] ?? '') === '_stems';
+                continue;
+            }
+            if ($first === '"') {
+                $text = str_replace('""', '"', $token['quoted']);
+                $prefix = $token['quotedPrefix'] === '*';
+            } else {
+                $text = $token['bare'];
+                $prefix = ($token['barePrefix'] ?? '') === '*';
+                // An operator, or the distance of a NEAR group
+                if (in_array($text, ['AND', 'OR', 'NOT', 'NEAR'], true) || ($afterComma && ctype_digit($text))) {
+                    $afterComma = false;
+                    continue;
+                }
+            }
+            $words = self::ftsWords($text);
+            $last = count($words) - 1;
+            foreach ($words as $i => $word) {
+                $asPrefix = $prefix && $i === $last;
+                $terms[$stems ? ($asPrefix ? 'stem_prefixes' : 'stems') : ($asPrefix ? 'prefixes' : 'words')][] = $word;
+            }
+            $stems = false;
+            $afterComma = false;
+        }
+
+        return array_map('array_values', array_map('array_unique', $terms));
+    }
+
+    /**
+     * The words of a text as the FTS tokenizer (unicode61, remove_diacritics=1) reads them: in
+     * lower case, a Latin letter with one accent without it, combining accents dropped, Greek
+     * letters of two forms in one (final sigma), split at every character that is not a letter,
+     * a digit or one of no category. It agrees with SQLite on every code point of the Latin,
+     * Greek and Cyrillic blocks but six letters newer than its case tables.
+     *
+     * @return string[]
+     */
+    private static function ftsWords(string $text): array
+    {
+        static $fold = null;
+        $text = mb_strtolower($text, 'UTF-8');
+        if (!preg_match('/[^\x00-\x7F]/', $text)) {
+            return preg_split('/[^a-z0-9]+/', $text, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+        }
+        if ($fold === null) {
+            $fold = array_combine(mb_str_split(self::ACCENTED, 1, 'UTF-8'), str_split(self::UNACCENTED)) + [
+                'ς' => 'σ', 'ſ' => 's', 'µ' => 'μ', 'ϐ' => 'β', 'ϑ' => 'θ', 'ϕ' => 'φ', 'ϖ' => 'π', 'ϰ' => 'κ',
+                'ϱ' => 'ρ', 'ϵ' => 'ε',
+            ];
+        }
+        $text = strtr((string)preg_replace('/[\x{0300}-\x{036F}]+/u', '', $text), $fold);
+
+        return preg_split('/[^\p{L}\p{N}\p{Co}\p{Cn}]+/u', $text, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+    }
+
+    /**
+     * Whether the text of the fields a search is restricted to holds a word of its match query: a
+     * word as typed, a word that begins with one of its prefixes, or, on an index that stems,
+     * a word whose stem is one of its stems. SQLite calls it for each document the match query
+     * finds (as yetisearch_fields_hold_word()), so the restriction holds in one column for all
+     * fields, in one per field, and for the stems of all fields kept in one column alike, and
+     * the count, facets and aggregations of a search agree with its results.
+     *
+     * @param string $restriction JSON: the terms of matchTerms(), the index's stemming language
+     */
+    private function fieldsHoldWord(string $text, ?string $language, string $restriction): bool
+    {
+        if (($this->fieldRestriction[0] ?? null) !== $restriction) {
+            $spec = json_decode($restriction, true);
+            if (is_array($spec)) {
+                $spec['words'] = array_flip($spec['terms']['words']);
+                $spec['stems'] = array_flip($spec['terms']['stems']);
+            }
+            $this->fieldRestriction = [$restriction, $spec];
+        }
+        $spec = $this->fieldRestriction[1];
+        if ($text === '' || !is_array($spec)) {
+            return false;
+        }
+        $terms = $spec['terms'];
+        $words = $spec['words'];
+        $stems = $spec['stems'];
+        $holds = static function (array $tokens, array $exact, array $prefixes): bool {
+            foreach ($tokens as $token) {
+                if (isset($exact[$token])) {
+                    return true;
+                }
+                foreach ($prefixes as $prefix) {
+                    if (strncmp($token, $prefix, strlen($prefix)) === 0) {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        };
+
+        if ($holds(self::ftsWords($text), $words, $terms['prefixes'])) {
+            return true;
+        }
+
+        if ($stems === [] && $terms['stem_prefixes'] === []) {
+            return false;
+        }
+        $stemmed = self::ftsWords($this->buildStems([$text], $language, $spec['language']));
+
+        return $holds($stemmed, $stems, $terms['stem_prefixes']);
+    }
+
+    /**
+     * What the FTS table is matched with: on an index that stems, the stem query when the search
+     * has one, and otherwise the query as given.
+     */
+    private function matchQuery(string $index, array $query): string
+    {
+        return !empty($query['stem_query']) && is_string($query['stem_query']) && $this->indexStems($index)
+            ? $query['stem_query']
+            : (string)($query['query'] ?? '');
     }
 
     /**
@@ -1871,86 +1986,103 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         $this->ensureConnected();
         $this->syncIndexCaches();
 
-        $searchQuery = $query['query'] ?? '';
-        $filters = $query['filters'] ?? [];
-        $language = $query['language'] ?? null;
-        $geoFilters = $query['geoFilters'] ?? [];
-
-        // Build spatial query components
-        $spatial = $this->buildSpatialQuery($index, $geoFilters);
-
-        // Check if we have a search query
-        $hasSearchQuery = !empty(trim($searchQuery));
-
-        if ($hasSearchQuery) {
-            $schema = $this->getSchemaMode($index);
-            $matchQuery = !empty($query['stem_query']) && is_string($query['stem_query']) && $this->indexStems($index)
-                ? $query['stem_query']
-                : $searchQuery;
-            if ($schema === 'external') {
-                $inner = "SELECT d.id" . $spatial['select'] . " FROM {$index} d INNER JOIN {$index}_fts f ON f.rowid = d.doc_id" . $spatial['join'] . " WHERE {$index}_fts MATCH ?" . $spatial['where'];
-            } else {
-                $inner = "SELECT d.id" . $spatial['select'] . " FROM {$index} d INNER JOIN {$index}_fts f ON d.id = f.id" . $spatial['join'] . " WHERE {$index}_fts MATCH ?" . $spatial['where'];
-            }
-            $params = array_merge([$matchQuery], $spatial['params']);
-
-            // Apply language and filters inside the inner query (so columns/JSON are available)
-            if ($language) {
-                $inner .= " AND d.language = ?";
-                $params[] = $language;
-            }
-            foreach ($filters as $filter) {
-                [$filterSql, $filterParams] = $this->buildFilterClause($filter);
-                if ($filterSql !== '') {
-                    $inner .= $filterSql;
-                    $params = array_merge($params, $filterParams);
-                }
-            }
-
-            if (isset($geoFilters['near']) && !empty($spatial['select']) && strpos($spatial['select'], 'distance') !== false) {
-                $radius = (float)$geoFilters['near']['radius'];
-                $units = $geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? null);
-                if (is_string($units)) {
-                    $u = strtolower($units);
-                    if ($u === 'km') {
-                        $radius *= 1000.0;
-                    } elseif (in_array($u, ['mi','mile','miles'])) {
-                        $radius *= 1609.344;
-                    }
-                }
-                $sql = "SELECT COUNT(*) as total FROM (" . $inner . ") t WHERE t.distance <= CAST(? AS REAL)";
-                $params[] = $radius;
-            } else {
-                $sql = "SELECT COUNT(*) as total FROM (" . $inner . ") t";
-            }
-        } else {
-            $sql = "
-                SELECT COUNT(*) as total
-                FROM {$index} d" .
-                (!empty($spatial['join']) ? $spatial['join'] : "") . "
-                WHERE 1=1" . $spatial['where'] . "
-            ";
-            $params = $spatial['params'];
-            if ($language) {
-                $sql .= " AND d.language = ?";
-                $params[] = $language;
-            }
-            foreach ($filters as $filter) {
-                [$filterSql, $filterParams] = $this->buildFilterClause($filter);
-                if ($filterSql !== '') {
-                    $sql .= $filterSql;
-                    $params = array_merge($params, $filterParams);
-                }
-            }
-        }
+        [$source, $params] = $this->searchSource($index, $query, $this->buildSpatialQuery($index, $query['geoFilters'] ?? []));
 
         try {
-            $stmt = $this->connection->prepare($sql);
+            $stmt = $this->connection->prepare('SELECT COUNT(*)' . $source);
             $stmt->execute($params);
 
             return (int) $stmt->fetchColumn();
         } catch (\PDOException $e) {
             throw new StorageException("Count failed: " . $e->getMessage());
+        }
+    }
+
+    public function fieldValues(string $index, array $query, array $fields): iterable
+    {
+        $this->validateIndexName($index);
+        $this->ensureConnected();
+        $this->syncIndexCaches();
+
+        // Each field is read from up to two places, each as its value and its JSON type
+        $select = [];
+        $places = [];
+        foreach (array_values(array_unique(array_map('strval', $fields))) as $i => $field) {
+            if (in_array($field, ['id', 'language', 'type', 'timestamp'], true)) {
+                $places[$field] = [["d.{$field}", null]];
+            } elseif (strpos($field, 'metadata.') === 0) {
+                $places[$field] = [['d.metadata', substr($field, 9)]];
+            } else {
+                $path = strpos($field, 'content.') === 0 ? substr($field, 8) : $field;
+                $places[$field] = [['d.content', $path]];
+                if ($path === $field) {
+                    $places[$field][] = ['d.metadata', $path];
+                }
+            }
+            foreach ($places[$field] as $j => [$column, $path]) {
+                if ($path === null) {
+                    $select[] = "{$column} AS v{$i}_{$j}, NULL AS t{$i}_{$j}";
+                } else {
+                    $this->validateFieldName($path);
+                    $select[] = "json_extract({$column}, '$.{$path}') AS v{$i}_{$j},"
+                        . " json_type({$column}, '$.{$path}') AS t{$i}_{$j}";
+                }
+            }
+        }
+        if ($select === []) {
+            return;
+        }
+
+        $spatial = $this->buildSpatialQuery($index, $query['geoFilters'] ?? []);
+        [$source, $params] = $this->searchSource($index, $query, $spatial);
+        try {
+            $stmt = $this->connection->prepare('SELECT ' . implode(', ', $select) . $source);
+            $stmt->execute($params);
+        } catch (\PDOException $e) {
+            throw new StorageException("Reading field values failed: " . $e->getMessage());
+        }
+
+        while ($row = $stmt->fetch(\PDO::FETCH_ASSOC)) {
+            $values = [];
+            foreach (array_keys($places) as $i => $field) {
+                $values[$field] = null;
+                foreach (array_keys($places[$field]) as $j) {
+                    $value = self::jsonValue($row["v{$i}_{$j}"], $row["t{$i}_{$j}"]);
+                    if ($value !== null) {
+                        $values[$field] = $value;
+                        break;
+                    }
+                }
+            }
+            yield $values;
+        }
+    }
+
+    /**
+     * A value json_extract() gave, as json_decode() would give it: lists and objects decoded, and
+     * numbers and booleans of their type whatever PDO returned them as
+     *
+     * @param mixed $value
+     * @return mixed
+     */
+    private static function jsonValue($value, ?string $type)
+    {
+        switch ($type) {
+            case 'array':
+            case 'object':
+                return json_decode((string)$value, true);
+            case 'integer':
+                return (int)$value;
+            case 'real':
+                return (float)$value;
+            case 'true':
+                return true;
+            case 'false':
+                return false;
+            case 'null':
+                return null;
+            default:
+                return $value;
         }
     }
 
@@ -2078,44 +2210,73 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
 
     /**
      * Migrate a legacy index (string id PK) to external-content/doc_id schema.
-     * - Creates a docs2 table with INTEGER PRIMARY KEY doc_id and UNIQUE id
-     * - Copies all rows, swaps tables, sets schema_mode meta to 'external'
-     * - Recreates spatial table without id_map
+     * - Copies all rows into a table with INTEGER PRIMARY KEY doc_id and UNIQUE id, which
+     *   replaces the legacy table and gets its indexes on language, type and timestamp
+     * - Sets schema_mode meta to 'external'
+     * - Keys the spatial rows by doc_id, and drops the id_map they were keyed through
      * - Rebuilds FTS content
+     * An index that already has a doc_id column has nothing to migrate.
      */
     public function migrateToExternalContent(string $index): void
     {
         $this->validateIndexName($index);
         $this->ensureConnected();
         $this->syncIndexCaches();
+        $columns = $this->connection->query("PRAGMA table_info({$index})")->fetchAll(\PDO::FETCH_COLUMN, 1);
+        if (in_array('doc_id', $columns, true)) {
+            return;
+        }
+        $ownTransaction = null;
         try {
-            $this->connection->beginTransaction();
+            $ownTransaction = $this->beginWrite();
 
             // Create new table with doc_id
             $this->connection->exec("CREATE TABLE IF NOT EXISTS {$index}_docs2 (doc_id INTEGER PRIMARY KEY, id TEXT UNIQUE, content TEXT NOT NULL, metadata TEXT, language TEXT, type TEXT DEFAULT 'default', timestamp INTEGER)");
             $this->connection->exec("INSERT INTO {$index}_docs2 (id, content, metadata, language, type, timestamp) SELECT id, content, metadata, language, type, timestamp FROM {$index}");
 
-            // Swap tables
-            $this->connection->exec("ALTER TABLE {$index} RENAME TO {$index}_old");
+            // The locations, keyed by the numbers of the id map, are read under their doc_id
+            $spatial = $this->tableExists("{$index}_spatial") || $this->tableExists("{$index}_id_map");
+            $locations = $spatial && $this->tableExists("{$index}_id_map")
+                ? $this->connection->query(
+                    "SELECT d.doc_id, s.minLat, s.maxLat, s.minLng, s.maxLng FROM {$index}_spatial s"
+                    . " JOIN {$index}_id_map m ON m.numeric_id = s.id JOIN {$index}_docs2 d ON d.id = m.string_id"
+                )->fetchAll(\PDO::FETCH_NUM)
+                : [];
+
+            // Swap tables. The legacy one goes with its indexes, whose names the new table takes.
+            $this->connection->exec("DROP TABLE {$index}");
             $this->connection->exec("ALTER TABLE {$index}_docs2 RENAME TO {$index}");
+            foreach (['language', 'type', 'timestamp'] as $column) {
+                $this->connection->exec("CREATE INDEX IF NOT EXISTS idx_{$index}_{$column} ON {$index}({$column})");
+            }
 
             // Ensure meta table and set schema mode
             $this->connection->exec("CREATE TABLE IF NOT EXISTS {$index}_meta (key TEXT PRIMARY KEY, value TEXT)");
             $this->setIndexMeta($index, 'schema_mode', 'external');
 
-            // Recreate spatial; drop legacy id_map
+            // Recreate spatial, unless the index was made without it; drop legacy id_map
             $this->connection->exec("DROP TABLE IF EXISTS {$index}_spatial");
             $this->connection->exec("DROP TABLE IF EXISTS {$index}_id_map");
-            if ($this->hasRTreeSupport()) {
-                $this->connection->exec("CREATE VIRTUAL TABLE {$index}_spatial USING rtree(id, minLat, maxLat, minLng, maxLng)");
-            } else {
-                $this->connection->exec("CREATE TABLE {$index}_spatial (id INTEGER PRIMARY KEY, minLat REAL, maxLat REAL, minLng REAL, maxLng REAL)");
+            if ($spatial) {
+                if ($this->hasRTreeSupport()) {
+                    $this->connection->exec("CREATE VIRTUAL TABLE {$index}_spatial USING rtree(id, minLat, maxLat, minLng, maxLng)");
+                } else {
+                    $this->connection->exec("CREATE TABLE {$index}_spatial (id INTEGER PRIMARY KEY, minLat REAL, maxLat REAL, minLng REAL, maxLng REAL)");
+                }
+                $insert = $this->connection->prepare(
+                    "INSERT INTO {$index}_spatial (id, minLat, maxLat, minLng, maxLng) VALUES (?, ?, ?, ?, ?)"
+                );
+                foreach ($locations as $location) {
+                    $insert->execute($location);
+                }
             }
 
-            $this->connection->commit();
+            $this->endWrite($ownTransaction);
         } catch (\Throwable $e) {
-            $this->connection->rollBack();
+            $this->abortWrite($ownTransaction, $index);
             throw new StorageException('Migration to external-content failed: ' . $e->getMessage());
+        } finally {
+            unset($this->spatialRowsKnown[$index]);
         }
 
         // Rebuild FTS after structure change
@@ -2127,47 +2288,15 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         $this->ensureConnected();
 
         $indices = [];
-
         try {
-            // Query for all tables that match our index pattern
-            $stmt = $this->connection->query("
-                SELECT name 
-                FROM sqlite_master 
-                WHERE type = 'table' 
-                AND name NOT LIKE '%_fts' 
-                AND name NOT LIKE '%_terms'
-                AND name NOT LIKE 'sqlite_%'
-                ORDER BY name
-            ");
-
-            while ($row = $stmt->fetch()) {
-                $tableName = $row['name'];
-
-                // Validate table name before using in queries
-                if (!preg_match('/^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/', $tableName)) {
-                    continue;
-                }
-
-                // Verify this is a valid index by checking for corresponding FTS table
-                $ftsCheck = $this->connection->prepare("
-                    SELECT COUNT(*)
-                    FROM sqlite_master
-                    WHERE type = 'table'
-                    AND name = ?
-                ");
-                $ftsCheck->execute([$tableName . '_fts']);
-                $ftsExists = $ftsCheck->fetchColumn() > 0;
-
-                if ($ftsExists) {
-                    // Get additional metadata about the index
-                    $stats = $this->getIndexStats($tableName);
-                    $indices[] = [
-                        'name' => $tableName,
-                        'document_count' => $stats['document_count'],
-                        'languages' => array_keys($stats['languages']),
-                        'types' => array_keys($stats['types'])
-                    ];
-                }
+            foreach ($this->getIndexNames() as $name) {
+                $stats = $this->getIndexStats($name);
+                $indices[] = [
+                    'name' => $name,
+                    'document_count' => $stats['document_count'],
+                    'languages' => array_keys($stats['languages']),
+                    'types' => array_keys($stats['types'])
+                ];
             }
         } catch (\PDOException $e) {
             throw new StorageException("Failed to list indices: " . $e->getMessage());
@@ -2188,8 +2317,9 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         $this->ensureConnected();
         $this->syncIndexCaches();
 
+        $ownTransaction = null;
         try {
-            $this->connection->beginTransaction();
+            $ownTransaction = $this->beginWrite();
 
             // Delete all documents from the index
             $this->connection->exec("DELETE FROM {$index}");
@@ -2218,9 +2348,9 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 $this->setIndexMeta($index, self::FTS_BUILT_BY_KEY, self::FTS_BUILT_BY);
             }
 
-            $this->connection->commit();
+            $this->endWrite($ownTransaction);
         } catch (\PDOException $e) {
-            $this->connection->rollBack();
+            $this->abortWrite($ownTransaction, $index);
             throw new StorageException("Failed to clear index: " . $e->getMessage());
         }
         unset($this->spatialRowsKnown[$index]);
@@ -2232,9 +2362,13 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         $this->ensureConnected();
         $this->syncIndexCaches();
 
+        $searchTime = microtime(true);
+        $limit = (int)($query['limit'] ?? 20);
+        $offset = max(0, (int)($query['offset'] ?? 0));
+        // Each index gives its best offset + limit, among which are all the results of the merged page
+        $indexQuery = ['limit' => $offset + $limit, 'offset' => 0] + $query;
         $allResults = [];
         $totalCount = 0;
-        $searchTime = microtime(true);
         $searchedIndices = [];
 
         // Search each index
@@ -2245,7 +2379,8 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             $searchedIndices[] = $indexName;
 
             try {
-                $results = $this->search($indexName, $query);
+                $results = $this->search($indexName, $indexQuery);
+                $totalCount += $this->count($indexName, $query);
 
                 // Add index name to each result
                 foreach ($results as $result) {
@@ -2262,27 +2397,15 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             }
         }
 
-        // Sort merged results by score/rank
-        usort($allResults, function ($a, $b) {
-            $scoreA = $a['score'] ?? $a['rank'] ?? $a['_score'] ?? 0;
-            $scoreB = $b['score'] ?? $b['rank'] ?? $b['_score'] ?? 0;
-            return $scoreB <=> $scoreA; // Descending order
-        });
-
-        // Apply limit and offset to merged results
-        $limit = $query['limit'] ?? 20;
-        $offset = $query['offset'] ?? 0;
-        $totalCount = count($allResults);
-        $allResults = array_slice($allResults, $offset, $limit);
-
-        // Calculate search time
-        $searchTime = round((microtime(true) - $searchTime) * 1000, 2);
+        // Highest score first; results of the same score keep their order, which PHP 7's sort does not
+        $scores = array_map(fn(array $r) => $r['score'] ?? $r['rank'] ?? $r['_score'] ?? 0, $allResults);
+        uksort($allResults, fn(int $a, int $b): int => ($scores[$b] <=> $scores[$a]) ?: $a <=> $b);
 
         // Return results in a format similar to single index search
         return [
-            'results' => $allResults,
+            'results' => array_slice($allResults, $offset, $limit),
             'total' => $totalCount,
-            'search_time' => $searchTime,
+            'search_time' => round((microtime(true) - $searchTime) * 1000, 2),
             'indices_searched' => $searchedIndices
         ];
     }
@@ -2364,7 +2487,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         );
         $now = time();
 
-        $this->connection->beginTransaction();
+        $ownTransaction = $this->beginWrite();
         try {
             foreach ($rows as $row) {
                 $stmt->bindValue(1, $row['id']);
@@ -2375,9 +2498,9 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 $stmt->bindValue(6, $now, \PDO::PARAM_INT);
                 $stmt->execute();
             }
-            $this->connection->commit();
+            $this->endWrite($ownTransaction);
         } catch (\PDOException $e) {
-            $this->connection->rollBack();
+            $this->abortWrite($ownTransaction);
             throw new StorageException("Failed to store vectors: " . $e->getMessage());
         }
         $this->indexChanged($index, false);
@@ -2477,15 +2600,16 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     }
 
     /**
-     * Filters as the " AND ..." clauses buildFilterClause() writes, joined,
-     * with their parameters.
+     * The language, when given, and the filters as the " AND ..." clauses buildFilterClause()
+     * writes, joined, with their parameters.
      *
+     * @param mixed $language
      * @return array{0:string, 1:array}
      */
-    private function filterSql(array $filters): array
+    private function filterSql(array $filters, $language = null): array
     {
-        $sql = '';
-        $params = [];
+        $sql = $language ? " AND d.language = ?" : '';
+        $params = $language ? [$language] : [];
         foreach ($filters as $filter) {
             [$filterSql, $filterParams] = $this->buildFilterClause($filter);
             if ($filterSql !== '') {
@@ -2768,6 +2892,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         if (empty($vectors)) {
             return;
         }
+        $ownTransaction = null;
         try {
             $this->ensureCalibrationTables();
             $stmt = $this->connection->prepare(
@@ -2775,7 +2900,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 . " VALUES (?, ?, ?, ?, ?)"
             );
             $now = time();
-            $this->connection->beginTransaction();
+            $ownTransaction = $this->beginWrite();
             foreach ($vectors as $text => $vector) {
                 $stmt->bindValue(1, $model);
                 $stmt->bindValue(2, $frame);
@@ -2784,11 +2909,9 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 $stmt->bindValue(5, $now, \PDO::PARAM_INT);
                 $stmt->execute();
             }
-            $this->connection->commit();
+            $this->endWrite($ownTransaction);
         } catch (\PDOException $e) {
-            if ($this->connection->inTransaction()) {
-                $this->connection->rollBack();
-            }
+            $this->abortWrite($ownTransaction);
             throw new StorageException("Failed to cache probe embeddings: " . $e->getMessage());
         }
     }
@@ -2926,18 +3049,40 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     {
         $stmt = $this->connection->prepare("INSERT OR REPLACE INTO {$index}_meta (key, value) VALUES (?, ?)");
         $stmt->execute([$key, $value]);
+        unset($this->batchMemo['meta']["{$index}\0{$key}"]);
     }
 
     private function getIndexMeta(string $index, string $key): ?string
     {
+        $memoKey = "{$index}\0{$key}";
+        if ($this->batchMemo !== null && array_key_exists($memoKey, $this->batchMemo['meta'])) {
+            return $this->batchMemo['meta'][$memoKey];
+        }
         try {
-            $stmt = $this->connection->prepare("SELECT value FROM {$index}_meta WHERE key = ?");
+            $stmt = $this->batchStatement("SELECT value FROM {$index}_meta WHERE key = ?");
             $stmt->execute([$key]);
-            $row = $stmt->fetch();
-            return $row ? $row['value'] : null;
+            $value = $stmt->fetchColumn();
         } catch (\PDOException $e) {
             return null;
         }
+        $value = $value === false ? null : (string)$value;
+        if ($this->batchMemo !== null) {
+            $this->batchMemo['meta'][$memoKey] = $value;
+        }
+
+        return $value;
+    }
+
+    /**
+     * A prepared statement, prepared once per insertBatch() call
+     */
+    private function batchStatement(string $sql): \PDOStatement
+    {
+        if ($this->batchMemo === null) {
+            return $this->connection->prepare($sql);
+        }
+
+        return $this->batchMemo['sql'][$sql] ?? ($this->batchMemo['sql'][$sql] = $this->connection->prepare($sql));
     }
 
     /**
@@ -3109,19 +3254,38 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     }
 
     /**
-     * The content of a document as it reads back from the JSON that is stored.
+     * The content of a document as it reads back from $json, the JSON that is stored for it. An
+     * array of strings reads back as it is, unless the encoding replaced invalid UTF-8 in it
+     * (which it writes as \ufffd), so only other content is decoded again.
      *
+     * @param mixed $content
+     * @return mixed
      * @throws StorageException If it does not decode, which would index nothing for a document
      *                          that is stored
      */
-    private function decodeContent(string $json, string $id)
+    private function storedContent($content, string $json, string $id)
     {
+        if (is_array($content) && strpos($json, '\ufffd') === false && self::holdsOnlyStrings($content)) {
+            return $content;
+        }
+
         $content = json_decode($json, true);
         if (json_last_error() !== JSON_ERROR_NONE) {
             throw new StorageException("Failed to read back the content of document '{$id}': " . json_last_error_msg());
         }
 
         return $content;
+    }
+
+    private static function holdsOnlyStrings(array $value): bool
+    {
+        foreach ($value as $item) {
+            if (!is_string($item) && !(is_array($item) && self::holdsOnlyStrings($item))) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private function getSchemaMode(string $index): string
@@ -3136,7 +3300,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     private function getDocId(string $index, string $stringId): ?int
     {
         try {
-            $stmt = $this->connection->prepare("SELECT doc_id FROM {$index} WHERE id = ?");
+            $stmt = $this->batchStatement("SELECT doc_id FROM {$index} WHERE id = ?");
             $stmt->execute([$stringId]);
             $val = $stmt->fetchColumn();
             if ($val === false || $val === null) {
@@ -3171,7 +3335,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     {
         $stemsSql = $this->indexStems($index) ? ', _stems' : '';
         try {
-            $stmt = $this->connection->prepare("SELECT doc_id, content, metadata{$stemsSql} FROM {$index} WHERE id = ?");
+            $stmt = $this->batchStatement("SELECT doc_id, content, metadata{$stemsSql} FROM {$index} WHERE id = ?");
             $stmt->execute([$id]);
             $row = $stmt->fetch(\PDO::FETCH_ASSOC);
         } catch (\PDOException $e) {
@@ -3540,10 +3704,13 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
      * write may have taken the mark with it.
      *
      * @param bool|null $ownTransaction What beginWrite() returned, or null if it was not reached
+     * @param string|null $index The index written to, null for a write to no index's FTS table
      */
-    private function abortWrite(?bool $ownTransaction, string $index): void
+    private function abortWrite(?bool $ownTransaction, ?string $index = null): void
     {
-        unset($this->ftsBuiltCache[$index]);
+        if ($index !== null) {
+            unset($this->ftsBuiltCache[$index]);
+        }
         if ($ownTransaction === null || !$this->connection->inTransaction()) {
             return;
         }
@@ -3605,7 +3772,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             ? ", detail='" . strtolower($detail) . "'"
             : '';
         $ftsAllColumns = $stemming ? array_merge($ftsColumns, ['_stems']) : $ftsColumns;
-        $cols = implode(', ', $ftsAllColumns);
+        $cols = self::columnList($ftsAllColumns);
 
         $ownTransaction = !$this->connection->inTransaction();
         try {
@@ -3637,7 +3804,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             $select = $this->connection->prepare(
                 "SELECT rowid AS _rid, id, content, metadata, language FROM {$index} WHERE rowid > ? ORDER BY rowid LIMIT 500"
             );
-            $insCols = ($schema === 'external' ? 'rowid, ' : 'id, ') . implode(', ', $ftsAllColumns);
+            $insCols = ($schema === 'external' ? 'rowid, ' : 'id, ') . self::columnList($ftsAllColumns);
             $placeholders = implode(', ', array_fill(0, count($ftsAllColumns) + 1, '?'));
             $ins = $this->connection->prepare("INSERT INTO {$index}_fts ({$insCols}) VALUES ({$placeholders})");
             $setStems = $schema === 'external' && $stemming
@@ -3700,16 +3867,31 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
 
     private function getFtsColumns(string $index): array
     {
-        if (isset($this->ftsColumnsCache[$index])) {
-            return $this->ftsColumnsCache[$index];
+        return $this->ftsLayout($index)['columns'];
+    }
+
+    private function isMultiColumnFts(string $index): bool
+    {
+        return $this->ftsLayout($index)['multi'];
+    }
+
+    /**
+     * The FTS columns of an index and whether it has one per field. Both are written when the
+     * index is made, and are read once until it is made again or another connection writes.
+     *
+     * @return array{columns: string[], multi: bool}
+     */
+    private function ftsLayout(string $index): array
+    {
+        if (!isset($this->ftsColumnsCache[$index])) {
+            $columns = json_decode((string)$this->getIndexMeta($index, 'fts_columns'), true);
+            $this->ftsColumnsCache[$index] = [
+                'columns' => is_array($columns) && $columns !== [] ? $columns : ['content'],
+                'multi' => $this->getIndexMeta($index, 'multi_column_fts') === '1',
+            ];
         }
-        $value = $this->getIndexMeta($index, 'fts_columns');
-        if ($value) {
-            $cols = json_decode($value, true) ?: ['content'];
-        } else {
-            $cols = ['content'];
-        }
-        return $this->ftsColumnsCache[$index] = $cols;
+
+        return $this->ftsColumnsCache[$index];
     }
 
     private function isSpatialEnabled(string $index): bool
@@ -3725,8 +3907,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
 
     private function getFieldText(array $content, string $field, string $index): string
     {
-        // Check if we're in multi-column mode
-        $isMultiColumn = $this->getIndexMeta($index, 'multi_column_fts') === '1';
+        $isMultiColumn = $this->isMultiColumnFts($index);
         $cols = $this->getFtsColumns($index);
 
         // If in single-column mode (['content']), aggregate all fields
@@ -4087,18 +4268,8 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
 
             // Optional max_distance clamp (meters)
             if (isset($geoFilters['max_distance'])) {
-                $maxD = (float)$geoFilters['max_distance'];
-                $units = $geoFilters['units'] ?? ($this->searchConfig['geo_units'] ?? null);
-                if (is_string($units)) {
-                    $u = strtolower($units);
-                    if ($u === 'km') {
-                        $maxD *= 1000.0;
-                    } elseif ($u === 'mi' || $u === 'mile' || $u === 'miles') {
-                        $maxD *= 1609.344;
-                    }
-                }
                 $spatialSql .= " AND (" . $this->getDistanceExpression($lat, $lng) . ") <= CAST(? AS REAL)";
-                $spatialParams[] = $maxD;
+                $spatialParams[] = $this->geoDistanceToMeters((float)$geoFilters['max_distance'], $geoFilters);
             }
         }
 
@@ -4157,19 +4328,6 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         ];
     }
 
-    private function getNumericIdExpression(string $field): string
-    {
-        // For SQLite, we need a different approach since we can't reliably compute CRC32 in SQL
-        // We'll use a simple hash based on the first few characters
-        // This is less ideal but works for the join
-        return "CAST(
-            (unicode(substr({$field}, 1, 1)) * 1000000 + 
-             unicode(substr({$field}, 2, 1)) * 10000 + 
-             unicode(substr({$field}, 3, 1)) * 100 + 
-             unicode(substr({$field}, 4, 1)))
-        AS INTEGER)";
-    }
-
     private function getDistanceExpression(float $lat, float $lng, bool $useTablePrefix = true): string
     {
         // Prefer accurate Haversine if math functions are available; otherwise fallback to planar approx
@@ -4202,23 +4360,6 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         // Fallback: planar approx in meters
         $degToKm = 111.12; // km per degree
         return "\n            SQRT(\n                POWER(({$lat} - (({$minLat} + {$maxLat})/2.0)) * {$degToKm}, 2) +\n                POWER(({$lng} - (({$minLng} + {$maxLng})/2.0)) * {$degToKm} * COS((({$minLat} + {$maxLat})/2.0) * 0.0174533), 2)\n            ) * 1000.0\n        ";
-    }
-
-    // JSON/column-based distance expression (meters) for fallback without R-tree
-    private function getDistanceExpressionForLatLngColumns(float $lat, float $lng, string $latCol, string $lngCol): string
-    {
-        if ($this->hasMathFunctions) {
-            $r1 = "(" . $lat . " * (pi()/180.0))";
-            $t1 = "(" . $lng . " * (pi()/180.0))";
-            $r2 = "(" . $latCol . " * (pi()/180.0))";
-            $t2 = "(" . $lngCol . " * (pi()/180.0))";
-            $a  = "(pow(sin((" . $r2 . "-" . $r1 . ")/2.0),2) + cos(" . $r1 . ")*cos(" . $r2 . ")*pow(sin((" . $t2 . "-" . $t1 . ")/2.0),2))";
-            $distanceKm = "(2.0*6371.0*asin(min(1, sqrt(" . $a . "))))";
-            return "(" . $distanceKm . " * 1000.0)";
-        }
-        // Planar fallback
-        $degToKm = 111.12;
-        return "\n            SQRT(\n                POWER(({$lat} - ({$latCol})) * {$degToKm}, 2) +\n                POWER(({$lng} - ({$lngCol})) * {$degToKm} * COS(({$latCol}) * 0.0174533), 2)\n            ) * 1000.0\n        ";
     }
 
     public function ensureSpatialTableExists(string $name): void
@@ -4294,26 +4435,26 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     }
 
     /**
-     * Get all index names from the database
+     * The names of the indexes in the database, in order: the tables that have an `{name}_fts`
+     * table beside them. Told apart by that table, and not by what a name ends with, an index
+     * named `drafts` or `midterms` is one, and the tables of an index (`{name}_meta`,
+     * `{name}_fts_data`) are not.
      *
-     * @return array Array of index names
+     * @return string[]
      */
     private function getIndexNames(): array
     {
-        $stmt = $this->connection->query("
-            SELECT DISTINCT name 
-            FROM sqlite_master 
-            WHERE type = 'table' 
-            AND name NOT LIKE '%_fts' 
-            AND name NOT LIKE '%_terms'
-            AND name NOT LIKE '%_vocab'
-            AND name NOT LIKE '%_spatial'
-            AND name NOT LIKE '%_id_map'
-            AND name NOT LIKE 'sqlite_%'
-            AND name != 'yetisearch_metadata'
-        ");
+        $tables = $this->connection->query("SELECT name FROM sqlite_master WHERE type = 'table'")->fetchAll(\PDO::FETCH_COLUMN);
+        $present = array_flip($tables);
+        $names = [];
+        foreach ($tables as $name) {
+            if (isset($present[$name . '_fts']) && preg_match('/^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/', $name)) {
+                $names[] = $name;
+            }
+        }
+        sort($names, SORT_STRING);
 
-        return $stmt->fetchAll(\PDO::FETCH_COLUMN);
+        return $names;
     }
 
     /**
@@ -4334,94 +4475,20 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 return [];
             }
 
-            $tables = $indexName ? [$indexName] : $this->getIndexNames();
             $allTerms = [];
-
-            foreach ($tables as $table) {
-                $termsTable = "{$table}_terms";
-
-                // Check if terms table exists
-                $stmt = $this->connection->prepare("
-                    SELECT name FROM sqlite_master 
-                    WHERE type='table' AND name=:table
-                ");
-                $stmt->execute([':table' => $termsTable]);
-
-                if ($stmt->fetch()) {
-                    // Use existing terms table (Levenshtein mode)
-                    $sql = "
-                        SELECT term, COUNT(*) as frequency
-                        FROM {$termsTable}
-                        GROUP BY term
-                        HAVING frequency >= :min_freq
-                        ORDER BY frequency DESC
-                        LIMIT :limit
-                    ";
-
-                    $stmt = $this->connection->prepare($sql);
-                    $stmt->execute([
-                        ':min_freq' => $minFrequency,
-                        ':limit' => $limit
-                    ]);
-
-                    while ($row = $stmt->fetch(\PDO::FETCH_ASSOC)) {
-                        $allTerms[$row['term']] = ($allTerms[$row['term']] ?? 0) + $row['frequency'];
-                    }
-                } else {
-                    // No terms table - try FTS5 vocabulary for other fuzzy algorithms.
-                    // An index that stems also holds the stems as terms, which are not
-                    // words to correct to, so it is read by column and leaves them out.
-                    $stems = $this->indexStems($table);
-                    $vocabTable = $stems ? "{$table}_fts_colvocab" : "{$table}_fts_vocab";
-
-                    // Check if vocab table exists
-                    $stmt = $this->connection->prepare("
-                        SELECT name FROM sqlite_master 
-                        WHERE type='table' AND name=:table
-                    ");
-                    $stmt->execute([':table' => $vocabTable]);
-
-                    if (!$stmt->fetch()) {
-                        // Create vocab table if it doesn't exist
-                        try {
-                            $this->connection->exec(
-                                "CREATE VIRTUAL TABLE {$vocabTable} USING fts5vocab('{$table}_fts', '" . ($stems ? 'col' : 'row') . "')"
-                            );
-                        } catch (\PDOException $e) {
-                            // Skip if can't create vocab table
-                            continue;
-                        }
-                    }
-
-                    // Query vocab table
-                    if ($stems) {
-                        $sql = "
-                            SELECT term, SUM(doc) as frequency
-                            FROM {$vocabTable}
-                            WHERE col != '_stems'
-                            GROUP BY term
-                            HAVING frequency >= ?
-                            ORDER BY frequency DESC
-                            LIMIT ?
-                        ";
-                    } else {
-                        $sql = "
-                            SELECT term, doc as frequency
-                            FROM {$vocabTable}
-                            WHERE doc >= ?
-                            ORDER BY doc DESC
-                            LIMIT ?
-                        ";
-                    }
-
-                    $stmt = $this->connection->prepare($sql);
-                    $stmt->bindValue(1, $minFrequency, \PDO::PARAM_INT);
-                    $stmt->bindValue(2, $limit, \PDO::PARAM_INT);
-                    $stmt->execute();
-
-                    while ($row = $stmt->fetch(\PDO::FETCH_ASSOC)) {
-                        $allTerms[$row['term']] = ($allTerms[$row['term']] ?? 0) + $row['frequency'];
-                    }
+            foreach ($indexName ? [$indexName] : $this->getIndexNames() as $table) {
+                $source = $this->termSource($table, '1');
+                if ($source === null) {
+                    continue;
+                }
+                $stmt = $this->connection->prepare(
+                    "SELECT term, frequency FROM ({$source}) WHERE frequency >= ? ORDER BY frequency DESC LIMIT ?"
+                );
+                $stmt->bindValue(1, $minFrequency, \PDO::PARAM_INT);
+                $stmt->bindValue(2, $limit, \PDO::PARAM_INT);
+                $stmt->execute();
+                foreach ($stmt->fetchAll(\PDO::FETCH_KEY_PAIR) as $term => $frequency) {
+                    $allTerms[$term] = ($allTerms[$term] ?? 0) + (int)$frequency;
                 }
             }
 
@@ -4433,40 +4500,81 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
         }
     }
 
-    /**
-     * Calculate field-weighted score based on which fields contain the search terms
-     */
-    private function calculateFieldWeightedScore(string $searchQuery, array $content, array $fieldWeights, float $baseScore): float
+    public function termsStartingWith(string $index, string $prefix, int $limit = 2000): array
     {
-        // Handle complex queries with phrases and OR operators
-        // Example: ("hello world" OR hello OR world) -> extract both phrase and individual terms
-        $searchTerms = [];
-        $exactPhrases = [];
+        $this->validateIndexName($index);
+        $this->ensureConnected();
+        $this->syncIndexCaches();
 
-        // Extract quoted phrases first
-        if (preg_match_all('/"([^"]+)"/', $searchQuery, $matches)) {
-            foreach ($matches[1] as $phrase) {
-                $exactPhrases[] = UTF8::strtolower($phrase);
+        try {
+            $source = $this->indexExists($index) ? $this->termSource($index, 'term >= ? AND term < ?') : null;
+            if ($source === null || $prefix === '') {
+                return [];
+            }
+            // \xFF is in no UTF-8 text, so every term that starts with the prefix sorts below it
+            $stmt = $this->connection->prepare("SELECT term, frequency FROM ({$source}) LIMIT ?");
+            $stmt->bindValue(1, $prefix);
+            $stmt->bindValue(2, $prefix . "\xFF");
+            $stmt->bindValue(3, $limit, \PDO::PARAM_INT);
+            $stmt->execute();
+
+            return array_map('intval', $stmt->fetchAll(\PDO::FETCH_KEY_PAIR));
+        } catch (\PDOException $e) {
+            throw new StorageException("Failed to look up indexed terms: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * SQL that selects the terms of an index with `term` and `frequency`, the number of documents
+     * (or, from a terms table, of entries) each is in, where $where holds for the term; null when
+     * the index has nothing to read them from. The terms table of the Levenshtein mode is read
+     * when there is one, else the FTS5 vocabulary, made on first use. An index that stems also
+     * holds the stems as terms, which are not words to correct to, so it is read by column and
+     * leaves them out.
+     */
+    private function termSource(string $table, string $where): ?string
+    {
+        if ($this->tableExists("{$table}_terms")) {
+            return "SELECT term, COUNT(*) AS frequency FROM {$table}_terms WHERE {$where} GROUP BY term";
+        }
+
+        $stems = $this->indexStems($table);
+        $vocabTable = $stems ? "{$table}_fts_colvocab" : "{$table}_fts_vocab";
+        if (!$this->tableExists($vocabTable)) {
+            try {
+                $this->connection->exec(
+                    "CREATE VIRTUAL TABLE {$vocabTable} USING fts5vocab('{$table}_fts', '" . ($stems ? 'col' : 'row') . "')"
+                );
+            } catch (\PDOException $e) {
+                return null;
             }
         }
 
-        // Clean up query to extract base terms (remove NEAR, OR, parentheses, etc.)
-        $cleanQuery = preg_replace('/NEAR\([^)]+\)/', '', $searchQuery);
-        $cleanQuery = preg_replace('/["\(\)]/', ' ', $cleanQuery);
-        $allTerms = array_map('trim', explode(' ', UTF8::strtolower($cleanQuery)));
+        return $stems
+            ? "SELECT term, SUM(doc) AS frequency FROM {$vocabTable} WHERE col != '_stems' AND {$where} GROUP BY term"
+            : "SELECT term, doc AS frequency FROM {$vocabTable} WHERE {$where}";
+    }
 
-        // Filter out operators, wildcards and empty terms
-        $searchTerms = array_filter($allTerms, function ($term) {
-            return $term !== 'or' && $term !== 'and' && !empty($term) && strpos($term, '*') === false;
-        });
-
-        // Remove duplicates
-        $searchTerms = array_unique(array_values($searchTerms));
-
-        // If no exact phrases were found but we have multiple terms, check for them as phrase
-        if (empty($exactPhrases) && count($searchTerms) > 1) {
-            $exactPhrases[] = implode(' ', $searchTerms);
+    /**
+     * Calculate field-weighted score based on which fields contain the search terms. A term or
+     * phrase counts where it begins a word ('matrix' is in 'Matrix Reloaded', not in 'The
+     * Animatrix'), and a field that holds the query's words and stop words only is an exact
+     * match ('The Matrix' for `the matrix`, which is searched without its stop word).
+     */
+    private function calculateFieldWeightedScore(
+        string $searchQuery,
+        array $content,
+        array $fieldWeights,
+        float $baseScore,
+        ?string $language = null
+    ): float {
+        // The terms and phrases are read from the query once for all its candidates
+        $key = $searchQuery . "\0" . $language;
+        if (($this->weightedQuery[0] ?? null) !== $key) {
+            $this->weightedQuery = [$key, ...$this->fieldWeightTerms($searchQuery, $language)];
         }
+        [, $searchTerms, $exactPhrases, $queryWords] = $this->weightedQuery;
+        $queryWordCount = substr_count($queryWords, ' ') + 1;
 
         $bestFieldScore = 0.0;
         $fieldScores = [];
@@ -4504,9 +4612,19 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             $fieldScore = 0.0;
             $matchType = 'none';
 
-            // Check for exact full field match (highest priority)
-            $cleanFieldText = trim(preg_replace('/[^\w\s]/', '', $fieldText));
-            foreach ($exactPhrases as $phrase) {
+            // Check for exact full field match (highest priority), which a field of more than twice
+            // the query's words and three is not
+            $cleanFieldText = null;
+            if (substr_count($fieldText, ' ') < 2 * $queryWordCount + 3) {
+                $cleanFieldText = trim(preg_replace('/[^\w\s]/', '', $fieldText));
+                $fieldWords = $this->getAnalyzer()->removeStopWords(self::ftsWords($fieldText), $language);
+                $fieldWords = implode(' ', $fieldWords);
+                if ($queryWords !== '' && $fieldWords === $queryWords) {
+                    $fieldScore = 100.0;
+                    $matchType = 'exact_field';
+                }
+            }
+            foreach ($matchType === 'none' && $cleanFieldText !== null ? $exactPhrases : [] as $phrase) {
                 $cleanPhrase = trim(preg_replace('/[^\w\s]/', '', $phrase));
                 if ($cleanFieldText === $cleanPhrase) {
                     // Perfect match - massive boost
@@ -4519,7 +4637,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
             // Check for exact phrase match within field
             if ($matchType === 'none') {
                 foreach ($exactPhrases as $phrase) {
-                    if (UTF8::stripos($fieldText, $phrase) !== false) {
+                    if (self::wordStartsAt($fieldText, $phrase) !== false) {
                         // Exact phrase found - high boost
                         $fieldScore = 50.0;
                         $matchType = 'exact_phrase';
@@ -4542,7 +4660,7 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
                 $termPositions = [];
 
                 foreach ($searchTerms as $term) {
-                    $pos = UTF8::stripos($fieldText, $term);
+                    $pos = self::wordStartsAt($fieldText, $term);
                     if ($pos !== false) {
                         $termMatches++;
                         $termPositions[] = $pos;
@@ -4625,6 +4743,61 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
     }
 
     /**
+     * The terms and phrases calculateFieldWeightedScore() looks for in the fields, from the match
+     * query, and its words without stop words, which a field that is an exact match holds
+     *
+     * @return array{0: string[], 1: string[], 2: string}
+     */
+    private function fieldWeightTerms(string $searchQuery, ?string $language): array
+    {
+        // Handle complex queries with phrases and OR operators
+        // Example: ("hello world" OR hello OR world) -> extract both phrase and individual terms
+        $exactPhrases = [];
+
+        // Extract quoted phrases first
+        if (preg_match_all('/"([^"]+)"/', $searchQuery, $matches)) {
+            foreach ($matches[1] as $phrase) {
+                $exactPhrases[] = UTF8::strtolower($phrase);
+            }
+        }
+
+        // Clean up query to extract base terms (remove NEAR, OR, parentheses, etc.)
+        $cleanQuery = preg_replace('/NEAR\([^)]+\)/', '', $searchQuery);
+        $cleanQuery = preg_replace('/["\(\)]/', ' ', $cleanQuery);
+        $allTerms = array_map('trim', explode(' ', UTF8::strtolower($cleanQuery)));
+
+        // Filter out operators and empty terms; a prefix (`incept*`) counts where it begins a word
+        $searchTerms = array_filter(str_replace('*', '', $allTerms), function ($term) {
+            return $term !== 'or' && $term !== 'and' && $term !== '';
+        });
+
+        // Remove duplicates
+        $searchTerms = array_unique(array_values($searchTerms));
+
+        // If no exact phrases were found but we have multiple terms, check for them as phrase
+        if (empty($exactPhrases) && count($searchTerms) > 1) {
+            $exactPhrases[] = implode(' ', $searchTerms);
+        }
+        $queryWords = $this->getAnalyzer()->removeStopWords(self::ftsWords(implode(' ', $searchTerms)), $language);
+        $queryWords = implode(' ', $queryWords);
+
+        return [$searchTerms, $exactPhrases, $queryWords];
+    }
+
+    /**
+     * Where in a text (its byte offset) a word begins with $needle, ignoring case; false when
+     * none does
+     *
+     * @return int|false
+     */
+    private static function wordStartsAt(string $text, string $needle)
+    {
+        return preg_match('/(?<![\p{L}\p{N}])' . preg_quote($needle, '/') . '/iu', $text, $match, PREG_OFFSET_CAPTURE)
+            ? $match[0][1]
+            : false;
+    }
+
+    /**
      * Build SQL clause for a single filter.
      *
      * Supports filtering on:
@@ -4632,232 +4805,133 @@ class SqliteStorage implements StorageInterface, CalibrationStore, TracksIndexCh
      * - Content fields: content.fieldname or bare fieldname (e.g., version -> content.version)
      * - Metadata fields: metadata.fieldname
      *
-     * Special operators:
+     * The operator is case-insensitive. Special operators:
      * - '=?' means "equals value OR is empty/null" - useful for optional taxonomy fields
+     * - 'contains' finds the value anywhere in the field, `%` and `_` in it included
+     * - 'exists', 'not exists', 'is null' and 'is not null' take no value
      *
      * @param array $filter Filter with 'field', 'value', and optional 'operator'
      * @return array [sql_string, params_array]
+     * @throws \InvalidArgumentException If the operator is unknown, or its value is not one it takes
      */
     private function buildFilterClause(array $filter): array
     {
-        $field = $filter['field'];
-        $operator = $filter['operator'] ?? '=';
-        $value = $filter['value'];
-        $sql = '';
-        $params = [];
-
-        // Validate operator against whitelist
+        $field = (string)$filter['field'];
+        $operator = strtolower((string)($filter['operator'] ?? '='));
         $this->validateOperator($operator);
+        $value = $filter['value'] ?? null;
 
-        // Direct column filtering (type, language, id, timestamp)
-        if (in_array($field, ['type', 'language', 'id', 'timestamp'])) {
-            $operator = strtolower($operator);
-            switch ($operator) {
-                case '=':
-                case '!=':
-                case '>':
-                case '<':
-                case '>=':
-                case '<=':
-                case 'like':
-                case 'not like':
-                    $sql = " AND d.{$field} {$operator} ?";
-                    $params[] = $value;
-                    break;
-
-                case 'contains':
-                    $sql = " AND d.{$field} LIKE ?";
-                    $params[] = '%' . $value . '%';
-                    break;
-
-                case '=?':
-                    $sql = " AND (d.{$field} = ? OR d.{$field} IS NULL OR d.{$field} = '')";
-                    $params[] = $value;
-                    break;
-
-                case 'in':
-                    if (is_array($value)) {
-                        if (count($value) === 0) {
-                            $sql = " AND 0=1";
-                        } else {
-                            $placeholders = implode(',', array_fill(0, count($value), '?'));
-                            $sql = " AND d.{$field} IN ({$placeholders})";
-                            $params = $value;
-                        }
-                    }
-                    break;
-
-                case 'not in':
-                    if (is_array($value)) {
-                        if (count($value) === 0) {
-                            $sql = " AND 1=1";
-                        } else {
-                            $placeholders = implode(',', array_fill(0, count($value), '?'));
-                            $sql = " AND d.{$field} NOT IN ({$placeholders})";
-                            $params = $value;
-                        }
-                    }
-                    break;
-
-                case 'between':
-                    if (is_array($value) && count($value) >= 2) {
-                        $sql = " AND d.{$field} BETWEEN ? AND ?";
-                        $params[] = $value[0];
-                        $params[] = $value[1];
-                    }
-                    break;
-
-                case 'is null':
-                case 'not exists':
-                    $sql = " AND d.{$field} IS NULL";
-                    break;
-
-                case 'is not null':
-                case 'exists':
-                    $sql = " AND d.{$field} IS NOT NULL";
-                    break;
+        if (in_array($operator, ['in', 'not in', 'between'], true)) {
+            if (!is_array($value) || ($operator === 'between' && count($value) !== 2)) {
+                throw new \InvalidArgumentException(
+                    "The '{$operator}' filter on '{$field}' needs " . ($operator === 'between' ? 'an array of two values' : 'an array of values')
+                );
             }
-            return [$sql, $params];
+            $value = array_values($value);
         }
 
-        // Content field filtering (content.fieldname)
-        if (strpos($field, 'content.') === 0) {
-            $contentField = substr($field, 8); // Remove 'content.' prefix
-            return $this->buildJsonFilterClause('d.content', $contentField, $operator, $value);
-        }
-
-        // Metadata field filtering (metadata.fieldname)
-        if (strpos($field, 'metadata.') === 0) {
-            $metaField = substr($field, 9); // Remove 'metadata.' prefix
-            return $this->buildJsonFilterClause('d.metadata', $metaField, $operator, $value);
-        }
-
-        // Bare field name that's not a direct column -> treat as content field (backward compat for 'version')
-        return $this->buildJsonFilterClause('d.content', $field, $operator, $value);
-    }
-
-    /**
-     * Build SQL clause for JSON field filtering with various operators.
-     *
-     * @param string $column The JSON column (d.content or d.metadata)
-     * @param string $field The field name within the JSON
-     * @param string $operator The comparison operator
-     * @param mixed $value The value to compare against
-     * @return array [sql_string, params_array]
-     */
-    private function buildJsonFilterClause(string $column, string $field, string $operator, $value): array
-    {
-        // Validate field name to prevent SQL injection via JSON path
-        $this->validateFieldName($field);
-
-        $sql = '';
-        $params = [];
-        $jsonPath = "json_extract({$column}, '$.{$field}')";
-
+        // A direct column has a type of its own; a value read from the JSON is compared by its type (see comparisonSql())
+        $direct = in_array($field, ['type', 'language', 'id', 'timestamp'], true);
+        $column = $direct ? "d.{$field}" : $this->jsonFieldSql($field);
         switch ($operator) {
-            case '=':
-                $sql = " AND {$jsonPath} = ?";
-                $params[] = $value;
-                break;
+            case 'is null':
+            case 'not exists':
+                return [" AND {$column} IS NULL", []];
 
-            case '=?':
-                // Special operator: equals value OR is empty/null
-                // Useful for optional taxonomy fields where you want to include documents
-                // that don't have the field set at all
-                $sql = " AND ({$jsonPath} = ? OR {$jsonPath} IS NULL OR {$jsonPath} = '')";
-                $params[] = $value;
-                break;
-
-            case '!=':
-                $sql = " AND {$jsonPath} != ?";
-                $params[] = $value;
-                break;
-
-            case '>':
-                $sql = " AND CAST({$jsonPath} AS REAL) > ?";
-                $params[] = $value;
-                break;
-
-            case '<':
-                $sql = " AND CAST({$jsonPath} AS REAL) < ?";
-                $params[] = $value;
-                break;
-
-            case '>=':
-                $sql = " AND CAST({$jsonPath} AS REAL) >= ?";
-                $params[] = $value;
-                break;
-
-            case '<=':
-                $sql = " AND CAST({$jsonPath} AS REAL) <= ?";
-                $params[] = $value;
-                break;
-
-            case 'in':
-                if (is_array($value)) {
-                    if (count($value) === 0) {
-                        $sql = " AND 0=1";
-                    } else {
-                        $placeholders = implode(',', array_fill(0, count($value), '?'));
-                        $sql = " AND {$jsonPath} IN ({$placeholders})";
-                        $params = $value;
-                    }
-                }
-                break;
-
-            case 'not in':
-                if (is_array($value)) {
-                    if (count($value) === 0) {
-                        $sql = " AND 1=1";
-                    } else {
-                        $placeholders = implode(',', array_fill(0, count($value), '?'));
-                        $sql = " AND {$jsonPath} NOT IN ({$placeholders})";
-                        $params = $value;
-                    }
-                }
-                break;
-
-            case 'between':
-                if (is_array($value) && count($value) >= 2) {
-                    $sql = " AND CAST({$jsonPath} AS REAL) BETWEEN ? AND ?";
-                    $params[] = $value[0];
-                    $params[] = $value[1];
-                }
-                break;
+            case 'is not null':
+            case 'exists':
+                return [" AND {$column} IS NOT NULL", []];
 
             case 'like':
             case 'not like':
+                return [" AND {$column} " . strtoupper($operator) . " ?", [$value]];
+
             case 'contains':
-                if ($operator === 'contains') {
-                    $sql = " AND {$jsonPath} LIKE ?";
-                    $params[] = '%' . $value . '%';
-                } else {
-                    $sql = " AND {$jsonPath} " . strtoupper($operator) . " ?";
-                    $params[] = $value;
+                return [" AND {$column} LIKE ? ESCAPE '\\'", ['%' . str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], (string)$value) . '%']];
+
+            case 'in':
+            case 'not in':
+                if (empty($value)) {
+                    return [$operator === 'in' ? " AND 0=1" : " AND 1=1", []];
                 }
-                break;
+                [$sql, $params] = self::comparisonSql($column, strtoupper($operator), $value, !$direct);
 
-            case 'exists':
-                $sql = " AND {$jsonPath} IS NOT NULL";
-                // No params needed
-                break;
+                return [" AND {$sql}", $params];
 
-            case 'is not null':
-                $sql = " AND {$jsonPath} IS NOT NULL";
-                // No params needed
-                break;
+            case 'between':
+                [$from, $fromParams] = self::comparisonSql($column, '>=', [$value[0]], !$direct);
+                [$to, $toParams] = self::comparisonSql($column, '<=', [$value[1]], !$direct);
 
-            case 'not exists':
-            case 'is null':
-                $sql = " AND {$jsonPath} IS NULL";
-                // No params needed
-                break;
+                return [" AND {$from} AND {$to}", array_merge($fromParams, $toParams)];
+
+            case '=?':
+                // Useful for optional taxonomy fields, where documents that do not
+                // have the field set at all are wanted too
+                [$sql, $params] = self::comparisonSql($column, '=', [$value], !$direct);
+
+                return [" AND ({$sql} OR {$column} IS NULL OR {$column} = '')", $params];
 
             default:
-                // Operator was already validated by validateOperator(), this is unreachable
-                break;
+                // =, !=, <, >, <=, >=
+                [$sql, $params] = self::comparisonSql($column, $operator, [$value], !$direct);
+
+                return [" AND {$sql}", $params];
+        }
+    }
+
+    /**
+     * The SQL that reads a field of a document's JSON: `metadata.{path}` from its metadata,
+     * `content.{path}` or a bare `{path}` from its content.
+     *
+     * @throws \InvalidArgumentException If the path is not a safe JSON path
+     */
+    private function jsonFieldSql(string $field): string
+    {
+        if (strpos($field, 'metadata.') === 0) {
+            [$column, $path] = ['d.metadata', substr($field, 9)];
+        } else {
+            [$column, $path] = ['d.content', strpos($field, 'content.') === 0 ? substr($field, 8) : $field];
+        }
+        // Validate field name to prevent SQL injection via JSON path
+        $this->validateFieldName($path);
+
+        return "json_extract({$column}, '$.{$path}')";
+    }
+
+    /**
+     * Compare an expression with filter values: `=`, `!=`, `<`, `>`, `<=`, `>=` with one, `IN` and
+     * `NOT IN` with a list. PDO binds every value as text, which a number never equals and always
+     * sorts after, so compared by type, the numbers in a document's JSON are compared with the
+     * numeric values, as numbers, and everything else as text: a stored 123 matches 123 and "123",
+     * a stored "00123" matches "00123", and an ISO date or a name is compared as it reads.
+     *
+     * @param mixed[] $values Booleans are the integers JSON stores them as
+     * @param bool $byType Whether to compare by type; a column of the documents table has one of its own
+     * @return array{0: string, 1: array}
+     */
+    private static function comparisonSql(string $expr, string $op, array $values, bool $byType): array
+    {
+        $values = array_map(function ($value) {
+            return is_bool($value) ? (int)$value : $value;
+        }, $values);
+        $placeholders = function (string $placeholder, int $count) use ($op): string {
+            return $op === 'IN' || $op === 'NOT IN'
+                ? '(' . implode(', ', array_fill(0, $count, $placeholder)) . ')'
+                : $placeholder;
+        };
+        $asText = "{$expr} {$op} " . $placeholders('?', count($values));
+        $numbers = $byType ? array_values(array_filter($values, 'is_numeric')) : [];
+        if (empty($numbers)) {
+            return [$asText, $values];
+        }
+        $isNumber = "typeof({$expr}) IN ('integer', 'real')";
+        $asNumber = "{$expr} {$op} " . $placeholders('CAST(? AS REAL)', count($numbers));
+        if (in_array($op, ['<', '>', '<=', '>='], true)) {
+            // A range also reads a number stored as a string ("9.99", "-3") as the number it is
+            $isNumber .= " OR (typeof({$expr}) = 'text' AND {$expr} <> '' AND {$expr} NOT GLOB '*[^0-9.eE+-]*')";
+            $asNumber = "CAST({$expr} AS REAL) {$op} CAST(? AS REAL)";
         }
 
-        return [$sql, $params];
+        return ["CASE WHEN {$isNumber} THEN {$asNumber} ELSE {$asText} END", array_merge($numbers, $values)];
     }
 }

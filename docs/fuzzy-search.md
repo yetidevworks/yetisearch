@@ -119,9 +119,9 @@ $config = [
     uncorrectable — at `2`, a name that appears in one document cannot be
     reached by a misspelling of it at all.
 
-- **`max_indexed_terms`**: Maximum number of indexed terms to check
-  - Affects performance for Levenshtein algorithm
-  - Higher values = more comprehensive but slower
+- **`max_indexed_terms`**: How many of the most frequent terms typo correction keeps in memory
+  - Rarer terms are looked up in the index when needed, so a word of one document can still be corrected to
+  - Higher values = more memory and a slower first fuzzy search after each index change
 
 - **`max_fuzzy_variations`**: Limits fuzzy matches per search term
   - Prevents performance issues with common typos

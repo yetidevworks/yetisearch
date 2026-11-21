@@ -39,6 +39,7 @@ A powerful, pure-PHP search engine library with advanced full-text search capabi
     - [Query frame](#query-frame)
     - [Meaning-only documents](#meaning-only-documents)
   - [Faceted Search](#faceted-search)
+  - [Aggregations](#aggregations)
 - [Architecture](#architecture)
 - [Testing](#testing)
 - [API Reference](#api-reference)
@@ -74,7 +75,7 @@ A powerful, pure-PHP search engine library with advanced full-text search capabi
 - 🔤 **Advanced fuzzy matching** with automatic typo correction and multi-algorithm consensus scoring (Trigram, Jaro-Winkler, Levenshtein, Phonetic, Keyboard Proximity)
 - 🎯 **Enhanced multi-word matching** for more accurate search results
 - 🏆 **Smart result ranking** prioritizing exact matches over fuzzy matches
-- 📈 **Faceted search**: value, numeric range and distance facets
+- 📈 **Faceted search**: value, numeric range and distance facets, and aggregations (count, sum, average, minimum, maximum) over every match
 - 📍 **Geo-spatial search** with R-tree indexing for location-based queries
 - 🚀 **Zero dependencies** except PHP extensions and small utility packages
 - 💾 **Persistent storage** with automatic database management
@@ -286,7 +287,7 @@ $results = $search->search('articles', 'PHP programming');
 $results = $search->search('articles', 'advanced techniques', [
     'limit' => 20,
     'offset' => 0,
-    'fields' => ['title', 'content', 'tags'],  // Search only in specific fields
+    'fields' => ['title', 'content', 'tags'],  // Only documents with a word of the query in one of these fields
     'highlight' => true,                       // Enable highlighting
     'fuzzy' => true,                          // Enable fuzzy matching
     'unique_by_route' => true,                // Deduplicate results (default)
@@ -335,6 +336,13 @@ $results = $search->search('products', 'laptop', [
         ['field' => 'metadata.warranty', 'operator' => 'exists'],                  // Field exists
         ['field' => 'content.version', 'value' => 'v3', 'operator' => '='],        // Filter on content field (explicit)
     ]
+]);
+
+// Only documents with a word of the query in their title or tags: as typed or corrected, as the
+// beginning of a word when the last one is searched as a prefix, or by its stem on an index that
+// stems. The total, facets and aggregations count the same documents.
+$inTitles = $search->search('articles', 'php programming', [
+    'fields' => ['title', 'tags'],
 ]);
 
 // Get all chunks (no deduplication)
@@ -659,6 +667,12 @@ $config = [
 
 3. **Phrase Matching**: Exact phrases get 15x boost over individual word matches
 
+A field that holds the query's words and stop words only is an exact match, so `the matrix` and `matrix` both find "The Matrix" first. A word counts where it begins a word of the field (`matrix` is in "Matrix Reloaded", not in "The Animatrix").
+
+The boosts rank the results whenever the fields have different ones, the default fields included (title 3.0, tags 2.5, excerpt and category 2.0, author 1.5, content 1.0). `search.field_weights` takes their place when you set it, and `'field_weights' => []` ranks by text relevance alone, which is a little faster as no candidates are re-ranked in PHP.
+
+The boosts are those the process knows the index's fields by: the `fields` given to `createIndex()` in this process, else `indexer.fields` of the config, else the default fields. A process that only searches an index created with fields of its own should put the same fields in its config, or call `createIndex()` with them (which opens an index that exists).
+
 **Example:**
 ```php
 // With this configuration:
@@ -765,7 +779,7 @@ What changes on an index that stems:
 - Totals, paging, facet counts and `multiSearch()` count the documents found by their stems too. An index that stems and one that does not can be searched together.
 - A result found through "connected" for `connect` has "connected" highlighted.
 - Typo correction suggests the words people wrote, not their stems.
-- In a fuzzy search with typo correction (the default when fuzzy is on) every word must be in a document, either as typed or by its stem. A word that was corrected also matches the stem of the word as typed: `runs`, corrected to `rugs`, finds "rugs" and everything `runs` finds with fuzzy off, such as "running".
+- A fuzzy search with typo correction (the default when fuzzy is on) finds what the same search without fuzzy would find for the corrected words, each as typed or by its stem: the documents with every word first, then those with some of them. A word that was corrected also matches the stem of the word as typed: `runs`, corrected to `rugs`, finds "rugs" and everything `runs` finds with fuzzy off, such as "running".
 - A word added by a synonym or a fuzzy variation is matched as typed, not by its stem.
 - The query's stop words are those of its language. A query with no language on an index that stems uses the stop words of the index's language.
 
@@ -1091,8 +1105,8 @@ $results = $search->search('movies', 'Amakin Dkywalker', ['fuzzy' => true]);
   - 1 = Single character changes only (fastest)
   - 2 = Up to 2 character edits (balanced)
   - 3 = Up to 3 character edits (most flexible but slower)
-- `min_term_frequency`: Minimum occurrences for a term to be considered for fuzzy matching
-- `max_indexed_terms`: Maximum number of indexed terms to check (affects performance)
+- `min_term_frequency`: How many documents a term must appear in to be a correction target (default: 1)
+- `max_indexed_terms`: How many of the most frequent terms typo correction keeps in memory; rarer terms are looked up in the index when needed (affects memory and speed)
 - `max_fuzzy_variations`: Maximum fuzzy variations generated per search term
 - `fuzzy_score_penalty`: Score reduction factor for fuzzy matches (0.0 = no penalty, 1.0 = zero score)
 - `indexed_terms_cache_ttl`: How long to cache the indexed terms list (seconds)
@@ -1129,9 +1143,18 @@ $results = $search->search('docs', 'qyick tutoral', ['fuzzy' => true]);
 // Finds documents about quick tutorials
 ```
 
+**How a typo is read:**
+
+1. A word that is in the index is kept, however rare: names and titles are found as typed. A rare word is also searched as a word one likely slip away that is in 20 times as many documents (`supermen` finds "supermen" and "superman"), or as two words run together that stand side by side five times as often (`spiderman`, "spider man").
+2. A word that is not in the index is read as the likeliest slip of one that is: the more documents a word is in and the likelier the slip, the likelier the reading. Two letters swapped, a letter left out or typed twice, a key beside the one meant, and another vowel are likely slips; any other letter is less so (`nigth` is "night", not "ninth"). With a storage that can look terms up, as `SqliteStorage` can, rare words of the index are readings too (`aquamaine`, "aquamarine").
+3. With no word one slip away, the algorithms below choose among words up to two edits away.
+4. In a search of several words, words that are near each other in no document are read again together, as words that are: `die herd` is "die hard", `blek panther` "black panther", `froest gump` "forrest gump".
+5. A last word that begins longer, commoner words is searched as their beginning: `termin` finds "terminator" and "terminal".
+6. A stop word is never a correction, and a known misspelling (`teh`, `fone`) is always corrected.
+
 **Multi-Algorithm Consensus Scoring:**
 
-The enhanced fuzzy search uses 5 different algorithms and combines their scores:
+Among words up to two edits away, the enhanced fuzzy search uses 5 different algorithms and combines their scores:
 
 1. **Trigram Similarity (25%)** - Overall character sequence similarity
 2. **Levenshtein Distance (20%)** - Edit distance (insertions, deletions, substitutions)
@@ -1184,7 +1207,7 @@ if ($results['total'] === 0 && !empty($results['suggestions'])) {
 - `correction_threshold`: Minimum consensus score for correction (default: 0.6)
 - `trigram_threshold`: Trigram similarity threshold (default: 0.35)
 - `fuzzy_score_penalty`: Score penalty for fuzzy matches (default: 0.25)
-- `min_term_frequency`: Minimum term frequency for correction candidates (default: 2)
+- `min_term_frequency`: Documents a term must appear in to be a correction target (default: 1)
 
 The enhanced fuzzy search provides significantly better user experience by automatically correcting common typos while maintaining high precision through consensus scoring.
 
@@ -1734,6 +1757,35 @@ A facet counts a content field or a metadata field of the matching documents. It
 - **Distance facets** bucket results by distance from a point; see [Geo Search](#geo-search).
 
 Facets are counted over the first 1,000 matching documents. When no matching document has the facet's field at all, the search logs a notice naming the field, which usually means a misspelled field or a missing `field` option.
+
+### Aggregations
+
+Sum, average, minimum and maximum of a field over every document a search matches, not only its page:
+
+```php
+$results = $search->search('products', 'laptop', [
+    'limit' => 10,
+    'aggregations' => [
+        'in_stock' => ['type' => 'sum', 'field' => 'stock'],
+        'avg_price' => ['type' => 'avg', 'field' => 'price'],
+        'price' => ['type' => 'stats', 'field' => 'price'],
+    ],
+]);
+
+echo $results['aggregations']['avg_price']['value'];   // 849.5
+print_r($results['aggregations']['price']);            // count, sum, avg, min, max
+
+// Or on a query
+$query = (new SearchQuery('laptop'))->aggregate('cheapest', 'min', ['field' => 'price']);
+$cheapest = $search->getSearchEngine('products')->search($query)->getAggregation('cheapest')['value'];
+```
+
+- The types are `count` (how many numbers the field holds), `sum`, `avg`, `min` and `max`, each returned as `['value' => ...]`, and `stats`, which returns all five as `['count' => ..., 'sum' => ..., 'avg' => ..., 'min' => ..., 'max' => ...]`.
+- A field is read as a facet's is: a content field, else the metadata field of that name; `metadata.stock` or `content.price` names one of them. Numbers and numeric strings count, and a list counts each of its numbers once. Other values are left out.
+- With no value to count, `avg`, `min` and `max` are `null`, `sum` is 0 and `count` 0.
+- The search's filters, language, location and field restriction (`fields`) apply, so the aggregations describe the same documents as its `total`.
+- A field must be stored to be aggregated: list it in the indexer's `fields` (`'price' => ['store' => true, 'index' => false]` stores it without searching it).
+- An aggregation without a known type or a `field` is left out and logged as a warning.
 
 ## Architecture
 

@@ -296,14 +296,15 @@ class URLQueryParserTest extends TestCase
         $this->assertSame(19.99, $filters[0]['value']);
     }
 
-    public function testCommaSeparatedValuesBecomesArray(): void
+    public function testCommaSeparatedValuesBecomeArrayForInOnly(): void
     {
+        // A comma splits the value of in, nin and between; eq takes it whole
         $result = $this->parser->parse([
-            'filter' => ['tags' => ['eq' => 'php,golang,rust']]
+            'filter' => ['tags' => ['in' => 'php,golang,rust'], 'title' => ['eq' => 'Hello, World']]
         ]);
         $filters = $result->getFilters();
-        $this->assertIsArray($filters[0]['value']);
-        $this->assertEquals(['php', 'golang', 'rust'], $filters[0]['value']);
+        $this->assertSame(['php', 'golang', 'rust'], $filters[0]['value']);
+        $this->assertSame('Hello, World', $filters[1]['value']);
     }
 
     public function testNonNumericStringStaysString(): void

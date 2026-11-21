@@ -5,22 +5,30 @@ namespace YetiSearch\DSL;
 use YetiSearch\Models\SearchQuery;
 use YetiSearch\Geo\GeoPoint;
 use YetiSearch\Geo\GeoBounds;
-use YetiSearch\Exceptions\InvalidArgumentException;
 
 class URLQueryParser
 {
-    private array $fieldAliases = [];
+    /** Operators whose value is a comma-separated list */
+    private const LIST_OPERATORS = ['in', 'not in', 'between'];
 
-    public function __construct(array $fieldAliases = [])
+    private array $fieldAliases;
+    private array $defaults;
+
+    /**
+     * @param array $fieldAliases Map of alias => field name
+     * @param array $defaults SearchQuery options every parsed query starts from (limit, fuzzy, highlight)
+     */
+    public function __construct(array $fieldAliases = [], array $defaults = [])
     {
         $this->fieldAliases = $fieldAliases;
+        $this->defaults = $defaults;
     }
 
     public function parse(array $params): SearchQuery
     {
         // Extract main query
         $queryString = $params['q'] ?? $params['query'] ?? '';
-        $searchQuery = new SearchQuery($queryString);
+        $searchQuery = new SearchQuery(is_string($queryString) ? $queryString : '', $this->defaults);
 
         // Parse filters (JSON API compliant)
         if (isset($params['filter']) && is_array($params['filter'])) {
@@ -37,18 +45,7 @@ class URLQueryParser
             $this->parseFields($params['fields'], $searchQuery);
         }
 
-        // Parse pagination
-        if (isset($params['page'])) {
-            $this->parsePagination($params['page'], $searchQuery);
-        }
-
-        // Direct pagination params (fallback)
-        if (isset($params['limit'])) {
-            $searchQuery->limit((int)$params['limit']);
-        }
-        if (isset($params['offset'])) {
-            $searchQuery->offset((int)$params['offset']);
-        }
+        $this->parsePagination($params, $searchQuery);
 
         // Parse fuzzy search options
         if (isset($params['fuzzy'])) {
@@ -68,10 +65,14 @@ class URLQueryParser
             );
         }
 
-        // Parse facets
+        // Parse facets: facets[]=brand, or facets[brand][limit]=10
         if (isset($params['facets']) && is_array($params['facets'])) {
             foreach ($params['facets'] as $field => $options) {
-                $searchQuery->facet($field, is_array($options) ? $options : []);
+                if (is_int($field) && is_string($options)) {
+                    $searchQuery->facet($options);
+                } elseif (is_string($field)) {
+                    $searchQuery->facet($field, is_array($options) ? $options : []);
+                }
             }
         }
 
@@ -81,7 +82,7 @@ class URLQueryParser
         }
 
         // Parse language
-        if (isset($params['language'])) {
+        if (isset($params['language']) && is_string($params['language'])) {
             $searchQuery->language($params['language']);
         }
 
@@ -104,42 +105,56 @@ class URLQueryParser
     private function parseFilters(array $filters, SearchQuery $searchQuery): void
     {
         foreach ($filters as $field => $conditions) {
-            $fieldName = $this->resolveFieldAlias($field);
+            $fieldName = $this->resolveFieldAlias((string)$field);
 
-            if (is_array($conditions)) {
-                foreach ($conditions as $operator => $value) {
-                    $op = $this->mapOperator($operator);
-                    $searchQuery->filter($fieldName, $this->parseValue($value), $op);
-                }
-            } else {
+            if (!is_array($conditions)) {
                 // Simple equality filter
-                $searchQuery->filter($fieldName, $this->parseValue($conditions), '=');
+                $searchQuery->filter($fieldName, $this->parseValue($conditions, '='), '=');
+            } elseif (!$this->isAssociativeArray($conditions)) {
+                // filter[category][]=a&filter[category][]=b: any of the values
+                $searchQuery->filter($fieldName, $this->parseValue($conditions, 'in'), 'in');
+            } else {
+                foreach ($conditions as $operator => $value) {
+                    $op = $this->mapOperator((string)$operator);
+                    $searchQuery->filter($fieldName, $this->parseValue($value, $op), $op);
+                }
             }
         }
     }
 
-    private function parseSort(string $sort, SearchQuery $searchQuery): void
+    /**
+     * sort=-created_at,title or sort=title:desc, also as sort[]=-created_at&sort[]=title
+     * or sort[title]=desc
+     */
+    private function parseSort($sort, SearchQuery $searchQuery): void
     {
-        $fields = explode(',', $sort);
+        $fields = [];
+        if (is_array($sort)) {
+            foreach ($sort as $key => $value) {
+                if (is_string($value)) {
+                    $fields[] = is_string($key) ? $key . ':' . $value : $value;
+                }
+            }
+        } elseif (is_scalar($sort)) {
+            $fields = explode(',', (string)$sort);
+        }
 
         foreach ($fields as $field) {
             $field = trim($field);
 
-            if (empty($field)) {
+            if ($field === '') {
                 continue;
             }
 
             // Check for descending prefix
             if ($field[0] === '-') {
                 $searchQuery->sortBy(substr($field, 1), 'desc');
-            } else {
+            } elseif (strpos($field, ':') !== false) {
                 // Check for explicit asc/desc suffix
-                if (strpos($field, ':') !== false) {
-                    [$fieldName, $direction] = explode(':', $field, 2);
-                    $searchQuery->sortBy($fieldName, $direction);
-                } else {
-                    $searchQuery->sortBy($field, 'asc');
-                }
+                [$fieldName, $direction] = explode(':', $field, 2);
+                $searchQuery->sortBy($fieldName, $direction);
+            } else {
+                $searchQuery->sortBy($field, 'asc');
             }
         }
     }
@@ -166,35 +181,50 @@ class URLQueryParser
         }
     }
 
-    private function parsePagination($page, SearchQuery $searchQuery): void
+    /**
+     * JSON API style pagination, page[limit]=10&page[offset]=20 or
+     * page[number]=2&page[size]=10, and the plain page, limit and offset
+     * parameters. The plain limit and offset win over the page[] ones, and a
+     * page number counts in pages of whichever size is given, else of the
+     * default size. A value that is not a whole number is ignored.
+     */
+    private function parsePagination(array $params, SearchQuery $searchQuery): void
     {
-        // JSON API style pagination
-        // page[limit]=10&page[offset]=20
-        // or
-        // page[number]=2&page[size]=10
-
-        if (is_array($page)) {
-            if (isset($page['limit'])) {
-                $searchQuery->limit((int)$page['limit']);
-            }
-            if (isset($page['offset'])) {
-                $searchQuery->offset((int)$page['offset']);
-            }
-
-            // Alternative: page number and size
-            if (isset($page['number']) && isset($page['size'])) {
-                $pageNum = max(1, (int)$page['number']);
-                $pageSize = max(1, (int)$page['size']);
-
-                $searchQuery->limit($pageSize);
-                $searchQuery->offset(($pageNum - 1) * $pageSize);
-            }
-        } elseif (is_string($page)) {
-            // Simple page number
-            $pageNum = max(1, (int)$page);
-            $searchQuery->limit(20); // Default page size
-            $searchQuery->offset(($pageNum - 1) * 20);
+        $page = $params['page'] ?? [];
+        if (!is_array($page)) {
+            $page = ['number' => $page];
         }
+
+        $limit = $this->count($params['limit'] ?? null)
+            ?? $this->count($page['size'] ?? null)
+            ?? $this->count($page['limit'] ?? null);
+        if ($limit !== null) {
+            $searchQuery->limit($limit);
+        }
+
+        $offset = $this->count($params['offset'] ?? null);
+        if ($offset === null) {
+            $number = $this->count($page['number'] ?? null);
+            $offset = $number !== null
+                ? (max(1, $number) - 1) * $searchQuery->getLimit()
+                : $this->count($page['offset'] ?? null);
+        }
+        if ($offset !== null) {
+            $searchQuery->offset($offset);
+        }
+    }
+
+    /**
+     * A whole number of zero or more, or null
+     */
+    private function count($value): ?int
+    {
+        if (!is_scalar($value)) {
+            return null;
+        }
+        $count = filter_var($value, FILTER_VALIDATE_INT, ['options' => ['min_range' => 0]]);
+
+        return $count === false ? null : $count;
     }
 
     private function parseGeoFilters(array $geo, SearchQuery $searchQuery): void
@@ -260,30 +290,46 @@ class URLQueryParser
         return $operatorMap[strtolower($operator)] ?? '=';
     }
 
-    private function parseValue($value)
+    /**
+     * A list operator (in, not in, between) takes a comma-separated string or
+     * repeated parameters; any other operator takes the value as it is.
+     */
+    private function parseValue($value, string $operator)
     {
-        // Handle different value formats
-        if (is_string($value)) {
-            // Check for comma-separated values (for IN operator)
-            if (strpos($value, ',') !== false) {
-                return array_map('trim', explode(',', $value));
-            }
+        if (is_array($value)) {
+            return array_map([$this, 'scalar'], array_values($value));
+        }
 
-            // Check for boolean strings
-            if ($value === 'true') {
-                return true;
-            }
-            if ($value === 'false') {
-                return false;
-            }
-            if ($value === 'null') {
-                return null;
-            }
+        if (is_string($value) && in_array($operator, self::LIST_OPERATORS, true)) {
+            return array_map([$this, 'scalar'], array_map('trim', explode(',', $value)));
+        }
 
-            // Check for numeric strings
-            if (is_numeric($value)) {
-                return strpos($value, '.') !== false ? (float)$value : (int)$value;
-            }
+        return $this->scalar($value);
+    }
+
+    /**
+     * 'true', 'false' and 'null' become those values, and a number written the
+     * way PHP would write it becomes an int or a float. Anything else stays a
+     * string, so 00123, +5, 1e3 and integers too big for PHP keep what was sent.
+     */
+    private function scalar($value)
+    {
+        if (!is_string($value)) {
+            return $value;
+        }
+
+        $keywords = ['true' => true, 'false' => false, 'null' => null];
+        if (array_key_exists($value, $keywords)) {
+            return $keywords[$value];
+        }
+
+        if (preg_match('/^-?(?:0|[1-9][0-9]*)$/', $value)) {
+            $int = filter_var($value, FILTER_VALIDATE_INT);
+            return $int === false ? $value : $int;
+        }
+
+        if (preg_match('/^-?(?:0|[1-9][0-9]*)\.[0-9]+$/', $value)) {
+            return (float)$value;
         }
 
         return $value;

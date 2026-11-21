@@ -23,8 +23,22 @@ class SemanticUnitTest extends TestCase
     {
         $fused = SemanticSearch::fuse(['a', 'b'], ['b' => 0.9, 'c' => 0.5], 0.0, 60);
 
-        $this->assertSame(['a', 'b', 'c'], array_map('strval', array_keys($fused)));
-        $this->assertSame(0.0, $fused['c']);
+        $this->assertSame(['a', 'b'], array_map('strval', array_keys($fused)));
+        $this->assertEqualsWithDelta(100.0, $fused['a'], 0.0001);
+    }
+
+    public function testFuseWeightOneIsVectorOrderOnly(): void
+    {
+        $fused = SemanticSearch::fuse(['a', 'b'], ['c' => 0.9, 'a' => 0.5], 1.0, 60);
+
+        $this->assertSame(['c', 'a'], array_map('strval', array_keys($fused)));
+        $this->assertEqualsWithDelta(100.0, $fused['c'], 0.0001);
+    }
+
+    public function testFuseWithOneWeightedSideAndNoDocumentsOnItIsEmpty(): void
+    {
+        $this->assertSame([], SemanticSearch::fuse([], ['a' => 0.5], 0.0, 60));
+        $this->assertSame([], SemanticSearch::fuse(['a'], [], 1.0, 60));
     }
 
     public function testFuseKeepsNumericIds(): void

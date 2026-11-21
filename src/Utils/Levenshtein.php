@@ -8,7 +8,7 @@ namespace YetiSearch\Utils;
 class Levenshtein
 {
     /**
-     * Calculate Levenshtein distance between two strings
+     * Calculate Levenshtein distance between two strings, in characters
      *
      * @param string $str1
      * @param string $str2
@@ -16,43 +16,38 @@ class Levenshtein
      */
     public static function distance(string $str1, string $str2): int
     {
-        $len1 = mb_strlen($str1);
-        $len2 = mb_strlen($str2);
-
-        // Special cases
-        if ($len1 === 0) {
-            return $len2;
-        }
-        if ($len2 === 0) {
-            return $len1;
-        }
         if ($str1 === $str2) {
             return 0;
         }
 
-        // Initialize matrix
-        $matrix = [];
-        for ($i = 0; $i <= $len1; $i++) {
-            $matrix[$i][0] = $i;
-        }
-        for ($j = 0; $j <= $len2; $j++) {
-            $matrix[0][$j] = $j;
+        // ASCII strings take PHP's own implementation, which counts bytes (and before PHP 8
+        // takes at most 255 of them)
+        if (strlen($str1) <= 255 && strlen($str2) <= 255 && !preg_match('/[\x80-\xFF]/', $str1 . $str2)) {
+            return levenshtein($str1, $str2);
         }
 
-        // Calculate distances
-        for ($i = 1; $i <= $len1; $i++) {
-            for ($j = 1; $j <= $len2; $j++) {
-                $cost = (mb_substr($str1, $i - 1, 1) === mb_substr($str2, $j - 1, 1)) ? 0 : 1;
+        $a = mb_str_split($str1);
+        $b = mb_str_split($str2);
+        $len2 = count($b);
+        if ($a === [] || $len2 === 0) {
+            return max(count($a), $len2);
+        }
 
-                $matrix[$i][$j] = min(
-                    $matrix[$i - 1][$j] + 1,     // deletion
-                    $matrix[$i][$j - 1] + 1,     // insertion
-                    $matrix[$i - 1][$j - 1] + $cost // substitution
+        // Two rows of the matrix are enough
+        $previous = range(0, $len2);
+        foreach ($a as $i => $char) {
+            $current = [$i + 1];
+            foreach ($b as $j => $other) {
+                $current[$j + 1] = min(
+                    $previous[$j + 1] + 1,                     // deletion
+                    $current[$j] + 1,                          // insertion
+                    $previous[$j] + ($char === $other ? 0 : 1) // substitution
                 );
             }
+            $previous = $current;
         }
 
-        return $matrix[$len1][$len2];
+        return $previous[$len2];
     }
 
     /**
@@ -94,12 +89,7 @@ class Levenshtein
      */
     public static function isWithinDistance(string $str1, string $str2, int $maxDistance): bool
     {
-        // Early termination optimization
-        $lenDiff = abs(mb_strlen($str1) - mb_strlen($str2));
-        if ($lenDiff > $maxDistance) {
-            return false;
-        }
-
-        return self::distance($str1, $str2) <= $maxDistance;
+        return abs(mb_strlen($str1) - mb_strlen($str2)) <= $maxDistance
+            && self::distance($str1, $str2) <= $maxDistance;
     }
 }

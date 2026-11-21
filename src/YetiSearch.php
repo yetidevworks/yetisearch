@@ -12,9 +12,11 @@ use YetiSearch\Utils\StemQuery;
 use YetiSearch\Models\SearchQuery;
 use YetiSearch\Geo\GeoPoint;
 use YetiSearch\Geo\GeoBounds;
+use YetiSearch\Geo\GeoUtils;
 use YetiSearch\Cache\CacheManager;
 use YetiSearch\Contracts\ProvidesStemming;
 use YetiSearch\Contracts\EmbeddingProviderInterface;
+use YetiSearch\Exceptions\InvalidArgumentException;
 use YetiSearch\Exceptions\YetiSearchException;
 use YetiSearch\Semantic\NoiseCalibration;
 use YetiSearch\Semantic\SemanticSearch;
@@ -22,6 +24,21 @@ use Psr\Log\LoggerInterface;
 
 class YetiSearch
 {
+    /**
+     * The nested 'fuzzy' search options and the search engine settings they set
+     */
+    private const FUZZY_SETTINGS = [
+        'algorithm' => 'fuzzy_algorithm',
+        'last_token_only' => 'fuzzy_last_token_only',
+        'prefix_last_token' => 'prefix_last_token',
+        'penalty' => 'fuzzy_score_penalty',
+        'jaro_winkler.threshold' => 'jaro_winkler_threshold',
+        'jaro_winkler.prefix_scale' => 'jaro_winkler_prefix_scale',
+        'levenshtein.threshold' => 'levenshtein_threshold',
+        'trigram.size' => 'trigram_size',
+        'trigram.threshold' => 'trigram_threshold',
+    ];
+
     private array $config;
     private ?SqliteStorage $storage = null;
     private ?StandardAnalyzer $analyzer = null;
@@ -306,6 +323,11 @@ class YetiSearch
 
         $this->indexers[$name] = $indexer;
 
+        // A search engine made before ranks by the boosts of this indexer's fields from now on
+        if (isset($this->searchEngines[$name]) && !array_key_exists('field_weights', $this->config['search'])) {
+            $this->searchEngines[$name]->updateConfig(['field_weights' => $indexer->getFieldBoosts()]);
+        }
+
         return $indexer;
     }
 
@@ -341,110 +363,21 @@ class YetiSearch
         unset($this->indexers[$name]);
         unset($this->searchEngines[$name]);
 
-        // Also invalidate cache for this index
-        if ($this->cacheManager) {
-            $this->cacheManager->invalidateIndex($name);
-        }
+        // The storage's query cache holds results of the dropped index too
+        $this->cacheManager()->invalidateIndex($name);
     }
 
     public function search(string $name, string $query, array $options = []): array
     {
         $engine = $this->getSearchEngine($name);
 
-        // Create a SearchQuery object
         $searchQuery = new SearchQuery($query);
-
-        // Apply options
-        if (isset($options['limit'])) {
-            $searchQuery->limit($options['limit']);
-        }
-        if (isset($options['offset'])) {
-            $searchQuery->offset($options['offset']);
-        }
-        if (isset($options['fields'])) {
-            $searchQuery->fields($options['fields']);
-        }
-        if (isset($options['filters'])) {
-            foreach ($options['filters'] as $filter) {
-                $searchQuery->filter($filter['field'], $filter['value'], $filter['operator'] ?? '=');
-            }
-        }
-        if (isset($options['sort'])) {
-            foreach ($options['sort'] as $field => $direction) {
-                $searchQuery->sortBy($field, $direction);
-            }
-        }
-        if (isset($options['language'])) {
-            $searchQuery->language($options['language']);
-        }
-        if (isset($options['fuzzy'])) {
-            $searchQuery->fuzzy($options['fuzzy'], $options['fuzziness'] ?? 0.8);
-        }
-        if (isset($options['highlight'])) {
-            $searchQuery->highlight($options['highlight']);
-        }
-        if (isset($options['bypass_cache'])) {
-            $searchQuery->setOptions(['bypass_cache' => $options['bypass_cache']]);
-        }
-        if (isset($options['facets']) && is_array($options['facets'])) {
-            foreach ($options['facets'] as $facet => $facetOptions) {
-                // ['brand', 'category'] asks for those facets with their defaults
-                if (is_int($facet) && is_string($facetOptions)) {
-                    $searchQuery->facet($facetOptions);
-                } elseif (is_string($facet)) {
-                    $searchQuery->facet($facet, is_array($facetOptions) ? $facetOptions : []);
-                }
-            }
+        $settings = $this->applySearchOptions($searchQuery, $options);
+        if (isset($options['geoFilters']) && is_array($options['geoFilters'])) {
+            $this->applyGeoFilters($searchQuery, $options['geoFilters']);
         }
 
-        // Handle geo filters
-        if (isset($options['geoFilters'])) {
-            $geo = $options['geoFilters'];
-
-            // Units go to the query as they are, and the storage converts once. A
-            // per-near 'units' wins over the filter's top-level 'units'.
-            $units = $geo['near']['units'] ?? ($geo['units'] ?? null);
-
-            if (isset($geo['near'])) {
-                $point = new \YetiSearch\Geo\GeoPoint($geo['near']['point']['lat'], $geo['near']['point']['lng']);
-                $radius = $geo['near']['radius'] ?? 1000;
-                $searchQuery->near($point, (float)$radius);
-            }
-
-            if (isset($geo['within'])) {
-                // ['bounds' => [...]], a GeoBounds, or the bounds array itself
-                $bounds = $geo['within']['bounds'] ?? $geo['within'];
-                if (is_array($bounds)) {
-                    $bounds = \YetiSearch\Geo\GeoBounds::fromArray($bounds);
-                }
-                $searchQuery->within($bounds);
-            }
-
-            // k-nearest takes its point from nearest['from'] or else from distance_sort
-            $nearestFrom = is_array($geo['nearest'] ?? null) ? ($geo['nearest']['from'] ?? null) : null;
-            $sortFrom = $geo['distance_sort']['from'] ?? $nearestFrom;
-            if ($sortFrom !== null) {
-                if (is_array($sortFrom)) {
-                    $sortFrom = new \YetiSearch\Geo\GeoPoint($sortFrom['lat'], $sortFrom['lng']);
-                }
-                $searchQuery->sortByDistance($sortFrom, $geo['distance_sort']['direction'] ?? 'asc');
-            }
-
-            if (isset($geo['nearest'])) {
-                $k = is_array($geo['nearest']) ? ($geo['nearest']['k'] ?? 10) : $geo['nearest'];
-                $searchQuery->nearest((int)$k);
-            }
-
-            if (isset($geo['max_distance'])) {
-                $searchQuery->maxDistance((float)$geo['max_distance']);
-            }
-
-            if ($units !== null) {
-                $searchQuery->geoUnits((string)$units);
-            }
-        }
-
-        $results = $engine->search($searchQuery, $options);
+        $results = $engine->search($searchQuery, array_merge($options, $settings));
 
         // Convert SearchResults to array format
         $documents = [];
@@ -463,6 +396,7 @@ class YetiSearch
             'count' => count($documents),  // Add count for backward compatibility
             'search_time' => $results->getSearchTime(),
             'facets' => $results->getFacets(),
+            'aggregations' => $results->getAggregations(),
             'suggestion' => $suggestion,  // Singular for "did you mean?" feature
             'suggestions' => $suggestion ? [$suggestion] : [],  // Plural for compatibility
             // True when meaning took part in the ranking; false for keyword
@@ -471,12 +405,157 @@ class YetiSearch
         ];
     }
 
+    /**
+     * Puts the options search() and query() share on a query, and returns the
+     * search engine settings among them: the nested 'fuzzy' options under their
+     * setting names, and the field weights ('boost' is another name for
+     * 'field_weights'). The highlight length is 'snippet_length' or
+     * 'highlight_length', else the search.snippet_length config.
+     */
+    private function applySearchOptions(SearchQuery $searchQuery, array $options): array
+    {
+        $settings = [];
+
+        if (isset($options['limit'])) {
+            $searchQuery->limit((int)$options['limit']);
+        }
+        if (isset($options['offset'])) {
+            $searchQuery->offset((int)$options['offset']);
+        }
+        if (isset($options['fields'])) {
+            $searchQuery->fields($options['fields']);
+        }
+        foreach ($options['filters'] ?? [] as $filter) {
+            $searchQuery->filter($filter['field'], $filter['value'], $filter['operator'] ?? '=');
+        }
+        foreach ($options['sort'] ?? [] as $field => $direction) {
+            $searchQuery->sortBy($field, $direction);
+        }
+        if (isset($options['language'])) {
+            $searchQuery->language($options['language']);
+        }
+
+        // Fuzzy: a boolean, or an array with 'enabled', 'fuzziness' and engine settings
+        $fuzzy = $options['fuzzy'] ?? null;
+        if (is_array($fuzzy)) {
+            $fuzziness = (float)($fuzzy['fuzziness'] ?? $options['fuzziness'] ?? 0.8);
+            $searchQuery->fuzzy((bool)($fuzzy['enabled'] ?? true), $fuzziness);
+            foreach (self::FUZZY_SETTINGS as $path => $setting) {
+                $value = $fuzzy;
+                foreach (explode('.', $path) as $key) {
+                    $value = is_array($value) ? ($value[$key] ?? null) : null;
+                }
+                if ($value !== null) {
+                    $settings[$setting] = $value;
+                }
+            }
+        } elseif ($fuzzy !== null) {
+            $searchQuery->fuzzy((bool)$fuzzy, (float)($options['fuzziness'] ?? 0.8));
+        }
+
+        if (isset($options['highlight'])) {
+            $searchQuery->highlight((bool)$options['highlight']);
+        }
+        $length = $options['snippet_length']
+            ?? $options['highlight_length']
+            ?? $this->config['search']['snippet_length']
+            ?? null;
+        if ($length !== null) {
+            $searchQuery->snippetLength((int)$length);
+        }
+
+        $weights = $options['field_weights'] ?? $options['boost'] ?? null;
+        if (is_array($weights) && !empty($weights)) {
+            foreach ($weights as $field => $weight) {
+                $searchQuery->weight($field, (float)$weight);
+            }
+            $settings['field_weights'] = $weights;
+        }
+
+        if (isset($options['bypass_cache'])) {
+            $searchQuery->setOptions(['bypass_cache' => $options['bypass_cache']]);
+        }
+
+        foreach (is_array($options['facets'] ?? null) ? $options['facets'] : [] as $facet => $facetOptions) {
+            // ['brand', 'category'] asks for those facets with their defaults
+            if (is_int($facet) && is_string($facetOptions)) {
+                $searchQuery->facet($facetOptions);
+            } elseif (is_string($facet)) {
+                $searchQuery->facet($facet, is_array($facetOptions) ? $facetOptions : []);
+            }
+        }
+
+        // ['avg_price' => ['type' => 'avg', 'field' => 'price']]
+        foreach (is_array($options['aggregations'] ?? null) ? $options['aggregations'] : [] as $name => $aggregation) {
+            if (is_string($name) && is_array($aggregation) && isset($aggregation['type'])) {
+                $searchQuery->aggregate($name, (string)$aggregation['type'], $aggregation);
+            }
+        }
+
+        return $settings;
+    }
+
+    /**
+     * Puts the 'geoFilters' search option on a query. Points and bounds are
+     * GeoPoint and GeoBounds objects or arrays, so the geo filters of a
+     * SearchQuery can be passed as they are.
+     */
+    private function applyGeoFilters(SearchQuery $searchQuery, array $geo): void
+    {
+        // Units go to the query as they are, and the storage converts once. A
+        // per-near 'units' wins over the filter's top-level 'units'.
+        $units = $geo['near']['units'] ?? ($geo['units'] ?? null);
+
+        if (isset($geo['near'])) {
+            $searchQuery->near($this->geoPoint($geo['near']['point'] ?? null), (float)($geo['near']['radius'] ?? 1000));
+        }
+
+        if (isset($geo['within'])) {
+            // ['bounds' => ...] or the bounds themselves
+            $bounds = is_array($geo['within']) ? ($geo['within']['bounds'] ?? $geo['within']) : $geo['within'];
+            $searchQuery->within($bounds instanceof GeoBounds ? $bounds : GeoBounds::fromArray($bounds));
+        }
+
+        // k-nearest takes its point from nearest['from'] or else from distance_sort
+        $nearestFrom = is_array($geo['nearest'] ?? null) ? ($geo['nearest']['from'] ?? null) : null;
+        $sortFrom = $geo['distance_sort']['from'] ?? $nearestFrom;
+        if ($sortFrom !== null) {
+            $searchQuery->sortByDistance($this->geoPoint($sortFrom), $geo['distance_sort']['direction'] ?? 'asc');
+        }
+
+        if (isset($geo['nearest'])) {
+            $k = is_array($geo['nearest']) ? ($geo['nearest']['k'] ?? 10) : $geo['nearest'];
+            $searchQuery->nearest((int)$k);
+        }
+
+        if (isset($geo['max_distance'])) {
+            $searchQuery->maxDistance((float)$geo['max_distance']);
+        }
+
+        if ($units !== null) {
+            $searchQuery->geoUnits((string)$units);
+        }
+    }
+
+    /**
+     * @param GeoPoint|array|string|null $point
+     */
+    private function geoPoint($point): GeoPoint
+    {
+        $geoPoint = GeoUtils::parsePoint($point);
+        if ($geoPoint === null) {
+            throw new InvalidArgumentException('A geo point needs a GeoPoint or an array with lat and lng');
+        }
+
+        return $geoPoint;
+    }
+
     public function indexDocument(string $name, string $id, $content, array $options = []): void
     {
         $indexer = $this->getIndex($name) ?? $this->createIndex($name);
 
-        // Prepare document for indexer
-        $document = is_array($content) ? $content : ['content' => $content];
+        // A string is the text of the document's 'content' field
+        $document = is_array($content) ? $content : ['content' => ['content' => (string)$content]];
         if (!isset($document['id'])) {
             $document['id'] = $id;
         }
@@ -574,18 +653,25 @@ class YetiSearch
             'offset' => 0
         ], $options);
         // The dedicated $query argument is authoritative. Do not allow an
-        // options entry to bypass analysis and FTS5 escaping.
-        $queryArray['query'] = implode(' ', $escapedTokens);
+        // options entry to bypass analysis and FTS5 escaping. Any of the words
+        // matches, as in search(): the documents with all of them, as a phrase
+        // or near each other, rank first.
+        $components = $escapedTokens;
+        if (count($escapedTokens) > 1) {
+            $phrase = '"' . implode(' ', Fts5Escaper::escapeTokens($tokens, true)) . '"';
+            array_unshift($components, $phrase, 'NEAR(' . implode(' ', $escapedTokens) . ', 10)');
+        }
+        $queryArray['query'] = implode(' OR ', array_unique($components));
         // Likewise the stem query: it is built here, never taken from the options
         unset($queryArray['stem_query']);
 
-        // Indexes that stem match each word as typed or by its stem, in the language of
+        // Indexes that stem also match the words by their stems, in the language of
         // the query, else English; the others use the query as typed. It is only made
         // when one of the indexes stems, so a plain index never runs a stemmer.
         $stemQuery = null;
         $stemLanguage = $language ?: 'english';
         if ($escapedTokens && StemmerFactory::isSupported($stemLanguage) && $this->anyIndexStems($storage, $indices)) {
-            $stemQuery = StemQuery::termGroups($analyzer, $tokens, $stemLanguage)['query'];
+            $stemQuery = StemQuery::alternatives($analyzer, $queryArray['query'], $tokens, $stemLanguage)['query'];
         }
         if ($stemQuery !== null) {
             $queryArray['stem_query'] = $stemQuery;
@@ -738,11 +824,7 @@ class YetiSearch
      */
     public function getCacheStats(): array
     {
-        if (!$this->cacheManager) {
-            $this->initializeCacheManager();
-        }
-
-        return $this->cacheManager ? $this->cacheManager->getStats() : [];
+        return $this->cacheManager()->getStats();
     }
 
     /**
@@ -751,13 +833,7 @@ class YetiSearch
      */
     public function clearCache(): void
     {
-        if (!$this->cacheManager) {
-            $this->initializeCacheManager();
-        }
-
-        if ($this->cacheManager) {
-            $this->cacheManager->clearAll();
-        }
+        $this->cacheManager()->clearAll();
 
         foreach ($this->searchEngines as $engine) {
             $engine->clearResultCache();
@@ -769,23 +845,28 @@ class YetiSearch
      */
     public function getCacheInfo(): array
     {
-        if (!$this->cacheManager) {
-            $this->initializeCacheManager();
-        }
-
-        return $this->cacheManager ? $this->cacheManager->getCacheInfo() : [];
+        return $this->cacheManager()->getCacheInfo();
     }
 
     /**
-     * Warm up cache with popular queries
+     * Warm up the caches by running searches ahead of time. Each entry is a
+     * query string, or an array of search() options with the query under 'query'.
      */
     public function warmUpCache(string $indexName, array $popularQueries): array
     {
-        if (!$this->cacheManager) {
-            $this->initializeCacheManager();
+        $start = microtime(true);
+
+        foreach ($popularQueries as $entry) {
+            $options = is_array($entry) ? $entry : ['query' => $entry];
+            $query = (string)($options['query'] ?? '');
+            unset($options['query']);
+            $this->search($indexName, $query, $options);
         }
 
-        return $this->cacheManager ? $this->cacheManager->warmUp($indexName, $popularQueries) : [];
+        return [
+            'queries_warmed' => count($popularQueries),
+            'time_taken' => microtime(true) - $start,
+        ];
     }
 
     /**
@@ -797,11 +878,21 @@ class YetiSearch
         return $engine->generateSuggestions($query, $maxSuggestions);
     }
 
-    private function initializeCacheManager(): void
+    /**
+     * The cache manager, given the storage's query cache when it has one
+     */
+    private function cacheManager(): CacheManager
     {
-        if (!$this->cacheManager && $this->storage) {
-            $this->cacheManager = new CacheManager($this->storage);
+        if ($this->cacheManager === null) {
+            $storage = $this->getStorage();
+            $this->cacheManager = new CacheManager($storage);
+            $queryCache = $storage->getQueryCache();
+            if ($queryCache !== null) {
+                $this->cacheManager->setQueryCache($queryCache);
+            }
         }
+
+        return $this->cacheManager;
     }
 
     public function getSearchEngine(string $name): SearchEngine
@@ -810,162 +901,56 @@ class YetiSearch
             $storage = $this->getStorage();
             $analyzer = $this->getAnalyzer();
 
-            $this->searchEngines[$name] = new SearchEngine(
-                $storage,
-                $analyzer,
-                $name,
-                array_merge($this->config['search'], $this->config['storage']),
-                $this->logger
-            );
+            // The fields are weighed by the boosts they are indexed with, unless the search config
+            // gives its own field_weights (an empty list ranks by text relevance alone)
+            $config = array_merge($this->config['search'], $this->config['storage']);
+            if (!array_key_exists('field_weights', $this->config['search'])) {
+                $config['field_weights'] = isset($this->indexers[$name])
+                    ? $this->indexers[$name]->getFieldBoosts()
+                    : Indexer::boosts($this->config['indexer']['fields'] ?? null);
+            }
+            $this->searchEngines[$name] = new SearchEngine($storage, $analyzer, $name, $config, $this->logger);
             $this->searchEngines[$name]->setSemanticSearch($this->createSemanticSearch());
         }
 
         return $this->searchEngines[$name];
     }
 
+    /**
+     * A SearchQuery for execute(), built from the options given as a second
+     * argument: those search() takes except geoFilters, with 'fuzzy' also as an
+     * array of engine settings, and 'geo_filters' with 'bounds' (min_lat,
+     * min_lng, max_lat, max_lng) and 'near' (lat, lng, radius).
+     */
     public function query(string $index): SearchQuery
     {
+        // The options stay out of the signature, so a class that extends this
+        // one and declares query(string $index) still matches it
+        $options = func_get_args()[1] ?? [];
+
         $searchQuery = new SearchQuery();
-        $fuzzyOptions = [];
+        // The engine settings among the options travel on the query to execute()
+        $searchQuery->setOptions($this->applySearchOptions($searchQuery, $options));
 
-        $options = func_get_args();
-        array_shift($options); // Remove index
-        $options = $options[0] ?? [];
-
-        if (isset($options['fields'])) {
-            $searchQuery->fields($options['fields']);
+        $geo = $options['geo_filters'] ?? [];
+        if (isset($geo['bounds'])) {
+            $bounds = $geo['bounds'];
+            $searchQuery->withinBounds($bounds['max_lat'], $bounds['min_lat'], $bounds['max_lng'], $bounds['min_lng']);
         }
-
-        if (isset($options['limit'])) {
-            $searchQuery->limit($options['limit']);
+        if (isset($geo['near'])) {
+            $point = new GeoPoint($geo['near']['lat'], $geo['near']['lng']);
+            $searchQuery->nearPoint($point, $geo['near']['radius'] ?? 1000);
         }
-
-        if (isset($options['offset'])) {
-            $searchQuery->offset($options['offset']);
-        }
-
-        if (isset($options['filters'])) {
-            foreach ($options['filters'] as $filter) {
-                $searchQuery->filter(
-                    $filter['field'],
-                    $filter['value'],
-                    $filter['operator'] ?? '='
-                );
-            }
-        }
-
-        if (isset($options['sort'])) {
-            foreach ($options['sort'] as $field => $direction) {
-                $searchQuery->sortBy($field, $direction);
-            }
-        }
-
-        if (isset($options['language'])) {
-            $searchQuery->language($options['language']);
-        }
-
-        // Fuzzy config: accept boolean or nested array with aliases
-        if (array_key_exists('fuzzy', $options)) {
-            $f = $options['fuzzy'];
-            if (is_bool($f)) {
-                $searchQuery->fuzzy($f, $options['fuzziness'] ?? 0.8);
-            } elseif (is_array($f)) {
-                // Enabled flag
-                $enabled = (bool)($f['enabled'] ?? true);
-                $searchQuery->fuzzy($enabled, $f['fuzziness'] ?? ($options['fuzziness'] ?? 0.8));
-                // Map nested keys to engine config
-                $map = [
-                    'algorithm' => 'fuzzy_algorithm',
-                    'last_token_only' => 'fuzzy_last_token_only',
-                    'prefix_last_token' => 'prefix_last_token',
-                    'penalty' => 'fuzzy_score_penalty',
-                ];
-                foreach ($map as $k => $to) {
-                    if (array_key_exists($k, $f)) {
-                        $fuzzyOptions[$to] = $f[$k];
-                    }
-                }
-                if (isset($f['jaro_winkler'])) {
-                    $jw = $f['jaro_winkler'];
-                    if (isset($jw['threshold'])) {
-                        $fuzzyOptions['jaro_winkler_threshold'] = $jw['threshold'];
-                    }
-                    if (isset($jw['prefix_scale'])) {
-                        $fuzzyOptions['jaro_winkler_prefix_scale'] = $jw['prefix_scale'];
-                    }
-                }
-                if (isset($f['levenshtein']['threshold'])) {
-                    $fuzzyOptions['levenshtein_threshold'] = $f['levenshtein']['threshold'];
-                }
-                if (isset($f['trigram'])) {
-                    $tg = $f['trigram'];
-                    if (isset($tg['size'])) {
-                        $fuzzyOptions['trigram_size'] = $tg['size'];
-                    }
-                    if (isset($tg['threshold'])) {
-                        $fuzzyOptions['trigram_threshold'] = $tg['threshold'];
-                    }
-                }
-            }
-        }
-
-        if (isset($options['highlight'])) {
-            $searchQuery->highlight($options['highlight']);
-        }
-
-        if (isset($options['snippet_length'])) {
-            $searchQuery->snippetLength($options['snippet_length']);
-        }
-
-        if (isset($options['field_weights'])) {
-            foreach ($options['field_weights'] as $field => $weight) {
-                $searchQuery->weight($field, $weight);
-            }
-        }
-
-        // Boost alias
-        if (isset($options['boost'])) {
-            foreach ($options['boost'] as $field => $weight) {
-                $searchQuery->weight($field, $weight);
-            }
-        }
-
-        // Geo filtering
-        if (isset($options['geo_filters'])) {
-            $geo = $options['geo_filters'];
-
-            if (isset($geo['bounds'])) {
-                $bounds = new GeoBounds(
-                    $geo['bounds']['min_lat'],
-                    $geo['bounds']['min_lng'],
-                    $geo['bounds']['max_lat'],
-                    $geo['bounds']['max_lng']
-                );
-                $searchQuery->withinBounds(
-                    $bounds->getNorth(),
-                    $bounds->getSouth(),
-                    $bounds->getEast(),
-                    $bounds->getWest()
-                );
-            }
-
-            if (isset($geo['near'])) {
-                $point = new GeoPoint($geo['near']['lat'], $geo['near']['lng']);
-                $radius = $geo['near']['radius'] ?? 1000;
-                $searchQuery->nearPoint($point, $radius);
-            }
-        }
-
-        $searchQuery->setOptions($fuzzyOptions);
 
         return $searchQuery;
     }
 
+    /**
+     * Run a SearchQuery, with the engine settings it carries in its options
+     */
     public function execute(SearchQuery $query, string $index): array
     {
-        $engine = $this->getSearchEngine($index);
-        $results = $engine->search($query);
-        return $results->toArray();
+        return $this->getSearchEngine($index)->search($query, $query->getOptions())->toArray();
     }
 
     private function getStorage(): SqliteStorage

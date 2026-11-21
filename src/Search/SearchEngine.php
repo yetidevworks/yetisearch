@@ -4,7 +4,9 @@ namespace YetiSearch\Search;
 
 use YetiSearch\Contracts\SearchEngineInterface;
 use YetiSearch\Contracts\StorageInterface;
+use YetiSearch\Contracts\ProvidesFieldValues;
 use YetiSearch\Contracts\ProvidesStemming;
+use YetiSearch\Contracts\ProvidesTermLookup;
 use YetiSearch\Contracts\TracksIndexChanges;
 use YetiSearch\Contracts\AnalyzerInterface;
 use YetiSearch\Models\SearchQuery;
@@ -26,6 +28,24 @@ use Psr\Log\NullLogger;
 
 class SearchEngine implements SearchEngineInterface
 {
+    /** How much each algorithm counts in the consensus of a typo correction */
+    /** A rare word in the index is also searched as a word one slip away in this many times as many documents */
+    private const KEEP_TYPED_RATIO = 20;
+
+    /** A rare word in the index is also searched as two words run together that stand side by side this many times as often */
+    private const SPLIT_RATIO = 5;
+
+    /** What the frequency of a completion counts for against a word one slip away, for a word cut short */
+    private const PREFIX_WEIGHT = 0.5;
+
+    private const CONSENSUS_WEIGHTS = [
+        'trigram' => 0.25,      // Good for overall similarity
+        'levenshtein' => 0.20,  // Good for edit distance
+        'jaro_winkler' => 0.25, // Good for short strings and prefixes
+        'phonetic' => 0.15,     // Good for sound-alike typos
+        'keyboard' => 0.15,     // Good for fat-finger errors
+    ];
+
     private StorageInterface $storage;
     private AnalyzerInterface $analyzer;
     private LoggerInterface $logger;
@@ -35,9 +55,20 @@ class SearchEngine implements SearchEngineInterface
     /** Whether the search being run bypasses the storage's query cache because it is not cached anywhere */
     private bool $bypassStorageCache = false;
     private array $fuzzyTermMap = [];
-    private ?array $indexedTermsCache = null;
-    private float $indexedTermsCacheTime = 0;
+    /** @var array|null The indexed terms fuzzy matching uses, see lexicon() */
+    private ?array $lexicon = null;
+    private int $lexiconTime = 0;
+    /** @var array The index change token and term limits the lexicon was read with */
+    private array $lexiconKey = [];
+    /** @var array<string, int> Documents matching an FTS expression (see matchCount()) */
+    private array $matchCounts = [];
+    /** The language of the stop words of the query being corrected */
+    private ?string $correctionLanguage = null;
+    /** @var array<string, array<string, int>> The storage's terms by their first two characters (see termsSharingStart()) */
+    private array $termLookup = [];
     private ?array $synonymsCache = null;
+    /** @var mixed The synonyms setting synonymsCache was read from */
+    private $synonymsSource = null;
     private ?SemanticSearch $semantic = null;
     /** The MATCH expression that also finds words by their stems, for the query last processed; null when the index does not stem */
     private ?string $stemQuery = null;
@@ -228,8 +259,12 @@ class SearchEngine implements SearchEngineInterface
             } elseif ($this->config['two_pass_search'] && !empty($this->config['field_weights'])) {
                 $this->logger->debug('Executing two-pass search strategy');
 
-                // First pass: Search only primary fields with high weights
+                // First pass: Search only primary fields with high weights, those among the
+                // fields the search is restricted to when it is
                 $primaryFields = $this->config['primary_fields'];
+                if (!empty($storageQuery['fields'])) {
+                    $primaryFields = array_values(array_intersect($primaryFields, $storageQuery['fields']));
+                }
                 $primaryFieldWeights = [];
                 foreach ($primaryFields as $field) {
                     if (isset($this->config['field_weights'][$field])) {
@@ -287,9 +322,15 @@ class SearchEngine implements SearchEngineInterface
                 $results = array_slice($mergedResults, $originalOffset, $originalLimit);
                 $totalCount = count($mergedResults);
             } else {
-                // Single-pass search (standard mode)
+                // Single-pass search (standard mode). A first page that is not full holds every
+                // match, unless a location filters the rows in PHP (field weights only re-rank
+                // them, from candidates that are never fewer than the page).
                 $results = $this->storageSearch($storageQuery);
-                $totalCount = $this->storage->count($this->indexName, $storageQuery);
+                $totalCount = (int)$storageQuery['offset'] === 0
+                    && count($results) < $storageQuery['limit']
+                    && empty($storageQuery['geoFilters'])
+                    ? count($results)
+                    : $this->storage->count($this->indexName, $storageQuery);
             }
 
             // Pass original query for highlighting
@@ -310,12 +351,12 @@ class SearchEngine implements SearchEngineInterface
 
             $facets = [];
             if (!empty($query->getFacets())) {
-                $facets = $this->computeFacets($query);
+                $facets = $this->computeFacets($query, $storageQuery);
             }
 
             $aggregations = [];
             if (!empty($query->getAggregations())) {
-                $aggregations = $this->computeAggregations($query);
+                $aggregations = $this->computeAggregations($query, $storageQuery);
             }
 
             $searchTime = microtime(true) - $startTime;
@@ -364,14 +405,15 @@ class SearchEngine implements SearchEngineInterface
     /**
      * Semantic ranking applies to a text query ranked by relevance, on an
      * index that holds vectors from the configured model. Geo searches and
-     * explicit sorts keep their own ordering.
+     * explicit sorts keep their own ordering, and a search restricted to some
+     * fields wants a word of the query in them, which a match by meaning has not.
      */
     private function semanticApplies(SearchQuery $query, array $options): bool
     {
         if ($this->semantic === null || (array_key_exists('semantic', $options) && !$options['semantic'])) {
             return false;
         }
-        if (trim($query->getQuery()) === '' || $query->hasGeoFilters()) {
+        if (trim($query->getQuery()) === '' || $query->hasGeoFilters() || $query->getFields() !== []) {
             return false;
         }
         foreach (array_keys($query->getSort()) as $field) {
@@ -613,44 +655,9 @@ class SearchEngine implements SearchEngineInterface
     {
         $this->config = array_merge($this->config, $config);
 
-        // Clear any cached data that might be affected by config changes
-        $this->indexedTermsCache = null;
-        $this->indexedTermsCacheTime = 0;
-    }
-
-    /**
-     * Escape a single user term so it is safe to hand to an FTS5 MATCH expression.
-     *
-     * Only bare alphanumeric terms are legal unquoted in the MATCH grammar.
-     * Anything else — a hyphen in an order number or SKU, a colon, an asterisk,
-     * a quote, a parenthesis — is an operator there and would either change the
-     * meaning of the query or make SQLite reject it outright (a hyphen, for
-     * instance, is read as a column filter, so "BENCH-100821" fails with
-     * "no such column: 100821"). Such terms are wrapped in double quotes, which
-     * makes FTS5 treat them as a literal phrase and re-tokenize them with the
-     * table's own tokenizer.
-     *
-     * This deliberately escapes individual terms only. The operators that
-     * processQuery() builds around them (OR, NEAR(), phrase grouping) are added
-     * outside this method and stay intact.
-     *
-     * @param bool $inPhrase True when the token is being placed inside a
-     *                       double-quoted phrase assembled by the caller.
-     */
-    private function escapeFtsToken(string $token, bool $inPhrase = false): string
-    {
-        return Fts5Escaper::escapeToken($token, $inPhrase);
-    }
-
-    /**
-     * Escape a list of user terms, dropping any that escape to nothing.
-     *
-     * @param array<int, string> $tokens
-     * @return array<int, string>
-     */
-    private function escapeFtsTokens(array $tokens, bool $inPhrase = false): array
-    {
-        return Fts5Escaper::escapeTokens($tokens, $inPhrase);
+        // Results and terms read with the old settings no longer hold
+        $this->clearResultCache();
+        $this->lexicon = null;
     }
 
     /**
@@ -707,10 +714,16 @@ class SearchEngine implements SearchEngineInterface
         $correctedTokens = [];
         $tokenCount = count($tokens);
         $remainingFuzzy = (int)($this->config['fuzzy_total_max_variations'] ?? 30);
+        $this->correctionLanguage = $query->getLanguage() ?: $this->indexStemLanguage;
+        // The last word is searched as a prefix when the config asks, or when it reads as cut short
+        $prefixLast = (bool)($this->config['prefix_last_token'] ?? false);
+        $prefixAlternative = null;
+        // Readings searched beside the words, each an FTS expression (see alternativeReading())
+        $alternatives = [];
 
         foreach ($tokens as $idx => $token) {
             // Mark original terms as exact matches
-            $this->fuzzyTermMap[strtolower($token)] = ['type' => 'exact', 'original' => $token];
+            $this->fuzzyTermMap[mb_strtolower($token)] = ['type' => 'exact', 'original' => $token];
 
             if ($query->isFuzzy() && $this->config['enable_fuzzy']) {
                 // If enabled, only fuzz the last token (better for as-you-type)
@@ -721,13 +734,31 @@ class SearchEngine implements SearchEngineInterface
                 }
 
                 if ($useCorrectionMode) {
-                    // NEW APPROACH: Find single best correction
-                    $correction = $this->findBestCorrection($token);
+                    // NEW APPROACH: Find single best correction. A last word cut short is also
+                    // searched as a prefix, which finds every word it begins, and then needs
+                    // no completion of its own; a correction of it is searched beside it
+                    $cutShort = $idx === $tokenCount - 1 && $this->readsAsPrefix($token);
+                    $correction = $this->findBestCorrection($token, !$cutShort);
+                    if ($cutShort && strncmp($correction, mb_strtolower($token), strlen($token)) === 0) {
+                        $correction = $token;
+                        $prefixLast = true;
+                    } elseif ($cutShort && $correction === $token) {
+                        $prefixLast = true;
+                    } elseif ($cutShort) {
+                        $prefixAlternative = $token . '*';
+                    }
                     $correctedTokens[] = $correction;
+                    $alternative = $correction === $token ? $this->alternativeReading($token) : null;
+                    if ($alternative !== null) {
+                        $alternatives[] = strpos($alternative, ' ') === false
+                            ? Fts5Escaper::escapeToken($alternative)
+                            : self::phrase($alternative);
+                        $this->fuzzyTermMap[$alternative] = ['type' => 'correction', 'original' => $token];
+                    }
 
                     if ($correction !== $token) {
                         // Mark the correction as a fuzzy match
-                        $this->fuzzyTermMap[strtolower($correction)] = [
+                        $this->fuzzyTermMap[mb_strtolower($correction)] = [
                             'type' => 'correction',
                             'original' => $token
                         ];
@@ -760,7 +791,7 @@ class SearchEngine implements SearchEngineInterface
 
                     // Mark fuzzy variations and calculate their distance
                     foreach ($fuzzyTokens as $fuzzyToken) {
-                        if (strtolower($fuzzyToken) !== strtolower($token)) {
+                        if (mb_strtolower($fuzzyToken) !== mb_strtolower($token)) {
                             $fuzzyInfo = [
                                 'type' => 'fuzzy',
                                 'original' => $token
@@ -778,7 +809,7 @@ class SearchEngine implements SearchEngineInterface
                                 $fuzzyInfo['distance'] = 1; // Default for basic algorithm
                             }
 
-                            $this->fuzzyTermMap[strtolower($fuzzyToken)] = $fuzzyInfo;
+                            $this->fuzzyTermMap[mb_strtolower($fuzzyToken)] = $fuzzyInfo;
                         }
                     }
 
@@ -808,12 +839,21 @@ class SearchEngine implements SearchEngineInterface
         }
 
         // Separate exact tokens from fuzzy variations
-        $exactTokens = [];
         $fuzzyTokens = [];
 
-        foreach ($tokensToUse as $token) {
-            $exactTokens[] = $token;
+        // Corrections that make sense together: a word whose neighbour it is never near is
+        // read again with the others ('die herd' is 'die hard', 'blek panther' 'black panther')
+        if ($query->isFuzzy() && $this->config['enable_fuzzy'] && $useCorrectionMode && count($tokensToUse) > 1) {
+            $tokensToUse = $this->correctInContext($tokens, $tokensToUse, $prefixLast);
+            foreach ($tokensToUse as $i => $word) {
+                if ($word !== $correctedTokens[$i]) {
+                    $this->fuzzyTermMap[mb_strtolower($word)] = ['type' => 'correction', 'original' => $tokens[$i]];
+                    $this->logger->debug('Using typo correction', ['original' => $tokens[$i], 'corrected' => $word]);
+                }
+            }
         }
+
+        $exactTokens = $tokensToUse;
 
         // In expansion mode, add fuzzy variations
         if (!$useCorrectionMode) {
@@ -839,34 +879,15 @@ class SearchEngine implements SearchEngineInterface
             }
         }
 
-        // The raw query is an implicit AND of terms in correction mode, and an OR of
-        // components otherwise; a stem query is built to match
-        $termGroups = false;
-
-        // In correction mode with fuzzy, build a clean query with corrected terms
-        if ($query->isFuzzy() && $useCorrectionMode && $this->config['enable_fuzzy']) {
-            $termGroups = true;
-            // Build a simple query with corrected terms
-            // Use the same logic as non-fuzzy search but with corrected tokens
-            $escapedTokens = $this->escapeFtsTokens($exactTokens);
-
-            // Multiple terms - search for all of them (implicit AND in FTS5)
-            $processedQuery = implode(' ', $escapedTokens);
-
-            // Each term may match as typed or by its stem
-            if ($stemLanguage !== null) {
-                // A term that was corrected also matches the stem of the word as typed.
-                // The corrections are one per token, so $tokens line up with $exactTokens
-                // (a merge of two tokens is one token before it is corrected).
-                $grouped = StemQuery::termGroups($this->analyzer, $exactTokens, $stemLanguage, $tokens);
-                $this->stemQuery = $grouped['query'];
-                $this->queryStems = $grouped['stems'];
-            }
-        } elseif ($query->isFuzzy() && !$useCorrectionMode && !empty($fuzzyTokens)) {
+        // The raw query is an OR of components: the phrase, the words near each other, and
+        // each word. A fuzzy search in correction mode builds it from the corrected words, so
+        // it finds what a search without fuzzy finds for them; an AND of the words found
+        // nothing when one of them was not in the documents ('Stir Wars' found no 'Star Wars').
+        if ($query->isFuzzy() && !$useCorrectionMode && !empty($fuzzyTokens)) {
             // Build structured query that strongly prioritizes exact matches
             // Use parentheses to group exact matches with higher priority
             // Optional prefix on last token
-            if (($this->config['prefix_last_token'] ?? false) && !empty($exactTokens)) {
+            if ($prefixLast && !empty($exactTokens)) {
                 $lastIdx = count($exactTokens) - 1;
                 $exactTokens[$lastIdx] .= '*';
             }
@@ -875,7 +896,7 @@ class SearchEngine implements SearchEngineInterface
             $exactComponents = [];
             if (count($tokens) > 1) {
                 // Escape tokens for FTS phrase
-                $escapedTokens = $this->escapeFtsTokens($tokens, true);
+                $escapedTokens = Fts5Escaper::escapeTokens($tokens, true);
                 // Exact phrase gets highest priority
                 if (!empty($escapedTokens)) {
                     $exactComponents[] = '"' . implode(' ', $escapedTokens) . '"';
@@ -883,7 +904,7 @@ class SearchEngine implements SearchEngineInterface
             }
 
             // Escape exact tokens for FTS (as bare terms)
-            $escapedExactTokens = $this->escapeFtsTokens($exactTokens);
+            $escapedExactTokens = Fts5Escaper::escapeTokens($exactTokens);
 
             // Add individual exact tokens with NEAR proximity (if multiple tokens)
             if (count($escapedExactTokens) > 1) {
@@ -897,7 +918,7 @@ class SearchEngine implements SearchEngineInterface
             }
 
             // Build fuzzy component - group them with lower priority
-            $escapedFuzzyTokens = $this->escapeFtsTokens($fuzzyTokens);
+            $escapedFuzzyTokens = Fts5Escaper::escapeTokens($fuzzyTokens);
             $fuzzyComponent = count($escapedFuzzyTokens) > 0 ? '(' . implode(' OR ', $escapedFuzzyTokens) . ')' : '';
 
             // Combine with exact matches having priority
@@ -911,17 +932,18 @@ class SearchEngine implements SearchEngineInterface
                 $processedQuery = $fuzzyComponent;
             }
         } else {
-            // No fuzzy search - use exact tokens (+ synonyms), but build phrase from original tokens only
-            if (($this->config['prefix_last_token'] ?? false) && !empty($exactTokens)) {
+            // No fuzzy variations (a search without fuzzy, or a fuzzy one in correction mode):
+            // the words as searched, plus synonyms
+            if ($prefixLast && !empty($exactTokens)) {
                 $lastIdx = count($exactTokens) - 1;
                 $exactTokens[$lastIdx] .= '*';
             }
 
             $exactComponents = [];
-            $escapedExactTokens = $this->escapeFtsTokens($exactTokens);
-            if (count($tokens) > 1) {
-                // Escape tokens for FTS phrase
-                $escapedTokens = $this->escapeFtsTokens($tokens, true);
+            $escapedExactTokens = Fts5Escaper::escapeTokens($exactTokens);
+            if (count($tokensToUse) > 1) {
+                // The phrase is of the words as searched (corrected, without synonyms)
+                $escapedTokens = Fts5Escaper::escapeTokens($tokensToUse, true);
 
                 // Add exact phrase
                 if (!empty($escapedTokens)) {
@@ -936,62 +958,44 @@ class SearchEngine implements SearchEngineInterface
             foreach ($escapedExactTokens as $token) {
                 $exactComponents[] = $token;
             }
+            if ($prefixAlternative !== null) {
+                $alternatives[] = Fts5Escaper::escapeToken($prefixAlternative);
+            }
+            foreach ($alternatives as $alternative) {
+                $exactComponents[] = $alternative;
+            }
 
             $processedQuery = implode(' OR ', array_unique($exactComponents));
         }
 
-        // Where the raw query is an OR of components, the stems of the query's own terms
-        // join it as further alternatives
-        if ($stemLanguage !== null && !$termGroups && $processedQuery !== '') {
-            $this->stemQuery = $this->buildStemAlternatives(
+        // The stems of the words as searched join the raw query as further alternatives, and
+        // so do those of a word as typed that was corrected: `runs` corrected to `rugs` also
+        // finds what `run` finds. The corrections are one per token, so they line up with
+        // $tokens; the typed words go first, as a prefix applies to the last word searched.
+        if ($stemLanguage !== null && $processedQuery !== '') {
+            $typedWords = [];
+            foreach ($tokensToUse as $i => $word) {
+                if (isset($tokens[$i]) && strcasecmp($tokens[$i], $word) !== 0) {
+                    $typedWords[] = $tokens[$i];
+                }
+            }
+            $alternatives = StemQuery::alternatives(
+                $this->analyzer,
                 $processedQuery,
-                $tokens,
+                array_merge($typedWords, $tokensToUse),
                 $stemLanguage,
-                (bool)($this->config['prefix_last_token'] ?? false)
+                $prefixLast
             );
+            $this->stemQuery = $alternatives['query'];
+            $this->queryStems = array_merge($this->queryStems, $alternatives['stems']);
         }
 
-        // Debug: Log the processed query
-        if ($this->logger) {
-            $this->logger->debug('Processed query', ['original' => $queryText, 'processed' => $processedQuery]);
-        }
+        $this->logger->debug('Processed query', ['original' => $queryText, 'processed' => $processedQuery]);
 
         $newQuery = clone $query;
         $newQuery->setQuery($processedQuery);
 
         return $newQuery;
-    }
-
-    /**
-     * The stem query for a raw query that is an OR of components: the raw query
-     * as it is, or the stem of any of the query's own terms. Synonyms and fuzzy
-     * variants are left out; they match as typed.
-     *
-     * Null when no term has a stem, as the stem query would only repeat the raw one.
-     *
-     * @param string[] $terms The terms the user typed
-     * @param bool $prefixLast Whether the last term is a prefix, as in the raw query
-     */
-    private function buildStemAlternatives(string $rawQuery, array $terms, string $language, bool $prefixLast): ?string
-    {
-        $alternatives = [];
-        $last = count($terms) - 1;
-
-        foreach (array_values($terms) as $i => $term) {
-            foreach (StemQuery::stemsOfTerm($this->analyzer, $term, $language) as $stem) {
-                $escapedStem = $this->escapeFtsToken($stem . ($prefixLast && $i === $last ? '*' : ''));
-                if ($escapedStem !== '') {
-                    $alternatives['_stems : ' . $escapedStem] = true;
-                    $this->queryStems[] = $stem;
-                }
-            }
-        }
-
-        if (empty($alternatives)) {
-            return null;
-        }
-
-        return '(' . $rawQuery . ') OR ' . implode(' OR ', array_keys($alternatives));
     }
 
     /**
@@ -1090,6 +1094,13 @@ class SearchEngine implements SearchEngineInterface
             }
         }
 
+        // The fuzzy penalty compares each result with the query's own terms
+        $penalize = $query->isFuzzy() && !empty($this->fuzzyTermMap);
+        $queryTokens = $penalize ? array_map('mb_strtolower', $this->analyzer->tokenize($query->getQuery())) : [];
+        $systemFields = array_flip([
+            'id', 'score', 'metadata', 'language', 'type', 'timestamp', 'distance', 'centroid_lat', 'centroid_lng',
+        ]);
+
         foreach ($results as $result) {
             if ($result['score'] < $minScore) {
                 continue;
@@ -1097,22 +1108,15 @@ class SearchEngine implements SearchEngineInterface
 
             // Apply fuzzy penalty if this is a fuzzy search
             $adjustedScore = $result['score'];
-            if ($query->isFuzzy() && !empty($this->fuzzyTermMap)) {
-                $fuzzyPenalty = $this->calculateFuzzyPenalty($result, $query);
-                $adjustedScore = $result['score'] * (1 - $fuzzyPenalty);
-
-                $this->logger->debug('Applied fuzzy penalty', [
-                    'original_score' => $result['score'],
-                    'penalty' => $fuzzyPenalty,
-                    'adjusted_score' => $adjustedScore,
-                    'doc_id' => $result['id'] ?? 'unknown'
-                ]);
+            if ($penalize) {
+                $adjustedScore = $result['score'] * (1 - $this->calculateFuzzyPenalty($result, $queryTokens));
             }
+
+            // Content fields, without metadata and system fields
+            $contentFields = array_diff_key($result, $systemFields);
 
             $highlights = [];
             if ($query->shouldHighlight()) {
-                // Extract content fields for highlighting (exclude metadata and system fields)
-                $contentFields = array_diff_key($result, array_flip(['id', 'score', 'metadata', 'language', 'type', 'timestamp', 'distance']));
                 // On an index that stems, the words found by their stem are marked too, in
                 // the language of the result, else of the query, else of the index
                 $stemLanguage = null;
@@ -1141,17 +1145,7 @@ class SearchEngine implements SearchEngineInterface
                 $finalScore = round((1.0 - $dw) * $normalizedScore + $dw * $distanceScore, 1);
             }
 
-            // Extract content fields (exclude metadata and system fields)
-            $contentFields = array_diff_key($result, array_flip(['id', 'score', 'metadata', 'language', 'type', 'timestamp', 'distance']));
             $filteredDocument = $this->filterResultFields($contentFields);
-
-            // Log first result to see structure
-            $this->logger->debug('Result document fields', [
-                'raw_fields' => array_keys($contentFields),
-                'filtered_fields' => array_keys($filteredDocument),
-                'has_route' => isset($filteredDocument['route']),
-                'route_value' => $filteredDocument['route'] ?? 'NOT SET'
-            ]);
 
             $resultData = [
                 'id' => $result['id'],
@@ -1193,9 +1187,7 @@ class SearchEngine implements SearchEngineInterface
 
         // Re-sort results if we applied fuzzy penalties or geo scoring weight, unless the
         // query asked for an order of its own (a distance sort or sortBy)
-        if (!$this->hasRequestedOrder($query)
-            && (($query->isFuzzy() && !empty($this->fuzzyTermMap)) || (($this->config['distance_weight'] ?? 0.0) > 0))
-        ) {
+        if (!$this->hasRequestedOrder($query) && ($penalize || ($this->config['distance_weight'] ?? 0.0) > 0)) {
             usort($processedResults, function ($a, $b) {
                 return $b->getScore() <=> $a->getScore();
             });
@@ -1223,7 +1215,10 @@ class SearchEngine implements SearchEngineInterface
         return $dirs[$idx];
     }
 
-    private function calculateFuzzyPenalty(array $result, SearchQuery $query): float
+    /**
+     * @param string[] $originalTokens The query's terms, lowercased
+     */
+    private function calculateFuzzyPenalty(array $result, array $originalTokens): float
     {
         // Get the configured fuzzy penalty (default 0.5 = 50% penalty for fuzzy matches)
         $basePenalty = $this->config['fuzzy_score_penalty'] ?? 0.5;
@@ -1236,7 +1231,7 @@ class SearchEngine implements SearchEngineInterface
         if (isset($result['document']) && is_array($result['document'])) {
             foreach ($result['document'] as $field => $value) {
                 if (is_string($value)) {
-                    $documentText .= ' ' . strtolower($value);
+                    $documentText .= ' ' . mb_strtolower($value);
                 }
             }
         } else {
@@ -1245,16 +1240,11 @@ class SearchEngine implements SearchEngineInterface
             if (!empty($contentFields)) {
                 foreach ($contentFields as $field => $value) {
                     if (is_string($value)) {
-                        $documentText .= ' ' . strtolower($value);
+                        $documentText .= ' ' . mb_strtolower($value);
                     }
                 }
             }
         }
-
-        // Get original query tokens for exact match detection
-        $queryText = $query->getQuery();
-        $originalTokens = $this->analyzer->tokenize($queryText);
-        $originalTokens = array_map('strtolower', $originalTokens);
 
         // Check for exact phrase match
         $hasExactPhrase = false;
@@ -1500,7 +1490,7 @@ class SearchEngine implements SearchEngineInterface
         }
 
         // Adjust start to show more context before the match
-        $contextBefore = min(50, $length / 3); // Show some context before match
+        $contextBefore = min(50, intdiv($length, 3)); // Show some context before match
         $start = max(0, $bestPosition - $contextBefore);
         $end = min($textLength, $start + $length);
 
@@ -1528,18 +1518,34 @@ class SearchEngine implements SearchEngineInterface
         return $snippet;
     }
 
+    /**
+     * Marks the terms, and their plurals with an 's', in one pass over the text, so a term is
+     * never marked inside another term's mark or inside the tags of one (a query for "mark"
+     * with the default <mark> tag). The terms come longest first.
+     */
     private function highlightTerms(string $text, array $terms): string
     {
-        $highlighted = $text;
-
+        $alternatives = [];
         foreach ($terms as $term) {
-            // Match the term and common variations (plural with 's')
-            $pattern = '/\b(' . preg_quote($term, '/') . 's?)\b/i';
-            $replacement = $this->config['highlight_tag'] . '$1' . $this->config['highlight_tag_close'];
-            $highlighted = preg_replace($pattern, $replacement, $highlighted);
+            if ($term !== '') {
+                $alternatives[] = preg_quote($term, '/');
+            }
+        }
+        if (empty($alternatives)) {
+            return $text;
         }
 
-        return $highlighted;
+        $open = $this->config['highlight_tag'];
+        $close = $this->config['highlight_tag_close'];
+        $highlighted = preg_replace_callback(
+            '/\b((?:' . implode('|', $alternatives) . ')s?)\b/iu',
+            function (array $match) use ($open, $close): string {
+                return $open . $match[1] . $close;
+            },
+            $text
+        );
+
+        return $highlighted ?? $text;
     }
 
     /**
@@ -1642,9 +1648,18 @@ class SearchEngine implements SearchEngineInterface
         return $filtered;
     }
 
-    private function computeFacets(SearchQuery $query): array
+    /**
+     * @param array $storageQuery The query the results were found with. The facets count its
+     *                            matches: the processed text (corrected, expanded and escaped),
+     *                            the filters, the location and the stems.
+     */
+    private function computeFacets(SearchQuery $query, array $storageQuery): array
     {
         $facets = [];
+        $counted = ['query', 'filters', 'language', 'geoFilters', 'stem_query', 'fields'];
+        $facetQuery = ['limit' => 1000, 'offset' => 0] + array_intersect_key($storageQuery, array_flip($counted));
+        // Read once for all the value and range facets
+        $rows = null;
 
         foreach ($query->getFacets() as $name => $options) {
             // Distance facet: bucket results by distance thresholds from a point
@@ -1671,21 +1686,13 @@ class SearchEngine implements SearchEngineInterface
                     $factor = 1609.344;
                 }
 
-                $facetQuery = [
-                    'query' => $query->getQuery(),
-                    'filters' => $query->getFilters(),
-                    'language' => $query->getLanguage(),
-                    'limit' => 1000,
-                    'offset' => 0,
-                    'geoFilters' => [
-                        'distance_sort' => ['from' => $fromArr, 'direction' => 'ASC']
-                    ]
-                ];
-                if ($this->stemQuery !== null) {
-                    $facetQuery['stem_query'] = $this->stemQuery;
-                }
+                // Measured from the facet's point, among the documents the query's location
+                // keeps. A near() of the query is measured from its own point, which is the
+                // facet's in the usual case.
+                $distanceQuery = $facetQuery;
+                $distanceQuery['geoFilters']['distance_sort'] = ['from' => $fromArr, 'direction' => 'ASC'];
                 try {
-                    $results = $this->storageSearch($facetQuery);
+                    $results = $this->storageSearch($distanceQuery);
                     // Counted by position: a float array key would be cut to
                     // an int, putting 1.5 km in the 1 km bucket.
                     $ranges = array_values($ranges);
@@ -1741,21 +1748,8 @@ class SearchEngine implements SearchEngineInterface
                 }
             }
 
-            $facetQuery = [
-                'query' => $query->getQuery(),
-                'filters' => $query->getFilters(),
-                'language' => $query->getLanguage()
-            ];
-            // Counted over the same documents the results are
-            if ($this->stemQuery !== null) {
-                $facetQuery['stem_query'] = $this->stemQuery;
-            }
-
             try {
-                $results = $this->storageSearch(array_merge($facetQuery, [
-                    'limit' => 1000,
-                    'offset' => 0
-                ]));
+                $results = $rows ?? ($rows = $this->storageSearch($facetQuery));
 
                 // A misspelled field, or a facet named after a field no
                 // document has, would otherwise come back empty unexplained.
@@ -1926,11 +1920,110 @@ class SearchEngine implements SearchEngineInterface
         return $facetResults;
     }
 
-    private function computeAggregations(SearchQuery $query): array
+    /**
+     * The aggregations a query asks for (SearchQuery::aggregate()), over every document it
+     * matches: 'count' (how many numbers the field holds), 'sum', 'avg', 'min' and 'max', each as
+     * ['value' => ...], and 'stats' with all five. A field is read as a facet's is; numbers and
+     * numeric strings count, each number of a list once. With no value, avg, min and max are
+     * null and sum is 0.
+     */
+    private function computeAggregations(SearchQuery $query, array $storageQuery): array
     {
-        // Placeholder for aggregation computation
-        // This would be implemented based on specific aggregation types
-        return [];
+        $requested = [];
+        foreach ($query->getAggregations() as $name => $aggregation) {
+            $type = strtolower((string)($aggregation['type'] ?? ''));
+            $field = $aggregation['options']['field'] ?? null;
+            $known = in_array($type, ['count', 'sum', 'avg', 'min', 'max', 'stats'], true);
+            if (!$known || !is_string($field) || !preg_match('/^[a-zA-Z_][a-zA-Z0-9_.]*$/', $field)) {
+                $this->logger->warning(
+                    'Aggregation skipped: it needs a type of count, sum, avg, min, max or stats and a field name',
+                    ['aggregation' => $name]
+                );
+                continue;
+            }
+            $requested[$name] = [$type, $field];
+        }
+        if ($requested === []) {
+            return [];
+        }
+
+        $fields = array_values(array_unique(array_column($requested, 1)));
+        $stats = array_fill_keys($fields, ['count' => 0, 'sum' => 0, 'min' => null, 'max' => null]);
+        $counted = ['query', 'filters', 'language', 'geoFilters', 'stem_query', 'fields'];
+        $matched = array_intersect_key($storageQuery, array_flip($counted));
+        try {
+            foreach ($this->documentValues($matched, $fields) as $values) {
+                foreach ($values as $field => $value) {
+                    foreach (is_array($value) ? $value : [$value] as $item) {
+                        if (!is_int($item) && !is_float($item) && !(is_string($item) && is_numeric($item))) {
+                            continue;
+                        }
+                        $number = $item + 0;
+                        $stat = &$stats[$field];
+                        $stat['count']++;
+                        $stat['sum'] += $number;
+                        $stat['min'] = $stat['min'] === null ? $number : min($stat['min'], $number);
+                        $stat['max'] = $stat['max'] === null ? $number : max($stat['max'], $number);
+                        unset($stat);
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            // The results stand without their aggregations
+            $this->logger->warning('Failed to compute aggregations', ['error' => $e->getMessage()]);
+
+            return [];
+        }
+
+        $aggregations = [];
+        foreach ($requested as $name => [$type, $field]) {
+            $stat = $stats[$field];
+            $stat['avg'] = $stat['count'] > 0 ? (float)$stat['sum'] / $stat['count'] : null;
+            $aggregations[$name] = $type === 'stats'
+                ? [
+                    'count' => $stat['count'],
+                    'sum' => $stat['sum'],
+                    'avg' => $stat['avg'],
+                    'min' => $stat['min'],
+                    'max' => $stat['max'],
+                ]
+                : ['value' => $stat[$type]];
+        }
+
+        return $aggregations;
+    }
+
+    /**
+     * The values of some fields in every document a storage query matches (see
+     * ProvidesFieldValues), read from the results of a search of up to max_results documents
+     * when the storage cannot read them on their own
+     *
+     * @param string[] $fields
+     * @return iterable<array<string, mixed>>
+     */
+    private function documentValues(array $storageQuery, array $fields): iterable
+    {
+        if ($this->storage instanceof ProvidesFieldValues) {
+            return $this->storage->fieldValues($this->indexName, $storageQuery, $fields);
+        }
+
+        $documents = [];
+        $limit = (int)($this->config['max_results'] ?? 1000);
+        foreach ($this->storageSearch(['limit' => $limit, 'offset' => 0] + $storageQuery) as $result) {
+            $values = [];
+            foreach ($fields as $field) {
+                if (strpos($field, 'metadata.') === 0) {
+                    $values[$field] = $result['metadata'][substr($field, 9)] ?? null;
+                } elseif (strpos($field, 'content.') === 0) {
+                    $values[$field] = $result[substr($field, 8)] ?? null;
+                } else {
+                    $values[$field] = $result[$field] ?? ($result['metadata'][$field] ?? null);
+                }
+            }
+            $documents[] = $values;
+        }
+
+        return $documents;
     }
 
     private function generateFuzzyVariations(string $term): array
@@ -1976,110 +2069,129 @@ class SearchEngine implements SearchEngineInterface
         }
     }
 
+    /**
+     * The indexed terms fuzzy matching picks from, at most max_indexed_terms of them, the most
+     * frequent first: 'freq' holds the frequency of each term, and 'length', 'first2' and
+     * 'last2' the terms by their length and by their first and last two characters, keyed by
+     * that order, so a lookup reads only the terms it can match. Read from the storage once per
+     * indexed_terms_cache_ttl, and again after the index changes or a search gives other limits.
+     *
+     * @return array{freq: array<string, int>, length: array<int, array<int, string>>,
+     *               first2: array<string, array<int, string>>, last2: array<string, array<int, string>>}
+     */
+    private function lexicon(): array
+    {
+        $key = [
+            $this->indexChangeToken(),
+            (int)($this->config['min_term_frequency'] ?? 1),
+            (int)($this->config['max_indexed_terms'] ?? 20000),
+        ];
+        $ttl = $this->config['indexed_terms_cache_ttl'] ?? 300;
+        if ($this->lexicon === null || $key !== $this->lexiconKey || (time() - $this->lexiconTime) > $ttl) {
+            $terms = $this->storage->getIndexedTerms($this->indexName, $key[1], $key[2]);
+            $lexicon = ['freq' => [], 'length' => [], 'first2' => [], 'last2' => []];
+            $rank = 0;
+            foreach ($terms as $term => $frequency) {
+                $term = mb_strtolower((string)$term);
+                if (!isset($lexicon['freq'][$term])) {
+                    $lexicon['freq'][$term] = (int)$frequency;
+                    $lexicon['length'][mb_strlen($term)][$rank] = $term;
+                    $lexicon['first2'][mb_substr($term, 0, 2)][$rank] = $term;
+                    $lexicon['last2'][mb_substr($term, -2)][$rank++] = $term;
+                }
+            }
+            $this->lexicon = $lexicon;
+            $this->termLookup = [];
+            $this->matchCounts = [];
+            $this->lexiconTime = time();
+            $this->lexiconKey = $key;
+        }
+
+        return $this->lexicon;
+    }
+
+    /**
+     * The lexicon's terms of $min to $max characters, the most frequent first
+     *
+     * @param array<int, string>|null $from Terms of the lexicon keyed by their order; null for all
+     * @return string[]
+     */
+    private function termsOfLength(int $min, int $max, ?array $from = null): array
+    {
+        $terms = [];
+        if ($from === null) {
+            $byLength = $this->lexicon()['length'];
+            for ($length = max(1, $min); $length <= $max; $length++) {
+                $terms += $byLength[$length] ?? [];
+            }
+        } else {
+            foreach ($from as $rank => $term) {
+                $length = mb_strlen($term);
+                if ($length >= $min && $length <= $max) {
+                    $terms[$rank] = $term;
+                }
+            }
+        }
+        ksort($terms);
+
+        return $terms;
+    }
+
     private function generateLevenshteinVariations(string $term): array
     {
         $variations = [$term]; // Always include the original term
 
         // Skip short terms
-        if (mb_strlen($term) <= 3) {
+        $termLen = mb_strlen($term);
+        if ($termLen <= 3) {
             return $variations;
         }
 
-        // Get configuration
         $threshold = $this->config['levenshtein_threshold'] ?? 2;
-        $minFrequency = $this->config['min_term_frequency'] ?? 1;
         $maxVariations = $this->config['max_fuzzy_variations'] ?? 10;
 
         try {
-            // Use cached indexed terms if available and fresh (5 minute cache)
-            $cacheTimeout = $this->config['indexed_terms_cache_ttl'] ?? 300; // 5 minutes default
-            $now = time();
-
-            if ($this->indexedTermsCache === null || ($now - $this->indexedTermsCacheTime) > $cacheTimeout) {
-                $this->logger->debug('Loading indexed terms from database');
-                $termLimit = $this->config['max_indexed_terms'] ?? 20000;
-                $this->indexedTermsCache = $this->storage->getIndexedTerms($this->indexName, $minFrequency, $termLimit);
-                $this->indexedTermsCacheTime = $now;
-            } else {
-                $this->logger->debug('Using cached indexed terms', [
-                    'cache_age' => $now - $this->indexedTermsCacheTime
-                ]);
-            }
-
-            $indexedTerms = $this->indexedTermsCache;
-
-            // Find terms within the Levenshtein distance threshold
+            $termLower = mb_strtolower($term);
+            $termBigrams = $this->bigrams($termLower);
             $candidateTerms = [];
-            $termLower = strtolower($term);
-            $termLen = mb_strlen($term);
-            $termBigrams = [];
-            if ($termLen >= 4) {
-                for ($i = 0, $n = strlen($termLower) - 1; $i < $n; $i++) {
-                    $termBigrams[] = substr($termLower, $i, 2);
-                }
-                $termBigrams = array_unique($termBigrams);
-            }
 
-            foreach ($indexedTerms as $indexedTerm => $frequency) {
-                // Skip if same as search term (case insensitive)
+            foreach ($this->termsOfLength($termLen - $threshold, $termLen + $threshold) as $indexedTerm) {
                 if (strcasecmp($term, $indexedTerm) === 0) {
                     continue;
                 }
 
-                // Quick length-based filter before expensive distance calculation
-                $indexedLen = mb_strlen($indexedTerm);
-                if (abs($termLen - $indexedLen) > $threshold) {
+                // Skip terms whose first and last characters both differ, and terms that share
+                // no bigram with the term, before measuring the distance
+                if (
+                    $threshold <= 2
+                    && $termLower[0] !== $indexedTerm[0]
+                    && $termLower[-1] !== $indexedTerm[-1]
+                ) {
+                    continue;
+                }
+                if (
+                    mb_strlen($indexedTerm) >= 4
+                    && empty(array_intersect_key($termBigrams, $this->bigrams($indexedTerm)))
+                ) {
                     continue;
                 }
 
-                // Additional optimization: skip if first/last characters differ too much
-                if ($threshold <= 2) {
-                    $indexedLower = strtolower($indexedTerm);
-                    if (
-                        $termLower[0] !== $indexedLower[0] &&
-                        $termLower[strlen($termLower) - 1] !== $indexedLower[strlen($indexedLower) - 1]
-                    ) {
-                        continue;
-                    }
-                }
-
-                // Bigram prefilter for words of reasonable length
-                if ($termLen >= 4 && $indexedLen >= 4) {
-                    $indexedLower = strtolower($indexedTerm);
-                    $indexedBigrams = [];
-                    for ($i = 0, $n = strlen($indexedLower) - 1; $i < $n; $i++) {
-                        $indexedBigrams[] = substr($indexedLower, $i, 2);
-                    }
-                    $indexedBigrams = array_unique($indexedBigrams);
-                    if (empty(array_intersect($termBigrams, $indexedBigrams))) {
-                        continue;
-                    }
-                }
-
-                // Calculate distance only if within bounds
-                if (Levenshtein::isWithinDistance($term, $indexedTerm, $threshold)) {
-                    $distance = Levenshtein::distance($term, $indexedTerm);
+                $distance = Levenshtein::distance($term, $indexedTerm);
+                if ($distance <= $threshold) {
                     $candidateTerms[] = [
                         'term' => $indexedTerm,
                         'distance' => $distance,
-                        'similarity' => Levenshtein::similarity($term, $indexedTerm)
+                        'similarity' => 1.0 - $distance / max($termLen, mb_strlen($indexedTerm)),
                     ];
                 }
             }
 
             // Sort by distance (ascending) and similarity (descending)
             usort($candidateTerms, function ($a, $b) {
-                if ($a['distance'] === $b['distance']) {
-                    return $b['similarity'] <=> $a['similarity'];
-                }
-                return $a['distance'] <=> $b['distance'];
+                return [$a['distance'], $b['similarity']] <=> [$b['distance'], $a['similarity']];
             });
 
-            // Take the best matches up to the limit
-            $candidateTerms = array_slice($candidateTerms, 0, $maxVariations);
-
-            // Extract just the terms
-            foreach ($candidateTerms as $candidate) {
+            foreach (array_slice($candidateTerms, 0, $maxVariations) as $candidate) {
                 $variations[] = $candidate['term'];
             }
         } catch (\Exception $e) {
@@ -2093,6 +2205,21 @@ class SearchEngine implements SearchEngineInterface
         return array_unique($variations);
     }
 
+    /**
+     * The byte pairs of a string, as keys
+     *
+     * @return array<string, true>
+     */
+    private function bigrams(string $text): array
+    {
+        $bigrams = [];
+        for ($i = 0, $n = strlen($text) - 1; $i < $n; $i++) {
+            $bigrams[substr($text, $i, 2)] = true;
+        }
+
+        return $bigrams;
+    }
+
     private function generateJaroWinklerVariations(string $term): array
     {
         $variations = [$term]; // Always include the original term
@@ -2102,46 +2229,17 @@ class SearchEngine implements SearchEngineInterface
             return $variations;
         }
 
-        // Get configuration
-        $threshold = $this->config['jaro_winkler_threshold'] ?? 0.85;
-        $minFrequency = $this->config['min_term_frequency'] ?? 1;
-        $maxVariations = $this->config['max_fuzzy_variations'] ?? 10;
-        $prefixScale = $this->config['jaro_winkler_prefix_scale'] ?? 0.1;
-
         try {
-            // Use cached indexed terms if available
-            $cacheTimeout = $this->config['indexed_terms_cache_ttl'] ?? 300;
-            $now = time();
-
-            if ($this->indexedTermsCache === null || ($now - $this->indexedTermsCacheTime) > $cacheTimeout) {
-                $this->logger->debug('Loading indexed terms from database for Jaro-Winkler');
-                $termLimit = $this->config['max_indexed_terms'] ?? 20000;
-                $this->indexedTermsCache = $this->storage->getIndexedTerms($this->indexName, $minFrequency, $termLimit);
-                $this->indexedTermsCacheTime = $now;
-            }
-
-            $indexedTerms = $this->indexedTermsCache;
-
-            // Find best matches using Jaro-Winkler
-            // Convert associative array to just keys for findBestMatches
             $matches = JaroWinkler::findBestMatches(
                 $term,
-                array_keys($indexedTerms),
-                $threshold,
-                $maxVariations,
-                $prefixScale
+                array_keys($this->lexicon()['freq']),
+                $this->config['jaro_winkler_threshold'] ?? 0.85,
+                $this->config['max_fuzzy_variations'] ?? 10,
+                $this->config['jaro_winkler_prefix_scale'] ?? 0.1
             );
-
-            // Extract just the terms from matches
             foreach ($matches as $match) {
                 $variations[] = $match[0]; // match is [term, score]
             }
-
-            $this->logger->debug('Generated Jaro-Winkler variations', [
-                'term' => $term,
-                'variations' => count($variations) - 1,
-                'threshold' => $threshold
-            ]);
         } catch (\Exception $e) {
             $this->logger->error('Failed to generate Jaro-Winkler variations', [
                 'term' => $term,
@@ -2162,40 +2260,23 @@ class SearchEngine implements SearchEngineInterface
             return $tokens;
         }
 
-        // Load indexed terms
-        $cacheTimeout = $this->config['indexed_terms_cache_ttl'] ?? 300;
-        $now = time();
-
-        if ($this->indexedTermsCache === null || ($now - $this->indexedTermsCacheTime) > $cacheTimeout) {
-            $minFrequency = $this->config['min_term_frequency'] ?? 1;
-            $termLimit = $this->config['max_indexed_terms'] ?? 20000;
-            $this->indexedTermsCache = $this->storage->getIndexedTerms($this->indexName, $minFrequency, $termLimit);
-            $this->indexedTermsCacheTime = $now;
-        }
-
-        $indexedTerms = $this->indexedTermsCache;
-
-        // Build lowercase lookup
-        $indexedLower = [];
-        foreach ($indexedTerms as $t => $freq) {
-            $indexedLower[strtolower($t)] = $freq;
-        }
-
+        $freq = $this->lexicon()['freq'];
         $result = [];
         $i = 0;
+        $count = count($tokens);
 
-        while ($i < count($tokens)) {
+        while ($i < $count) {
             // Try merging current token with next token
-            if ($i < count($tokens) - 1) {
-                $merged = strtolower($tokens[$i]) . strtolower($tokens[$i + 1]);
-                if (isset($indexedLower[$merged])) {
+            if ($i < $count - 1) {
+                $merged = mb_strtolower($tokens[$i] . $tokens[$i + 1]);
+                if (isset($freq[$merged])) {
                     $this->logger->debug('Merged adjacent tokens', [
                         'token1' => $tokens[$i],
                         'token2' => $tokens[$i + 1],
                         'merged' => $merged
                     ]);
                     $result[] = $merged;
-                    $this->fuzzyTermMap[strtolower($merged)] = [
+                    $this->fuzzyTermMap[$merged] = [
                         'type' => 'merge',
                         'original' => $tokens[$i] . ' ' . $tokens[$i + 1]
                     ];
@@ -2212,69 +2293,394 @@ class SearchEngine implements SearchEngineInterface
     }
 
     /**
-     * Find a quick fuzzy match with similarity score
-     * Returns both the match and its trigram similarity for comparison with compound split
+     * The most likely indexed term one edit away from the term: the one with the highest
+     * frequency times editLikelihood(), with its frequency, trigram similarity and score, for
+     * comparison with a compound split
+     *
+     * @return array{term: string, frequency: int, similarity: float, score: float}|null
      */
-    private function findQuickFuzzyMatchWithScore(string $term, array $indexedTerms): ?array
+    private function findQuickFuzzyMatchWithScore(string $term): ?array
     {
-        $termLower = strtolower($term);
-        $termLen = mb_strlen($termLower);
+        $candidates = $this->oneEditCandidates(mb_strtolower($term));
+        if ($candidates === []) {
+            return null;
+        }
+        $best = (string)array_key_first($candidates);
 
-        // Only check for similar-length terms (within 1 character difference)
-        $bestMatch = null;
-        $bestScore = 0;
-        $bestSimilarity = 0;
+        return [
+            'term' => $best,
+            'frequency' => $this->wordFrequency($best),
+            'similarity' => Trigram::similarity(mb_strtolower($term), $best),
+            'score' => $candidates[$best],
+        ];
+    }
 
-        foreach ($indexedTerms as $indexedTerm => $frequency) {
-            $indexedLower = strtolower($indexedTerm);
-            $indexedLen = mb_strlen($indexedLower);
+    /**
+     * The indexed terms one edit from a word, with their frequency times editLikelihood(), the
+     * likeliest first. They come from the lexicon and, when the storage can look terms up, from
+     * the rarer terms that start like the word, those in min_term_frequency documents or more.
+     *
+     * @return array<string, float>
+     */
+    private function oneEditCandidates(string $word): array
+    {
+        $length = mb_strlen($word);
+        if ($length < 2) {
+            return [];
+        }
+        $lexicon = $this->lexicon();
+        $minFrequency = (int)($this->config['min_term_frequency'] ?? 1);
 
-            // Only check terms within 1 character of same length
-            if (abs($indexedLen - $termLen) > 1) {
+        // One edit leaves the first two or the last two characters of a word of four or more
+        $near = ($lexicon['first2'][mb_substr($word, 0, 2)] ?? []) + ($lexicon['last2'][mb_substr($word, -2)] ?? []);
+        $frequencies = [];
+        foreach ($this->termsOfLength($length - 1, $length + 1, $near) as $candidate) {
+            $frequencies[$candidate] = $lexicon['freq'][$candidate];
+        }
+        foreach ($this->termsSharingStart($word) as $candidate => $frequency) {
+            if (
+                !isset($frequencies[$candidate]) && $frequency >= $minFrequency
+                && abs(mb_strlen((string)$candidate) - $length) <= 1
+            ) {
+                $frequencies[(string)$candidate] = $frequency;
+            }
+        }
+
+        $scores = $this->scoreOneEdit($word, $frequencies);
+        // A slip in the second letter changes the first two: with no word found, the rarer words
+        // that start with the first letter are looked through too
+        if ($scores === [] && $length >= 5) {
+            $frequencies = [];
+            foreach ($this->termsSharingStart($word, 1) as $candidate => $frequency) {
+                if ($frequency >= $minFrequency && abs(mb_strlen((string)$candidate) - $length) <= 1) {
+                    $frequencies[(string)$candidate] = $frequency;
+                }
+            }
+            $scores = $this->scoreOneEdit($word, $frequencies);
+        }
+
+        return $scores;
+    }
+
+    /**
+     * Candidates one edit from a word, with their frequency times editLikelihood(), the likeliest
+     * first, leaving out stop words
+     *
+     * @param array<string, int> $frequencies Candidates with their frequencies
+     * @return array<string, float>
+     */
+    private function scoreOneEdit(string $word, array $frequencies): array
+    {
+        $ascii = !preg_match('/[\x80-\xFF]/', $word);
+        $scores = [];
+        foreach ($frequencies as $candidate => $frequency) {
+            $candidate = (string)$candidate;
+            // A swap of two letters is two edits for Levenshtein, one here
+            $distance = $ascii && !preg_match('/[\x80-\xFF]/', $candidate)
+                ? levenshtein($word, $candidate)
+                : Levenshtein::distance($word, $candidate);
+            if ($distance > 2) {
                 continue;
             }
+            $likelihood = self::editLikelihood($word, $candidate);
+            if ($likelihood > 0) {
+                $scores[$candidate] = $frequency * $likelihood;
+            }
+        }
+        // A stop word is no correction: 'herd' is not 'her'
+        $kept = $this->analyzer->removeStopWords(array_map('strval', array_keys($scores)), $this->correctionLanguage);
+        $scores = array_intersect_key($scores, array_flip($kept));
+        arsort($scores);
 
-            // Calculate edit distance (Levenshtein)
-            $editDist = Levenshtein::distance($termLower, $indexedLower);
+        return $scores;
+    }
 
-            // Only consider matches with edit distance <= 1 (single character difference)
-            if ($editDist > 1) {
-                continue;
+    /**
+     * How likely $typed is a slip for $candidate when it is one edit from it: 1 for two
+     * neighbouring letters swapped, a letter left out, a letter typed twice or next to a key
+     * beside it, and a letter replaced by a key beside it or by another vowel; 0.3 for any other
+     * one-letter change; 0 when it is not one edit away (or is the same word)
+     */
+    private static function editLikelihood(string $typed, string $candidate): float
+    {
+        $a = preg_match('/[\x80-\xFF]/', $typed) ? mb_str_split($typed) : str_split($typed);
+        $b = preg_match('/[\x80-\xFF]/', $candidate) ? mb_str_split($candidate) : str_split($candidate);
+        $typedLength = count($a);
+        $candidateLength = count($b);
+        $i = 0;
+        while ($i < $typedLength && $i < $candidateLength && $a[$i] === $b[$i]) {
+            $i++;
+        }
+
+        if ($typedLength === $candidateLength) {
+            if ($i === $typedLength) {
+                return 0.0;
+            }
+            if (array_slice($a, $i + 1) === array_slice($b, $i + 1)) {
+                $vowels = 'aeiouy';
+                $likely = KeyboardProximity::isAdjacentTypo($a[$i], $b[$i])
+                    || (strpos($vowels, $a[$i]) !== false && strpos($vowels, $b[$i]) !== false);
+
+                return $likely ? 1.0 : 0.3;
+            }
+            $swapped = $i + 1 < $typedLength && $a[$i] === $b[$i + 1] && $a[$i + 1] === $b[$i]
+                && array_slice($a, $i + 2) === array_slice($b, $i + 2);
+
+            return $swapped ? 1.0 : 0.0;
+        }
+
+        if ($typedLength === $candidateLength + 1 && array_slice($a, $i + 1) === array_slice($b, $i)) {
+            // A letter too many: likely when it doubles a neighbour or is a key beside one
+            foreach ([$a[$i - 1] ?? null, $a[$i + 1] ?? null] as $neighbour) {
+                $doubled = $neighbour === $a[$i];
+                if ($neighbour !== null && ($doubled || KeyboardProximity::isAdjacentTypo($a[$i], $neighbour))) {
+                    return 1.0;
+                }
             }
 
-            // Calculate trigram similarity for scoring
-            $similarity = Trigram::similarity($termLower, $indexedLower);
+            return 0.3;
+        }
 
-            // Require minimum similarity of 0.4 for single-edit matches
-            if ($similarity >= 0.4) {
-                // Calculate a combined score with frequency weighting
-                $score = $similarity * (1 + log(1 + $frequency) / 10);
-                if ($score > $bestScore) {
-                    $bestScore = $score;
-                    $bestMatch = $indexedTerm;
-                    $bestSimilarity = $similarity;
+        // A letter left out
+        return $typedLength + 1 === $candidateLength && array_slice($a, $i) === array_slice($b, $i + 1) ? 1.0 : 0.0;
+    }
+
+    /**
+     * The corrected words of a query, read again where two neighbours are near each other in
+     * no document: of the readings of the two (each word as typed when it is in the index, its
+     * correction, and the likeliest words one and two edits from it as typed), the pair with the
+     * most documents where they are near, weighted by how likely each reading is. A word of three
+     * characters or less, a known misspelling's correction, a split into two words, and a last
+     * word searched as a prefix are kept.
+     *
+     * @param string[] $typed The words as typed
+     * @param string[] $chosen Their corrections, by position
+     * @return string[]
+     */
+    private function correctInContext(array $typed, array $chosen, bool $prefixLast): array
+    {
+        $typed = array_values($typed);
+        $chosen = array_values($chosen);
+        $last = count($chosen) - 1;
+        // A known misspelling ('fone' is 'phone') is not read again
+        $fixed = function (int $i) use (&$chosen, $typed, $last, $prefixLast): bool {
+            return ($prefixLast && $i === $last) || strpos($chosen[$i], ' ') !== false
+                || PhoneticMatcher::quickPhoneticCorrection($typed[$i]) !== null;
+        };
+        // A short word that is in no document says nothing about its neighbours, which are
+        // read as neighbours of each other
+        $positions = [];
+        foreach ($chosen as $i => $word) {
+            if (mb_strlen($word) > 3 || $this->wordFrequency(mb_strtolower($word)) > 0) {
+                $positions[] = $i;
+            }
+        }
+
+        for ($k = 0; $k + 1 < count($positions); $k++) {
+            [$i, $j] = [$positions[$k], $positions[$k + 1]];
+            if ($fixed($i) || $fixed($j) || $this->nearCount($chosen[$i], $chosen[$j]) > 0) {
+                continue;
+            }
+            // One of the two read again first, the other as it is; then both
+            $lefts = $this->readings($typed[$i], $chosen[$i]);
+            $rights = $this->readings($typed[$j], $chosen[$j]);
+            $best = null;
+            $passes = [[$lefts, [$chosen[$j] => 1.0]], [[$chosen[$i] => 1.0], $rights], [$lefts, $rights]];
+            foreach ($passes as [$leftReadings, $rightReadings]) {
+                foreach ($leftReadings as $left => $leftWeight) {
+                    foreach ($rightReadings as $right => $rightWeight) {
+                        $score = $this->nearCount((string)$left, (string)$right) * $leftWeight * $rightWeight;
+                        if ($score > 0 && ($best === null || $score > $best[2])) {
+                            $best = [(string)$left, (string)$right, $score];
+                        }
+                    }
+                }
+                if ($best !== null) {
+                    [$chosen[$i], $chosen[$j]] = $best;
+                    break;
                 }
             }
         }
 
-        if ($bestMatch !== null) {
-            return [
-                'term' => $bestMatch,
-                'similarity' => $bestSimilarity,
-                'score' => $bestScore
-            ];
+        return $chosen;
+    }
+
+    /**
+     * What a word may have been meant as, with how likely each reading is: the word as typed
+     * when it is in the index (1), its correction (0.5), the likeliest three words one edit from
+     * it (0.1 for a likely slip) and, for a word not in the lexicon, the six commonest words two
+     * edits from it (0.01)
+     *
+     * @return array<string, float>
+     */
+    private function readings(string $typed, string $chosen): array
+    {
+        $word = mb_strtolower($typed);
+        $readings = [$chosen => 0.5];
+        if (mb_strlen($word) <= 3) {
+            return [$chosen => 1.0];
+        }
+        $inIndex = $this->wordFrequency($word) > 0;
+        if ($inIndex) {
+            $readings[$word] = 1.0;
+        }
+        foreach (array_slice($this->oneEditCandidates($word), 0, 3, true) as $candidate => $score) {
+            $likelihood = min(1.0, $score / max(1, $this->wordFrequency((string)$candidate)));
+            $readings[(string)$candidate] = max($readings[(string)$candidate] ?? 0, 0.1 * $likelihood);
+        }
+        // Two slips in a word of the lexicon are too unlikely to consider
+        foreach (isset($this->lexicon()['freq'][$word]) ? [] : $this->twoEditCandidates($word, 6) as $candidate) {
+            $readings[$candidate] = $readings[$candidate] ?? 0.01;
         }
 
-        return null;
+        return $readings;
+    }
+
+    /**
+     * The commonest words of the lexicon two edits from a word that start with the same letter
+     *
+     * @return string[]
+     */
+    private function twoEditCandidates(string $word, int $limit): array
+    {
+        $length = mb_strlen($word);
+        $ascii = !preg_match('/[\x80-\xFF]/', $word);
+        $first = mb_substr($word, 0, 1);
+        $found = [];
+        foreach ($this->termsOfLength($length - 2, $length + 2) as $term) {
+            if (strncmp($term, $first, strlen($first)) !== 0 || $term === $word) {
+                continue;
+            }
+            $distance = $ascii && !preg_match('/[\x80-\xFF]/', $term)
+                ? levenshtein($word, $term)
+                : Levenshtein::distance($word, $term);
+            if ($distance === 2) {
+                $found[] = $term;
+            }
+        }
+        $found = $this->analyzer->removeStopWords($found, $this->correctionLanguage);
+
+        return array_slice($found, 0, $limit);
+    }
+
+    /**
+     * How many documents have two words near each other (within three words, either order)
+     */
+    private function nearCount(string $left, string $right): int
+    {
+        $escaped = Fts5Escaper::escapeTokens([$left, $right]);
+
+        return count($escaped) === 2 ? $this->matchCount('NEAR(' . implode(' ', $escaped) . ', 3)') : 0;
+    }
+
+    /**
+     * How many documents match an FTS expression, remembered until the lexicon is read again
+     */
+    private function matchCount(string $expression): int
+    {
+        $this->lexicon();
+
+        return $this->matchCounts[$expression] ??= $this->storage->count($this->indexName, ['query' => $expression]);
+    }
+
+    /**
+     * What else a rare word of the index, one below the lexicon, may have been meant as: a word
+     * one likely slip away in KEEP_TYPED_RATIO times as many documents ('supermen' is in two,
+     * 'superman' in many), else two words run together that stand side by side SPLIT_RATIO
+     * times as often ('spiderman', 'spider man'). It is searched beside the word, which keeps
+     * the documents that do have the word ('the giver' is not only 'give').
+     */
+    private function alternativeReading(string $word): ?string
+    {
+        $word = mb_strtolower($word);
+        $frequency = $this->wordFrequency($word);
+        if ($frequency === 0 || mb_strlen($word) < 4 || isset($this->lexicon()['freq'][$word])) {
+            return null;
+        }
+        $nearest = $this->findQuickFuzzyMatchWithScore($word);
+        if ($nearest !== null && $nearest['score'] >= self::KEEP_TYPED_RATIO * $frequency) {
+            return $nearest['term'];
+        }
+        $split = ($this->config['enable_compound_word_split'] ?? true) ? $this->tryCompoundWordSplit($word) : null;
+
+        return $split !== null && $this->matchCount(self::phrase($split)) >= self::SPLIT_RATIO * $frequency
+            ? $split
+            : null;
+    }
+
+    /**
+     * A phrase of words for an FTS expression
+     */
+    private static function phrase(string $words): string
+    {
+        return '"' . implode(' ', Fts5Escaper::escapeTokens(explode(' ', $words), true)) . '"';
+    }
+
+    /**
+     * Whether a word reads as the beginning of longer words more than as a word of its own: it
+     * has four characters or more, is not a word of the lexicon, and begins an indexed word in
+     * more documents than it is in itself ('termin', 'knigh', 'incept'; not 'wars', 'angel')
+     */
+    private function readsAsPrefix(string $word): bool
+    {
+        $word = mb_strtolower($word);
+        $length = strlen($word);
+        $lexicon = $this->lexicon();
+        if (
+            mb_strlen($word) < 4
+            || isset($lexicon['freq'][$word])
+            || !($this->config['enable_prefix_matching'] ?? true)
+        ) {
+            return false;
+        }
+
+        $longer = $this->termsSharingStart($word);
+        foreach ($lexicon['first2'][mb_substr($word, 0, 2)] ?? [] as $term) {
+            $longer[$term] = $lexicon['freq'][$term];
+        }
+        $own = $this->wordFrequency($word);
+        foreach ($longer as $term => $frequency) {
+            $term = (string)$term;
+            if ($frequency > $own && strlen($term) > $length && strncmp($term, $word, $length) === 0) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * How many documents a word is in: from the lexicon, else from the storage's terms
+     */
+    private function wordFrequency(string $word): int
+    {
+        return $this->lexicon()['freq'][$word] ?? ($this->termsSharingStart($word)[$word] ?? 0);
+    }
+
+    /**
+     * The indexed terms that start with the first two (or $characters) characters of a word, with
+     * their frequencies, as the storage looks them up; none when it cannot. Kept with the lexicon.
+     *
+     * @return array<string, int>
+     */
+    private function termsSharingStart(string $word, int $characters = 2): array
+    {
+        $start = mb_substr($word, 0, $characters);
+        if (mb_strlen($start) < $characters || !$this->storage instanceof ProvidesTermLookup) {
+            return [];
+        }
+        $this->lexicon();
+
+        return $this->termLookup[$start] ??= $this->storage->termsStartingWith($this->indexName, $start, 20000);
     }
 
     /**
      * Try to split a compound word into valid indexed terms
      * Returns the split version if found, null otherwise
      */
-    private function tryCompoundWordSplit(string $term, array $indexedTerms): ?string
+    private function tryCompoundWordSplit(string $term): ?string
     {
-        $termLower = strtolower($term);
+        $termLower = mb_strtolower($term);
         $termLen = mb_strlen($termLower);
 
         // Only try splits for words of reasonable length
@@ -2282,13 +2688,7 @@ class SearchEngine implements SearchEngineInterface
             return null;
         }
 
-        // Build a set of lowercase indexed terms for quick lookup
-        $indexedLower = [];
-        foreach ($indexedTerms as $t => $freq) {
-            $indexedLower[strtolower($t)] = $freq;
-        }
-
-        // Try splitting at each position
+        $freq = $this->lexicon()['freq'];
         $bestSplit = null;
         $bestScore = 0;
         $minPartLength = 3;
@@ -2297,10 +2697,8 @@ class SearchEngine implements SearchEngineInterface
         for ($i = $minPartLength; $i <= $termLen - $minPartLength; $i++) {
             $part1 = mb_substr($termLower, 0, $i);
             $part2 = mb_substr($termLower, $i);
-
-            // Check if both parts exist in index with sufficient frequency
-            $freq1 = $indexedLower[$part1] ?? 0;
-            $freq2 = $indexedLower[$part2] ?? 0;
+            $freq1 = $freq[$part1] ?? 0;
+            $freq2 = $freq[$part2] ?? 0;
 
             // Skip if either part is too rare (likely false positive)
             if ($freq1 < $minPartFrequency || $freq2 < $minPartFrequency) {
@@ -2323,97 +2721,72 @@ class SearchEngine implements SearchEngineInterface
      * Uses multi-algorithm consensus for improved accuracy
      * Returns the original term if no good correction is found
      */
-    private function findBestCorrection(string $term): string
+    /**
+     * @param bool $complete Whether a word cut short may be completed to the word it begins
+     */
+    private function findBestCorrection(string $term, bool $complete = true): string
     {
-
-        // Skip short terms or if fuzzy is disabled
-        if (mb_strlen($term) <= 3 || !$this->config['enable_fuzzy']) {
+        if (!$this->config['enable_fuzzy']) {
             return $term;
         }
 
-        // Quick check for common phonetic typos first
-        $quickPhonetic = PhoneticMatcher::quickPhoneticCorrection($term);
-        if ($quickPhonetic !== null) {
-            return $quickPhonetic;
+        // Common typos first, which include words of three letters ("teh" is "the"). One that is
+        // also a word of the index is read as the typo only when what it stands for is in
+        // KEEP_TYPED_RATIO times as many documents: 'were' is no slip of 'where', nor a brand
+        // named Fone one of 'phone'
+        $known = PhoneticMatcher::quickPhoneticCorrection($term);
+        if ($known !== null) {
+            $typed = $this->wordFrequency(mb_strtolower($term));
+            if ($typed === 0 || $this->matchCount(self::phrase($known)) >= self::KEEP_TYPED_RATIO * $typed) {
+                return $known;
+            }
         }
 
-        $correctionThreshold = $this->config['correction_threshold'] ?? 0.6;
-        $minFrequency = $this->config['min_term_frequency'] ?? 1;
+        // Other short words are not corrected
+        $termLen = mb_strlen($term);
+        if ($termLen <= 3) {
+            return $term;
+        }
 
         try {
-            // Use cached indexed terms if available
-            $cacheTimeout = $this->config['indexed_terms_cache_ttl'] ?? 300;
-            $now = time();
+            $freq = $this->lexicon()['freq'];
 
-            if ($this->indexedTermsCache === null || ($now - $this->indexedTermsCacheTime) > $cacheTimeout) {
-                $termLimit = $this->config['max_indexed_terms'] ?? 20000;
-                $this->indexedTermsCache = $this->storage->getIndexedTerms($this->indexName, $minFrequency, $termLimit);
-                $this->indexedTermsCacheTime = $now;
-            }
-
-            $indexedTerms = $this->indexedTermsCache;
-            $candidates = [];
-            $termExistsInIndex = false;
-            $termFrequency = 0;
-
-
-
-            // First check if term exists and get its frequency
-            foreach ($indexedTerms as $indexedTerm => $frequency) {
-                if (strtolower($indexedTerm) === strtolower($term)) {
-                    $termExistsInIndex = true;
-                    $termFrequency = (int)$frequency;
-                    break;
-                }
-            }
-
-            // If term exists in the index at all, don't correct it - user typed a valid term
-            // This prevents "correcting" proper nouns or domain-specific terms to similar common words
-            if ($termExistsInIndex) {
+            // A word that is in the index is kept, proper nouns and domain terms included (the
+            // words around it may still correct it, see correctInContext(), and a rare one is
+            // searched beside a commoner reading, see alternativeReading())
+            if ($this->wordFrequency(mb_strtolower($term)) > 0) {
                 return $term;
             }
 
-            // Try prefix matching FIRST - if the term is a clear prefix of an indexed word
-            if (($this->config['enable_prefix_matching'] ?? true) && mb_strlen($term) >= 4) {
-                $prefixMatch = $this->findBestPrefixMatch($term, $indexedTerms);
-                if ($prefixMatch !== null) {
+            // The beginning of a word, unless a word one slip away is the likelier reading
+            $quickFuzzyMatch = $this->findQuickFuzzyMatchWithScore($term);
+            if ($complete && ($this->config['enable_prefix_matching'] ?? true)) {
+                $prefixMatch = $this->findBestPrefixMatch($term);
+                if (
+                    $prefixMatch !== null
+                    && (
+                        $quickFuzzyMatch === null
+                        || $freq[$prefixMatch] * self::PREFIX_WEIGHT >= $quickFuzzyMatch['score']
+                    )
+                ) {
                     return $prefixMatch;
                 }
             }
 
             // Try BOTH quick fuzzy match AND compound split, then compare scores
             // This allows choosing the best interpretation:
-            // - "batmen" → "batman" (fuzzy wins: similar trigrams, typo correction)
+            // - "batmen" → "batman" (fuzzy wins: a likely slip of a common word)
             // - "madmax" → "mad max" (compound wins: exact split into valid words)
-            $quickFuzzyMatch = $this->findQuickFuzzyMatchWithScore($term, $indexedTerms);
-            $compoundSplit = null;
+            $compoundSplit = ($this->config['enable_compound_word_split'] ?? true)
+                ? $this->tryCompoundWordSplit($term)
+                : null;
 
-            if ($this->config['enable_compound_word_split'] ?? true) {
-                $compoundSplit = $this->tryCompoundWordSplit($term, $indexedTerms);
-            }
-
-            // If we have both candidates, use frequency analysis to decide
             if ($quickFuzzyMatch !== null && $compoundSplit !== null) {
                 $fuzzyMatch = $quickFuzzyMatch['term'];
-
-                // Get frequency of fuzzy match
-                $fuzzyFreq = 0;
-                foreach ($indexedTerms as $t => $freq) {
-                    if (strtolower($t) === strtolower($fuzzyMatch)) {
-                        $fuzzyFreq = (int)$freq;
-                        break;
-                    }
-                }
-
-                // Get frequencies of compound split parts
-                $parts = explode(' ', $compoundSplit);
-                $indexedLower = [];
-                foreach ($indexedTerms as $t => $freq) {
-                    $indexedLower[strtolower($t)] = (int)$freq;
-                }
+                $fuzzyFreq = $quickFuzzyMatch['frequency'];
                 $partFreqs = [];
-                foreach ($parts as $part) {
-                    $partFreqs[] = $indexedLower[strtolower($part)] ?? 0;
+                foreach (explode(' ', $compoundSplit) as $part) {
+                    $partFreqs[] = $freq[$part] ?? 0;
                 }
                 $minPartFreq = min($partFreqs);
                 $maxPartFreq = max($partFreqs);
@@ -2421,15 +2794,13 @@ class SearchEngine implements SearchEngineInterface
                 // Check if compound split is "balanced" - both parts have similar frequencies
                 // Unbalanced splits like "scare face" (35 vs 694) suggest false positive
                 // Balanced splits like "mad max" (130 vs 161) are likely real compounds
-                $freqRatio = ($maxPartFreq > 0) ? $minPartFreq / $maxPartFreq : 0;
-                $isBalancedCompound = $freqRatio >= 0.15; // At least 15% ratio
+                $isBalancedCompound = $maxPartFreq > 0 && $minPartFreq / $maxPartFreq >= 0.15;
 
                 // Check if this is a pure substitution with high similarity
                 // Pure substitutions like "supermen" → "superman" (sim=0.538) should prefer fuzzy
                 // But "madmax" → "madman" (sim=0.455) should allow compound "mad max"
-                $fuzzySimilarity = $quickFuzzyMatch['similarity'];
-                $isHighSimilaritySubstitution =
-                    mb_strlen($term) === mb_strlen($fuzzyMatch) && $fuzzySimilarity >= 0.5;
+                $isHighSimilaritySubstitution = $termLen === mb_strlen($fuzzyMatch)
+                    && $quickFuzzyMatch['similarity'] >= 0.5;
 
                 // Key insights:
                 // 1. If fuzzy match is MORE common than the rarest compound part,
@@ -2444,96 +2815,59 @@ class SearchEngine implements SearchEngineInterface
                 // 4. If compound is balanced AND fuzzy match is less common,
                 //    prefer compound split (words run together)
                 //    e.g., "madmax" → "mad max" (130 vs 161)
-                if ($fuzzyFreq > $minPartFreq) {
-                    return $fuzzyMatch;
-                } elseif ($isHighSimilaritySubstitution && $fuzzyFreq > 0) {
-                    // High similarity substitution with valid fuzzy = prefer fuzzy
-                    return $fuzzyMatch;
-                } elseif (!$isBalancedCompound && $fuzzyFreq > 0) {
-                    // Unbalanced compound with a valid fuzzy match - prefer fuzzy
-                    return $fuzzyMatch;
-                } else {
-                    return $compoundSplit;
-                }
-            } elseif ($quickFuzzyMatch !== null) {
+                $preferFuzzy = $fuzzyFreq > $minPartFreq
+                    || ($fuzzyFreq > 0 && ($isHighSimilaritySubstitution || !$isBalancedCompound));
+
+                return $preferFuzzy ? $fuzzyMatch : $compoundSplit;
+            }
+            if ($quickFuzzyMatch !== null) {
                 return $quickFuzzyMatch['term'];
-            } elseif ($compoundSplit !== null) {
+            }
+            if ($compoundSplit !== null) {
                 return $compoundSplit;
             }
 
-            // Generate candidates using multiple algorithms
-            foreach ($indexedTerms as $indexedTerm => $frequency) {
-                // Skip if same as input
-                if (strtolower($indexedTerm) === strtolower($term)) {
-                    continue;
-                }
-
-                // Quick length filter - skip terms that are too different in length
-                $lenDiff = abs(mb_strlen($term) - mb_strlen($indexedTerm));
-                if ($lenDiff > 2) {
-                    continue;
-                }
-
-                $candidate = [
-                    'term' => $indexedTerm,
-                    'frequency' => (int)$frequency,
-                    'scores' => []
-                ];
-
-                // Calculate scores from different algorithms
-                $candidate['scores']['trigram'] = Trigram::similarity($term, $indexedTerm);
-
+            // Otherwise the candidate most algorithms agree on: the highest consensus score, then
+            // the highest score weighted by frequency, then the most frequent term
+            $minConsensus = max(0.65, ($this->config['correction_threshold'] ?? 0.6) * 0.7);
+            $best = null;
+            foreach ($this->termsOfLength($termLen - 2, $termLen + 2) as $indexedTerm) {
+                // A term more than two edits away that keeps less than 45% of the word is not taken
+                // as a correction. This is a rule, not a bound: such a term could reach the
+                // consensus, but it is a different word, not a typo of this one.
                 $distance = Levenshtein::distance($term, $indexedTerm);
-                $maxLen = max(mb_strlen($term), mb_strlen($indexedTerm));
-                $candidate['scores']['levenshtein'] = 1 - ($distance / $maxLen);
-
-                $candidate['scores']['jaro_winkler'] = JaroWinkler::similarity($term, $indexedTerm);
-                $candidate['scores']['phonetic'] = PhoneticMatcher::phoneticSimilarity($term, $indexedTerm);
-                $candidate['scores']['keyboard'] = KeyboardProximity::proximityScore($term, $indexedTerm);
-
-                // Calculate consensus score with weighted algorithm importance
-                $consensusScore = $this->calculateConsensusScore($candidate['scores'], $term, $indexedTerm);
-
-                // Skip candidates with zero consensus score
-                if ($consensusScore <= 0) {
+                $levenshtein = 1 - $distance / max($termLen, mb_strlen($indexedTerm));
+                if ($distance > 2 && $levenshtein < 0.45) {
+                    continue;
+                }
+                $scores = [
+                    'trigram' => 1.0,
+                    'levenshtein' => $levenshtein,
+                    'jaro_winkler' => 1.0,
+                    'phonetic' => PhoneticMatcher::phoneticSimilarity($term, $indexedTerm),
+                    'keyboard' => KeyboardProximity::proximityScore($term, $indexedTerm),
+                ];
+                // The trigram and Jaro-Winkler scores cost the most, and are measured only for a
+                // candidate that could still win with both at 1, their highest
+                $needed = max($minConsensus, $best[1] ?? 0.0);
+                if ($this->calculateConsensusScore($scores) < $needed) {
+                    continue;
+                }
+                $scores['trigram'] = Trigram::similarity($term, $indexedTerm);
+                $scores['jaro_winkler'] = JaroWinkler::similarity($term, $indexedTerm);
+                $consensus = $this->calculateConsensusScore($scores);
+                if ($consensus < $needed) {
                     continue;
                 }
 
-                // Apply frequency weighting (improved formula)
-                $freqWeight = $this->calculateFrequencyWeight($candidate['frequency'], $termFrequency);
-                $candidate['final_score'] = $consensusScore * $freqWeight;
-
-                // Only keep candidates that meet minimum threshold
-                if ($consensusScore >= $correctionThreshold * 0.7) { // Lower threshold for individual algorithms
-                    $candidate['consensus_score'] = $consensusScore;
-                    $candidates[] = $candidate;
+                $weighted = $consensus * $this->calculateFrequencyWeight($freq[$indexedTerm]);
+                if ($weighted >= 0.7 && ($best === null || $consensus > $best[1] || $weighted > $best[2])) {
+                    $best = [$indexedTerm, $consensus, $weighted];
                 }
             }
 
-
-            // Sort by CONSENSUS score first (similarity), then by final_score as tiebreaker
-            // This prevents common words from outranking the correct similar term
-            usort($candidates, function ($a, $b) {
-                // Primary: sort by consensus score (similarity)
-                $consensusDiff = $b['consensus_score'] <=> $a['consensus_score'];
-                if ($consensusDiff !== 0) {
-                    return $consensusDiff;
-                }
-                // Secondary: sort by final score (includes frequency)
-                return $b['final_score'] <=> $a['final_score'];
-            });
-
-            // Try candidates in order until one passes validation
-            foreach ($candidates as $idx => $candidate) {
-                // Additional validation checks
-                if ($this->validateCorrection($term, $candidate, $termExistsInIndex, $termFrequency)) {
-                    return $candidate['term'];
-                }
-
-                // Only try first 10 candidates to avoid performance issues
-                if ($idx >= 9) {
-                    break;
-                }
+            if ($best !== null) {
+                return $best[0];
             }
         } catch (\Exception $e) {
             $this->logger->error('Failed to find enhanced correction', [
@@ -2550,38 +2884,27 @@ class SearchEngine implements SearchEngineInterface
      * Find the best prefix match for a term
      * Returns a term that starts with the input if found
      */
-    private function findBestPrefixMatch(string $term, array $indexedTerms): ?string
+    private function findBestPrefixMatch(string $term): ?string
     {
-        $termLower = strtolower($term);
+        $termLower = mb_strtolower($term);
         $termLen = mb_strlen($termLower);
-        $inputIsCapitalized = $term !== $termLower && ctype_upper(mb_substr($term, 0, 1));
 
         // Only match prefixes for terms of reasonable length
         if ($termLen < 4 || $termLen > 10) {
             return null;
         }
 
+        // Indexed terms 1 to 5 characters longer that start with the term
+        $lexicon = $this->lexicon();
         $matches = [];
-
-        foreach ($indexedTerms as $indexedTerm => $frequency) {
-            $indexedLower = strtolower($indexedTerm);
-            $indexedLen = mb_strlen($indexedLower);
-
-            // Check if the indexed term starts with our query
-            if ($indexedLen > $termLen && strpos($indexedLower, $termLower) === 0) {
-                // Prefer matches that are not too much longer (1-5 chars more)
-                $extraLen = $indexedLen - $termLen;
-                if ($extraLen <= 5) {
-                    // Check if indexed term looks like a proper noun (capitalized)
-                    $isProperNoun = ctype_upper(mb_substr($indexedTerm, 0, 1));
-
-                    $matches[] = [
-                        'term' => $indexedTerm,
-                        'frequency' => (int)$frequency,
-                        'extra_len' => $extraLen,
-                        'is_proper_noun' => $isProperNoun
-                    ];
-                }
+        $sameStart = $lexicon['first2'][mb_substr($termLower, 0, 2)] ?? [];
+        foreach ($this->termsOfLength($termLen + 1, $termLen + 5, $sameStart) as $indexedTerm) {
+            if (strncmp($indexedTerm, $termLower, strlen($termLower)) === 0) {
+                $matches[] = [
+                    'term' => $indexedTerm,
+                    'frequency' => $lexicon['freq'][$indexedTerm],
+                    'extra_len' => mb_strlen($indexedTerm) - $termLen,
+                ];
             }
         }
 
@@ -2609,105 +2932,45 @@ class SearchEngine implements SearchEngineInterface
     }
 
     /**
-     * Calculate consensus score from multiple algorithms
+     * The weighted mean of the algorithms' positive scores, raised by a tenth when two or more
+     * of them reach 0.8; 0 when fewer than two are positive, so no one algorithm (like
+     * phonetic) decides alone
+     *
+     * @param array<string, float> $scores By algorithm
      */
-    private function calculateConsensusScore(array $scores, string $original, string $candidate): float
+    private function calculateConsensusScore(array $scores): float
     {
-        // Weight different algorithms based on their strengths
-        $weights = [
-            'trigram' => 0.25,      // Good for overall similarity
-            'levenshtein' => 0.20,  // Good for edit distance
-            'jaro_winkler' => 0.25, // Good for short strings and prefixes
-            'phonetic' => 0.15,     // Good for sound-alike typos
-            'keyboard' => 0.15      // Good for fat-finger errors
-        ];
-
         $weightedScore = 0.0;
         $totalWeight = 0.0;
-        $validScoreCount = 0;
-        $allAlgorithmsWeight = array_sum($weights); // Total weight of all algorithms
+        $positive = 0;
+        $high = 0;
 
         foreach ($scores as $algorithm => $score) {
-            // Skip invalid scores
-            if (!is_numeric($score) || $score <= 0) {
-                continue;
+            if ($score >= 0.8) {
+                $high++;
             }
-
-            if (isset($weights[$algorithm])) {
-                $weightedScore += $score * $weights[$algorithm];
-                $totalWeight += $weights[$algorithm];
-                $validScoreCount++;
+            if ($score > 0 && isset(self::CONSENSUS_WEIGHTS[$algorithm])) {
+                $weightedScore += $score * self::CONSENSUS_WEIGHTS[$algorithm];
+                $totalWeight += self::CONSENSUS_WEIGHTS[$algorithm];
+                $positive++;
             }
         }
 
-        // Require at least 2 algorithms to have positive scores for a valid correction
-        // This prevents a single algorithm (like phonetic) from dominating the consensus
-        if ($validScoreCount < 2 || $totalWeight <= 0) {
+        if ($positive < 2) {
             return 0.0;
         }
 
-        // Use the weight of algorithms that matched, not all algorithms
-        // This ensures proper normalization
-        $consensusScore = $weightedScore / $totalWeight;
+        $consensusScore = $weightedScore / $totalWeight * ($high >= 2 ? 1.1 : 1.0);
 
-        // Bonus for multiple algorithms agreeing
-        $highScores = array_filter($scores, function ($score) {
-            return is_numeric($score) && $score >= 0.8;
-        });
-        if (count($highScores) >= 2) {
-            $consensusScore *= 1.1; // 10% bonus for consensus
-        }
-
-        return min(1.0, max(0.0, $consensusScore));
+        return min(1.0, $consensusScore);
     }
 
     /**
-     * Calculate improved frequency weighting
+     * More frequent terms are more likely corrections; the weight is capped at 3
      */
-    private function calculateFrequencyWeight(int $candidateFreq, int $originalFreq): float
+    private function calculateFrequencyWeight(int $frequency): float
     {
-        // Base frequency weight (more frequent terms are more likely corrections)
-        $freqWeight = 1.0 + (log(1 + $candidateFreq) / 5.0); // Improved from /10 to /5
-
-        // If original term exists but is rare, heavily prefer more common alternatives
-        if ($originalFreq > 0 && $candidateFreq > $originalFreq * 3) {
-            $freqWeight *= 1.5; // 50% boost for much more common terms
-        }
-
-        // Cap the weight to prevent extreme bias
-        return min($freqWeight, 3.0);
-    }
-
-    /**
-     * Validate correction with additional checks
-     */
-    private function validateCorrection(string $original, array $candidate, bool $originalExists, int $originalFreq): bool
-    {
-        $candidateTerm = $candidate['term'];
-        $finalScore = $candidate['final_score'];
-        $consensusScore = $this->calculateConsensusScore($candidate['scores'], $original, $candidateTerm);
-
-        // Minimum consensus score requirement
-        if ($consensusScore < 0.65) {
-            return false;
-        }
-
-        // If original doesn't exist, be more permissive
-        if (!$originalExists) {
-            return $finalScore >= 0.7;
-        }
-
-        // If original exists but is rare, require stronger evidence
-        if ($originalFreq < 3) {
-            return $finalScore >= 0.8 && $candidate['frequency'] > $originalFreq * 2;
-        }
-
-        // If original exists and is reasonably common, don't correct unless very confident
-        if ($originalFreq >= 3) {
-            return $finalScore >= 0.9 && $candidate['frequency'] > $originalFreq * 5;
-        }
-
-        return false;
+        return min(1.0 + log(1 + $frequency) / 5.0, 3.0);
     }
 
     private function generateTrigramVariations(string $term): array
@@ -2715,55 +2978,23 @@ class SearchEngine implements SearchEngineInterface
         $variations = [$term]; // Always include the original term
 
         // Skip short terms
-        if (mb_strlen($term) <= 3) {
+        $termLen = mb_strlen($term);
+        if ($termLen <= 3) {
             return $variations;
         }
 
-        // Get configuration - lower threshold for better fuzzy matching
-        $threshold = $this->config['trigram_threshold'] ?? 0.3;
-        $minFrequency = $this->config['min_term_frequency'] ?? 1;
-        $maxVariations = $this->config['max_fuzzy_variations'] ?? 10;
-        $ngramSize = $this->config['trigram_size'] ?? 3;
-        // Adaptive n-gram for short tokens
-        if (mb_strlen($term) <= 4) {
-            $ngramSize = 2;
-        }
-
         try {
-            // Use cached indexed terms if available
-            $cacheTimeout = $this->config['indexed_terms_cache_ttl'] ?? 300;
-            $now = time();
-
-            if ($this->indexedTermsCache === null || ($now - $this->indexedTermsCacheTime) > $cacheTimeout) {
-                $this->logger->debug('Loading indexed terms from database for Trigram');
-                $termLimit = $this->config['max_indexed_terms'] ?? 20000;
-                $this->indexedTermsCache = $this->storage->getIndexedTerms($this->indexName, $minFrequency, $termLimit);
-                $this->indexedTermsCacheTime = $now;
-            }
-
-            $indexedTerms = $this->indexedTermsCache;
-
-            // Find best matches using Trigram similarity
-            // Convert associative array to just keys for findBestMatches
             $matches = Trigram::findBestMatches(
                 $term,
-                array_keys($indexedTerms),
-                $threshold,
-                $maxVariations,
-                $ngramSize
+                array_keys($this->lexicon()['freq']),
+                $this->config['trigram_threshold'] ?? 0.3,
+                $this->config['max_fuzzy_variations'] ?? 10,
+                // Adaptive n-gram for short tokens
+                $termLen <= 4 ? 2 : ($this->config['trigram_size'] ?? 3)
             );
-
-            // Extract just the terms from matches
             foreach ($matches as $match) {
                 $variations[] = $match[0]; // match is [term, score]
             }
-
-            $this->logger->debug('Generated Trigram variations', [
-                'term' => $term,
-                'variations' => count($variations) - 1,
-                'threshold' => $threshold,
-                'ngram_size' => $ngramSize
-            ]);
         } catch (\Exception $e) {
             $this->logger->error('Failed to generate Trigram variations', [
                 'term' => $term,
@@ -2776,9 +3007,13 @@ class SearchEngine implements SearchEngineInterface
 
     private function expandSynonyms(array $tokens, ?string $language = null): array
     {
-        if ($this->synonymsCache === null) {
-            $map = $this->config['synonyms'] ?? [];
-            if (is_string($map) && file_exists($map)) {
+        // Read again when a search or updateConfig() gives other synonyms
+        $source = $this->config['synonyms'] ?? [];
+        if ($this->synonymsCache === null || $source !== $this->synonymsSource) {
+            $this->synonymsSource = $source;
+            $map = $source;
+            // A path with a NUL byte is none (file_exists() throws on it from PHP 8.6)
+            if (is_string($map) && strpos($map, "\0") === false && file_exists($map)) {
                 try {
                     $json = file_get_contents($map);
                     $decoded = json_decode($json, true);
@@ -2971,13 +3206,13 @@ class SearchEngine implements SearchEngineInterface
         // Calculate consensus score
         $scores = [
             'trigram' => Trigram::similarity($original, $correction),
-            'levenshtein' => 1 - (Levenshtein::distance($original, $correction) / max(strlen($original), strlen($correction))),
+            'levenshtein' => Levenshtein::similarity($original, $correction),
             'jaro_winkler' => JaroWinkler::similarity($original, $correction),
             'phonetic' => PhoneticMatcher::phoneticSimilarity($original, $correction),
             'keyboard' => KeyboardProximity::proximityScore($original, $correction)
         ];
 
-        $consensusScore = $this->calculateConsensusScore($scores, $original, $correction);
+        $consensusScore = $this->calculateConsensusScore($scores);
 
         // Boost for keyboard proximity typos (very common)
         if ($scores['keyboard'] >= 0.8) {
@@ -3076,30 +3311,20 @@ class SearchEngine implements SearchEngineInterface
 
     private function cacheResults(?string $key, SearchResults $results, ?string $changeToken): void
     {
-        if ($key === null) {
+        // With no cache_ttl nothing would ever be read back
+        if ($key === null || ($this->config['cache_ttl'] ?? 0) <= 0) {
             return;
         }
 
+        // Entries are added in time order, so the first one is the oldest
+        unset($this->cache[$key]);
         $this->cache[$key] = [
             'results' => $results,
             'time' => time(),
             'token' => $changeToken,
         ];
-
         if (count($this->cache) > 100) {
-            $oldestKey = null;
-            $oldestTime = PHP_INT_MAX;
-
-            foreach ($this->cache as $k => $v) {
-                if ($v['time'] < $oldestTime) {
-                    $oldestTime = $v['time'];
-                    $oldestKey = $k;
-                }
-            }
-
-            if ($oldestKey !== null) {
-                unset($this->cache[$oldestKey]);
-            }
+            unset($this->cache[array_key_first($this->cache)]);
         }
     }
 }

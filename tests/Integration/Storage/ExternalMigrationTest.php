@@ -67,7 +67,7 @@ class ExternalMigrationTest extends TestCase
         $this->assertStringContainsString("content='" . $index . "'", str_replace('"', "'", $ftsSql));
         $this->assertStringContainsString("content_rowid='doc_id'", str_replace('"', "'", $ftsSql));
 
-        // Spatial is recreated empty; re-upsert docs to populate spatial index
+        // Spatial keeps its rows under the new ids, and re-upserted docs keep it populated
         $search->indexBatch($index, $docs);
         $search->getIndexer($index)->flush();
         $countSpatial = (int)$pdo->query("SELECT COUNT(*) FROM {$index}_spatial")->fetchColumn();

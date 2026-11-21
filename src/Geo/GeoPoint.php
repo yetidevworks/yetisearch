@@ -53,20 +53,7 @@ class GeoPoint implements \JsonSerializable
      */
     public function distanceTo(GeoPoint $other): float
     {
-        $earthRadius = 6371000; // Earth radius in meters
-
-        $lat1Rad = deg2rad($this->latitude);
-        $lat2Rad = deg2rad($other->getLatitude());
-        $deltaLatRad = deg2rad($other->getLatitude() - $this->latitude);
-        $deltaLngRad = deg2rad($other->getLongitude() - $this->longitude);
-
-        $a = sin($deltaLatRad / 2) * sin($deltaLatRad / 2) +
-             cos($lat1Rad) * cos($lat2Rad) *
-             sin($deltaLngRad / 2) * sin($deltaLngRad / 2);
-
-        $c = 2 * atan2(sqrt($a), sqrt(1 - $a));
-
-        return $earthRadius * $c;
+        return GeoUtils::distanceBetween($this->latitude, $this->longitude, $other->latitude, $other->longitude);
     }
 
     /**
@@ -84,10 +71,8 @@ class GeoPoint implements \JsonSerializable
      */
     public function getBoundingBox(float $radiusInMeters): GeoBounds
     {
-        $earthRadius = 6371000; // Earth radius in meters
-
         // Angular distance in radians
-        $angularDistance = max(0.0, $radiusInMeters) / $earthRadius;
+        $angularDistance = max(0.0, $radiusInMeters) / GeoUtils::EARTH_RADIUS_METERS;
 
         $lat = deg2rad($this->latitude);
         $lng = deg2rad($this->longitude);

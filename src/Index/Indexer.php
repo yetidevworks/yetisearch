@@ -13,6 +13,18 @@ use Psr\Log\NullLogger;
 
 class Indexer implements IndexerInterface
 {
+    /** The fields an indexer indexes when its config names none */
+    private const DEFAULT_FIELDS = [
+        'title' => ['boost' => 3.0, 'store' => true],
+        'content' => ['boost' => 1.0, 'store' => true],
+        'excerpt' => ['boost' => 2.0, 'store' => true],
+        'tags' => ['boost' => 2.5, 'store' => true],
+        'category' => ['boost' => 2.0, 'store' => true],
+        'author' => ['boost' => 1.5, 'store' => true],
+        'url' => ['boost' => 1.0, 'store' => true, 'index' => false],
+        'route' => ['boost' => 1.0, 'store' => true, 'index' => false],
+    ];
+
     private StorageInterface $storage;
     private AnalyzerInterface $analyzer;
     private LoggerInterface $logger;
@@ -35,26 +47,55 @@ class Indexer implements IndexerInterface
         $this->config = array_merge([
             'batch_size' => 100,
             'auto_flush' => true,
-            'fields' => [
-                'title' => ['boost' => 3.0, 'store' => true],
-                'content' => ['boost' => 1.0, 'store' => true],
-                'excerpt' => ['boost' => 2.0, 'store' => true],
-                'tags' => ['boost' => 2.5, 'store' => true],
-                'category' => ['boost' => 2.0, 'store' => true],
-                'author' => ['boost' => 1.5, 'store' => true],
-                'url' => ['boost' => 1.0, 'store' => true, 'index' => false],
-                'route' => ['boost' => 1.0, 'store' => true, 'index' => false]
-            ],
+            'fields' => self::DEFAULT_FIELDS,
             'chunk_size' => 1000,
             'chunk_overlap' => 100
         ], $config);
 
         $this->config['fields'] = $this->normalizeFieldsConfig($this->config['fields']);
 
-        $this->batchSize = $this->config['batch_size'];
+        $this->batchSize = (int)$this->config['batch_size'];
+        if ($this->batchSize < 1) {
+            throw new InvalidArgumentException(
+                "Indexer option 'batch_size' must be at least 1, {$this->batchSize} given"
+            );
+        }
         $this->logger = $logger ?? new NullLogger();
 
         $this->ensureIndexExists();
+    }
+
+    /**
+     * The boost of each field this indexer indexes, by which search ranks its documents (see
+     * boosts())
+     *
+     * @return array<string, float>
+     */
+    public function getFieldBoosts(): array
+    {
+        return self::boosts($this->config['fields']);
+    }
+
+    /**
+     * The boost of each field indexed with a `fields` option (null for the default fields): a
+     * field listed by name alone, or without a boost, has 1.0. None when every field has the
+     * same boost, as then there is nothing to weigh.
+     *
+     * @param array|null $fields
+     * @return array<string, float>
+     */
+    public static function boosts(?array $fields): array
+    {
+        $boosts = [];
+        foreach ($fields ?? self::DEFAULT_FIELDS as $name => $field) {
+            if (is_int($name) && is_string($field)) {
+                $boosts[$field] = 1.0;
+            } elseif (is_string($name) && is_array($field) && ($field['index'] ?? true)) {
+                $boosts[$name] = (float)($field['boost'] ?? 1.0);
+            }
+        }
+
+        return count(array_unique($boosts)) > 1 ? $boosts : [];
     }
 
     /**
@@ -158,24 +199,22 @@ class Indexer implements IndexerInterface
                 continue;
             }
 
-            $id = $document['id'] ?? bin2hex(random_bytes(8));
-
             try {
                 $processed[] = $this->processDocument($document);
             } catch (StorageException $e) {
                 // A document that cannot be stored stops the whole call before anything is written
                 $this->logger->error('Document cannot be stored', [
-                    'id' => $id,
+                    'id' => $document['id'] ?? null,
                     'error' => $e->getMessage()
                 ]);
                 throw $e;
             } catch (\Exception $e) {
                 $errors[] = [
-                    'id' => $id,
+                    'id' => $document['id'] ?? null,
                     'error' => $e->getMessage()
                 ];
                 $this->logger->error('Failed to process document', [
-                    'id' => $id,
+                    'id' => $document['id'] ?? null,
                     'error' => $e->getMessage()
                 ]);
             }
@@ -233,6 +272,7 @@ class Indexer implements IndexerInterface
                 // The chunks and the document go in one call, so they are stored together or not at all
                 $this->storage->insertBatch($this->indexName, $group);
             }
+            $this->dropQueued($id);
 
             $this->logger->info('Document updated successfully', ['id' => $id]);
         } catch (\Exception $e) {
@@ -250,6 +290,7 @@ class Indexer implements IndexerInterface
 
         try {
             $this->storage->delete($this->indexName, $id);
+            $this->dropQueued($id);
             $this->logger->info('Document deleted successfully', ['id' => $id]);
         } catch (\Exception $e) {
             $this->logger->error('Failed to delete document', [
@@ -332,6 +373,30 @@ class Indexer implements IndexerInterface
     }
 
     /**
+     * Nothing else flushes a queue left behind when auto_flush is off, so its documents would be
+     * lost. A destructor must not throw, so a failure is logged.
+     */
+    public function __destruct()
+    {
+        try {
+            $this->flush();
+        } catch (\Throwable $e) {
+            $this->logger->error('Failed to flush queued documents', ['error' => $e->getMessage()]);
+        }
+    }
+
+    /**
+     * Forget the queued version of a document and its chunks, so that a write made straight to the
+     * storage is not overwritten, or a deleted document brought back, by the next flush.
+     */
+    private function dropQueued($id): void
+    {
+        $this->batchQueue = array_values(array_filter($this->batchQueue, function (array $group) use ($id) {
+            return (string)end($group)['id'] !== (string)$id;
+        }));
+    }
+
+    /**
      * Turn a document into the storage documents that are written for it: its chunks, if it has
      * any, and then the document itself. Nothing is written here. The document, its metadata and
      * every chunk are checked first, so one that cannot be stored is refused before any of them is.
@@ -366,98 +431,48 @@ class Indexer implements IndexerInterface
             }
         }
 
-        // Check if pre-chunked documents were provided
-        if (isset($document['chunks']) && is_array($document['chunks']) && !empty($document['chunks'])) {
-            // Use provided chunks instead of automatic chunking
-            $chunks = $document['chunks'];
+        // Pre-chunked documents are used as they are; other content is chunked when it is long
+        // enough to make more than one chunk (a lone chunk would only repeat the document).
+        $preChunked = !empty($document['chunks']) && is_array($document['chunks']);
+        $chunks = $preChunked ? $document['chunks'] : $this->chunkContent($processedContent);
+        if (!$preChunked && count($chunks) < 2) {
+            $chunks = [];
+        }
+        if ($chunks) {
             $metadata['chunks'] = count($chunks);
             $metadata['chunked'] = true;
-            $metadata['pre_chunked'] = true;
-
-            $chunkDocs = [];
-            foreach ($chunks as $index => $chunkData) {
-                // Support both simple string chunks and structured chunks
-                if (is_string($chunkData)) {
-                    // Simple string chunk - merge with parent content
-                    $chunkContentArray = array_merge($processedContent, ['content' => $chunkData]);
-                    $chunkMetadata = [];
-                } else {
-                    // Structured chunk with content and optional metadata
-                    $chunkContentData = $chunkData['content'] ?? '';
-                    $chunkMetadata = $chunkData['metadata'] ?? [];
-
-                    // If content is an array (pre-processed by plugin), use it directly
-                    // Otherwise, merge string content with parent
-                    if (is_array($chunkContentData)) {
-                        $chunkContentArray = $chunkContentData;
-                    } else {
-                        $chunkContentArray = array_merge($processedContent, ['content' => $chunkContentData]);
-                    }
-                }
-
-                $chunkId = $id . '#chunk' . $index;
-                $chunkDoc = [
-                    'id' => $chunkId,
-                    'parent_id' => $id,
-                    'content' => $chunkContentArray,
-                    'metadata' => array_merge($metadata, $chunkMetadata, [
-                        'chunk_index' => $index,
-                        'is_chunk' => true,
-                        'parent_route' => $chunkContentArray['route'] ?? $processedContent['route'] ?? ''
-                    ]),
-                    'language' => $language,
-                    'type' => $type,
-                    'timestamp' => $timestamp
-                ];
-
-                // Include geo data in chunks
-                if (isset($document['geo'])) {
-                    $chunkDoc['geo'] = $document['geo'];
-                }
-                if (isset($document['geo_bounds'])) {
-                    $chunkDoc['geo_bounds'] = $document['geo_bounds'];
-                }
-
-                $chunkDocs[] = $chunkDoc;
+            if ($preChunked) {
+                $metadata['pre_chunked'] = true;
             }
-        } elseif ($this->shouldChunkContent($processedContent)) {
-            // Use automatic chunking if no pre-chunks provided
-            $chunks = $this->chunkContent($processedContent);
-            $metadata['chunks'] = count($chunks);
-            $metadata['chunked'] = true;
-
-            $chunkDocs = [];
-            foreach ($chunks as $index => $chunk) {
-                $chunkId = $id . '#chunk' . $index;
-                $chunkDoc = [
-                    'id' => $chunkId,
-                    'parent_id' => $id,
-                    'content' => array_merge($processedContent, ['content' => $chunk]),
-                    'metadata' => array_merge($metadata, [
-                        'chunk_index' => $index,
-                        'is_chunk' => true,
-                        'parent_route' => $processedContent['route'] ?? ''
-                    ]),
-                    'language' => $language,
-                    'type' => $type,
-                    'timestamp' => $timestamp
-                ];
-
-                // Include geo data in chunks
-                if (isset($document['geo'])) {
-                    $chunkDoc['geo'] = $document['geo'];
-                }
-                if (isset($document['geo_bounds'])) {
-                    $chunkDoc['geo_bounds'] = $document['geo_bounds'];
-                }
-
-                $chunkDocs[] = $chunkDoc;
-            }
-        } else {
-            $chunkDocs = [];
         }
 
-        $data = [
+        $chunkDocs = [];
+        foreach ($chunks as $index => $chunkData) {
+            // A chunk is a string, merged with the parent content, or an array with content and
+            // optional metadata. Content that is an array (pre-processed by a plugin) is used as is.
+            $chunkMetadata = is_array($chunkData) ? ($chunkData['metadata'] ?? []) : [];
+            $chunkContent = is_array($chunkData) ? ($chunkData['content'] ?? '') : $chunkData;
+            if (!is_array($chunkContent)) {
+                $chunkContent = array_merge($processedContent, ['content' => $chunkContent]);
+            }
+
+            $chunkDocs[] = [
+                'id' => $id . '#chunk' . $index,
+                'parent_id' => $id,
+                'content' => $chunkContent,
+                'metadata' => array_merge($metadata, $chunkMetadata, [
+                    'chunk_index' => $index,
+                    'is_chunk' => true,
+                    'parent_route' => $chunkContent['route'] ?? $processedContent['route'] ?? ''
+                ]),
+                'language' => $language,
+                'type' => $type,
+                'timestamp' => $timestamp
+            ];
+        }
+
+        $group = $chunkDocs;
+        $group[] = [
             'id' => $id,
             'content' => $processedContent,
             'metadata' => $metadata,
@@ -467,19 +482,16 @@ class Indexer implements IndexerInterface
             'indexed_at' => time()
         ];
 
-        // Include geo data if present
-        if (isset($document['geo'])) {
-            $data['geo'] = $document['geo'];
-        }
-        if (isset($document['geo_bounds'])) {
-            $data['geo_bounds'] = $document['geo_bounds'];
-        }
-
-        $group = $chunkDocs;
-        $group[] = $data;
-        foreach ($group as $storageDocument) {
+        foreach ($group as &$storageDocument) {
+            // The document and each of its chunks carry its geo data
+            foreach (['geo', 'geo_bounds'] as $key) {
+                if (isset($document[$key])) {
+                    $storageDocument[$key] = $document[$key];
+                }
+            }
             $this->assertStorable($storageDocument);
         }
+        unset($storageDocument);
 
         return $group;
     }
@@ -495,6 +507,9 @@ class Indexer implements IndexerInterface
     private function assertStorable(array $document): void
     {
         foreach (['content', 'metadata'] as $what) {
+            if (self::alwaysEncodes($document[$what] ?? [])) {
+                continue;
+            }
             try {
                 $json = json_encode($document[$what] ?? [], JSON_INVALID_UTF8_SUBSTITUTE, 511);
             } catch (\Throwable $e) {
@@ -514,53 +529,111 @@ class Indexer implements IndexerInterface
         }
     }
 
-    private function shouldChunkContent(array $content): bool
+    /**
+     * Whether a value is one json_encode() cannot fail on, without encoding it: strings (invalid
+     * UTF-8 is replaced), integers, booleans, null, finite floats, and arrays of them up to a depth
+     * of 8, far under the limit of 511. Objects, resources, INF, NAN and deeper arrays are encoded
+     * to find out.
+     *
+     * @param mixed $value
+     */
+    private static function alwaysEncodes($value, int $depth = 0): bool
     {
-        $mainContent = $content['content'] ?? '';
-        return is_string($mainContent) && strlen($mainContent) > $this->config['chunk_size'];
-    }
-
-    private function chunkContent(array $content): array
-    {
-        $mainContent = $content['content'] ?? '';
-        if (!is_string($mainContent)) {
-            return [];
+        if (is_float($value)) {
+            return is_finite($value);
         }
-
-        $chunkSize = $this->config['chunk_size'];
-        $overlap = $this->config['chunk_overlap'];
-        $chunks = [];
-
-        $sentences = preg_split('/(?<=[.!?])\s+/', $mainContent, -1, PREG_SPLIT_NO_EMPTY);
-
-        $currentChunk = '';
-        $currentSize = 0;
-
-        foreach ($sentences as $sentence) {
-            $sentenceSize = strlen($sentence);
-
-            if ($currentSize + $sentenceSize > $chunkSize && !empty($currentChunk)) {
-                $chunks[] = trim($currentChunk);
-
-                $overlapText = $this->getOverlapText($currentChunk, $overlap);
-                $currentChunk = $overlapText . ' ' . $sentence;
-                $currentSize = strlen($currentChunk);
-            } else {
-                $currentChunk .= ' ' . $sentence;
-                $currentSize += $sentenceSize + 1;
+        if (!is_array($value)) {
+            return $value === null || is_scalar($value);
+        }
+        if ($depth >= 8) {
+            return false;
+        }
+        foreach ($value as $item) {
+            if (!self::alwaysEncodes($item, $depth + 1)) {
+                return false;
             }
         }
 
-        if (!empty($currentChunk)) {
+        return true;
+    }
+
+    /**
+     * Split the main content into chunks of about chunk_size characters, on sentences where
+     * there are any, then on lines, then on words, and at last on characters. Content that fits
+     * in one chunk is not split.
+     *
+     * @return string[]
+     */
+    private function chunkContent(array $content): array
+    {
+        $mainContent = $content['content'] ?? '';
+        $chunkSize = max(1, (int)$this->config['chunk_size']);
+        if (!is_string($mainContent) || mb_strlen($mainContent, 'UTF-8') <= $chunkSize) {
+            return [];
+        }
+
+        // An overlap as long as the chunk would repeat the whole of it in the next one
+        $overlap = min(max(0, (int)$this->config['chunk_overlap']), $chunkSize - 1);
+        $chunks = [];
+        $currentChunk = '';
+        $currentSize = 0;
+
+        $sentences = preg_split('/(?<=[.!?])\s+/', $mainContent, -1, PREG_SPLIT_NO_EMPTY);
+        foreach ($sentences as $sentence) {
+            foreach ($this->splitToFit($sentence, $chunkSize) as $piece) {
+                $pieceSize = mb_strlen($piece, 'UTF-8');
+
+                if ($currentSize + $pieceSize > $chunkSize && $currentChunk !== '') {
+                    $chunks[] = trim($currentChunk);
+
+                    // The overlap leaves room for the piece, so a chunk stays near chunk_size
+                    $room = min($overlap, $chunkSize - $pieceSize - 1);
+                    $currentChunk = $this->getOverlapText($currentChunk, $room) . ' ' . $piece;
+                    $currentSize = mb_strlen($currentChunk, 'UTF-8');
+                } else {
+                    $currentChunk .= ' ' . $piece;
+                    $currentSize += $pieceSize + 1;
+                }
+            }
+        }
+
+        if (trim($currentChunk) !== '') {
             $chunks[] = trim($currentChunk);
         }
 
         return $chunks;
     }
 
+    /**
+     * Cut a text that is longer than $size characters into parts of at most $size: on line
+     * breaks first, then on whitespace, then every $size characters.
+     *
+     * @return string[]
+     */
+    private function splitToFit(string $text, int $size, array $patterns = ['/\R+/', '/\s+/']): array
+    {
+        if (mb_strlen($text, 'UTF-8') <= $size) {
+            return [$text];
+        }
+        if (!$patterns) {
+            return mb_str_split($text, $size, 'UTF-8');
+        }
+
+        $pattern = array_shift($patterns);
+        $parts = [];
+        foreach (preg_split($pattern, $text, -1, PREG_SPLIT_NO_EMPTY) as $part) {
+            $parts[] = $this->splitToFit($part, $size, $patterns);
+        }
+
+        return array_merge([], ...$parts);
+    }
+
     private function getOverlapText(string $text, int $overlapSize): string
     {
-        if (strlen($text) <= $overlapSize) {
+        if ($overlapSize <= 0) {
+            return '';
+        }
+        if (mb_strlen($text, 'UTF-8') <= $overlapSize) {
             return $text;
         }
 
@@ -570,7 +643,7 @@ class Indexer implements IndexerInterface
 
         for ($i = count($words) - 1; $i >= 0 && $currentSize < $overlapSize; $i--) {
             array_unshift($overlapWords, $words[$i]);
-            $currentSize += strlen($words[$i]) + 1;
+            $currentSize += mb_strlen($words[$i], 'UTF-8') + 1;
         }
 
         return implode(' ', $overlapWords);

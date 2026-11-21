@@ -163,10 +163,16 @@ class SearchQuery
         return $this->fuzziness;
     }
 
-    public function highlight(bool $highlight = true, int $length = 150): self
+    /**
+     * Turn highlighting on or off. The length of the highlights changes only
+     * when one is given, so a snippetLength() set before is kept.
+     */
+    public function highlight(bool $highlight = true, ?int $length = null): self
     {
         $this->highlight = $highlight;
-        $this->highlightLength = $length;
+        if ($length !== null) {
+            $this->highlightLength = $length;
+        }
         return $this;
     }
 

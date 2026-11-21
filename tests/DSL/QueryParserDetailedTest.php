@@ -76,10 +76,6 @@ class QueryParserDetailedTest extends TestCase
 
     // ──────────────────────────────────────
     // Numeric Filter Values
-    // Note: Positive numbers are tokenized as 'field' type
-    // (not 'number') due to tokenizer regex ordering, so they
-    // come through as string values. Negative numbers correctly
-    // tokenize as 'number' type and are cast to int/float.
     // ──────────────────────────────────────
 
     public function testParsesPositiveIntegerFilterValue(): void
@@ -87,8 +83,7 @@ class QueryParserDetailedTest extends TestCase
         $result = $this->parser->parse('count = 42');
         $filters = $result->getFilters();
         $this->assertCount(1, $filters);
-        // Positive numbers tokenize as 'field' type, returned as string
-        $this->assertEquals('42', $filters[0]['value']);
+        $this->assertSame(42, $filters[0]['value']);
     }
 
     public function testParsesPositiveFloatFilterValue(): void
@@ -96,8 +91,7 @@ class QueryParserDetailedTest extends TestCase
         $result = $this->parser->parse('price = 19.99');
         $filters = $result->getFilters();
         $this->assertCount(1, $filters);
-        // Dot-notation numbers match the field pattern (\w+\.\w+)
-        $this->assertEquals('19.99', $filters[0]['value']);
+        $this->assertSame(19.99, $filters[0]['value']);
     }
 
     public function testParsesNegativeNumberFilterValue(): void
@@ -105,7 +99,6 @@ class QueryParserDetailedTest extends TestCase
         $result = $this->parser->parse('score = -5');
         $filters = $result->getFilters();
         $this->assertCount(1, $filters);
-        // Negative numbers correctly tokenize as 'number' type
         $this->assertSame(-5, $filters[0]['value']);
     }
 
@@ -236,12 +229,10 @@ class QueryParserDetailedTest extends TestCase
 
     public function testParsesInWithNumericValues(): void
     {
-        // Positive numbers in arrays are strings (tokenizer limitation)
         $result = $this->parser->parse('rating IN [1, 2, 3, 4, 5]');
         $filters = $result->getFilters();
         $this->assertCount(1, $filters);
-        $this->assertCount(5, $filters[0]['value']);
-        $this->assertEquals(['1', '2', '3', '4', '5'], $filters[0]['value']);
+        $this->assertSame([1, 2, 3, 4, 5], $filters[0]['value']);
     }
 
     public function testParsesNotInOperator(): void
@@ -406,34 +397,25 @@ class QueryParserDetailedTest extends TestCase
 
     // ──────────────────────────────────────
     // LIMIT / OFFSET / PAGE Keywords
-    // Note: The tokenizer regex matches positive numbers as
-    // 'field' type before reaching the 'number' pattern.
-    // This means parsePagination (which checks for 'number'
-    // type) cannot read standalone positive numbers. This is
-    // a known limitation affecting LIMIT, OFFSET, and PAGE.
-    // The tests below verify the current actual behavior.
     // ──────────────────────────────────────
 
-    public function testLimitKeywordFallsBackToDefaultForPositiveNumbers(): void
+    public function testParsesLimitKeyword(): void
     {
-        // Known limitation: LIMIT 50 doesn't parse because 50 is tokenized as 'field' not 'number'
         $result = $this->parser->parse('LIMIT 50');
-        $this->assertEquals(20, $result->getLimit()); // Default
+        $this->assertSame(50, $result->getLimit());
     }
 
-    public function testOffsetKeywordFallsBackToDefaultForPositiveNumbers(): void
+    public function testParsesOffsetKeyword(): void
     {
-        // Known limitation: same tokenizer issue
         $result = $this->parser->parse('OFFSET 20');
-        $this->assertEquals(0, $result->getOffset()); // Default
+        $this->assertSame(20, $result->getOffset());
     }
 
-    public function testPageKeywordUsesDefaults(): void
+    public function testPageKeywordDefaultsToTenPerPage(): void
     {
-        // PAGE numbers aren't read, defaults (pageNum=1, pageSize=10) apply
-        $result = $this->parser->parse('PAGE 1');
-        $this->assertEquals(10, $result->getLimit());
-        $this->assertEquals(0, $result->getOffset());
+        $result = $this->parser->parse('PAGE 3');
+        $this->assertSame(10, $result->getLimit());
+        $this->assertSame(20, $result->getOffset());
     }
 
     // ──────────────────────────────────────

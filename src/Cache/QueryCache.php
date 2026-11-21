@@ -181,27 +181,6 @@ class QueryCache
         }
     }
 
-    public function invalidateByQuery(string $indexName, string $queryPattern): int
-    {
-        if (!$this->enabled) {
-            return 0;
-        }
-
-        try {
-            $sql = "DELETE FROM {$this->cacheTable} WHERE index_name = ? AND query_hash LIKE ?";
-            $stmt = $this->connection->prepare($sql);
-            $stmt->execute([$indexName, '%' . $queryPattern . '%']);
-
-            $deleted = $stmt->rowCount();
-            $this->stats['evictions'] += $deleted;
-
-            return $deleted;
-        } catch (\PDOException $e) {
-            $this->stats['errors']++;
-            return 0;
-        }
-    }
-
     public function clear(): int
     {
         if (!$this->enabled) {
@@ -294,28 +273,20 @@ class QueryCache
         return $encoded === false ? null : $encoded;
     }
 
+    /**
+     * The query as its key sees it: every parameter, as each one can change the
+     * results, except the ones that only say how to run it. A null parameter is
+     * the same as a missing one.
+     */
     private function normalizeQueryParams(array $params): array
     {
-        // Sort parameters for consistent key generation
+        unset($params['bypass_cache'], $params['_debug_sql']);
+        $params = array_filter($params, function ($value) {
+            return $value !== null;
+        });
         ksort($params);
 
-        // Include only cache-relevant parameters
-        $relevant = [
-            'query', 'filters', 'limit', 'offset', 'sort',
-            'language', 'geoFilters', 'field_weights', 'fields',
-            'fuzzy', 'fuzziness', 'boost', 'unique_by_route',
-            // On an index that stems, the stem query decides what matches and its weight the scores
-            'stem_query', 'stem_weight'
-        ];
-
-        $normalized = [];
-        foreach ($relevant as $key) {
-            if (isset($params[$key])) {
-                $normalized[$key] = $params[$key];
-            }
-        }
-
-        return $normalized;
+        return $params;
     }
 
     public function getStats(): array

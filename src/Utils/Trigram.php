@@ -33,7 +33,7 @@ class Trigram
      */
     public static function generateNgrams(string $str, int $n = self::DEFAULT_N, bool $padding = true): array
     {
-        if (mb_strlen($str) === 0) {
+        if ($str === '') {
             return [];
         }
 
@@ -47,12 +47,19 @@ class Trigram
         }
 
         $ngrams = [];
-        $length = mb_strlen($str);
 
-        // Generate n-grams
-        for ($i = 0; $i <= $length - $n; $i++) {
-            $ngram = mb_substr($str, $i, $n);
-            $ngrams[] = $ngram;
+        // ASCII is cut by bytes; other text is split into characters once
+        if (!preg_match('/[\x80-\xFF]/', $str)) {
+            for ($i = 0, $last = strlen($str) - $n; $i <= $last; $i++) {
+                $ngrams[] = substr($str, $i, $n);
+            }
+
+            return $ngrams;
+        }
+
+        $chars = mb_str_split($str);
+        for ($i = 0, $last = count($chars) - $n; $i <= $last; $i++) {
+            $ngrams[] = implode('', array_slice($chars, $i, $n));
         }
 
         return $ngrams;
@@ -72,27 +79,27 @@ class Trigram
             return 1.0;
         }
 
-        $ngrams1 = self::generateNgrams($str1, $n);
-        $ngrams2 = self::generateNgrams($str2, $n);
+        return self::jaccard(self::generateNgrams($str1, $n), self::generateNgrams($str2, $n));
+    }
 
+    /**
+     * Jaccard similarity of two n-gram lists, counting repeated n-grams
+     */
+    private static function jaccard(array $ngrams1, array $ngrams2): float
+    {
         if (empty($ngrams1) || empty($ngrams2)) {
             return 0.0;
         }
 
-        // Calculate intersection and union
-        $freq1 = array_count_values($ngrams1);
         $freq2 = array_count_values($ngrams2);
-
         $intersection = 0;
-        foreach ($freq1 as $ngram => $count1) {
+        foreach (array_count_values($ngrams1) as $ngram => $count1) {
             if (isset($freq2[$ngram])) {
                 $intersection += min($count1, $freq2[$ngram]);
             }
         }
 
-        $union = count($ngrams1) + count($ngrams2) - $intersection;
-
-        return $union > 0 ? $intersection / $union : 0.0;
+        return $intersection / (count($ngrams1) + count($ngrams2) - $intersection);
     }
 
     /**
@@ -143,14 +150,17 @@ class Trigram
     {
         $matches = [];
 
-        // Pre-generate search n-grams for efficiency
+        // The search term's n-grams are made once
         $searchNgrams = self::generateNgrams($search, $n);
         if (empty($searchNgrams)) {
             return [];
         }
 
         foreach ($candidates as $candidate) {
-            $similarity = self::similarity($search, $candidate, $n);
+            $candidate = (string)$candidate;
+            $similarity = $candidate === $search
+                ? 1.0
+                : self::jaccard($searchNgrams, self::generateNgrams($candidate, $n));
             if ($similarity >= $threshold) {
                 $matches[] = [$candidate, $similarity];
             }
